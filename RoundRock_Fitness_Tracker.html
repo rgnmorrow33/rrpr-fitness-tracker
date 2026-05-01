@@ -3589,7 +3589,7 @@
 
     /* Filter to classes I'm teaching today (primary instructor or subbing) */
     var myClassesToday = todayOccs.filter(function(o){
-      var c = ctx.classes.find(function(x){ return x.id === o.classId; });
+      var c = o.cls;
       if (!c) return false;
       /* Primary instructor */
       if (trainerNameMatches(trainerName, c.instructor)) return true;
@@ -3686,9 +3686,9 @@
           '\ud83c\udfc3 GX classes today (' + myClassesToday.length + ')'
         ),
         myClassesToday.map(function(o){
-          var c = ctx.classes.find(function(x){ return x.id === o.classId; });
+          var c = o.cls;
           return e('div', {
-            key: o.classId + ':' + o.date,
+            key: c.id + ':' + o.date,
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
