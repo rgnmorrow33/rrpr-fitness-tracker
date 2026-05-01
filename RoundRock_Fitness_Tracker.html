@@ -3582,6 +3582,16 @@
     var todayDate = parseYMD(todayYMD);
     var todayDow = IDX_TO_DOW[todayDate.getDay()];
 
+    /* Tap-to-open state. Mirrors the patterns in TrainerGX (ClassDetail
+       swap), TrainerPT (ClientDetail swap), and TrainerLeads (PostWROModal
+       overlay) so a card tap on Today reuses the existing flows. */
+    var classDetailIdTuple = useState(null);
+    var classDetailId = classDetailIdTuple[0]; var setClassDetailId = classDetailIdTuple[1];
+    var clientDetailIdTuple = useState(null);
+    var clientDetailId = clientDetailIdTuple[0]; var setClientDetailId = clientDetailIdTuple[1];
+    var wroOpenTuple = useState(null);
+    var wroOpen = wroOpenTuple[0]; var setWroOpen = wroOpenTuple[1];
+
     /* Today's class occurrences */
     var todayOccs = useMemo(function(){
       return occurrencesInWindow(ctx.classes, todayDate, todayDate, ctx.closures);
@@ -3625,6 +3635,20 @@
     var summary = calcTrainerHours(trainerName, 0, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
 
     var todayCount = myClassesToday.length + ptSessionsToday.length + myWrosToday.length;
+
+    /* Full-screen detail swaps. Same pattern as TrainerGX/TrainerPT: when
+       a detail id is set, return the detail component instead of the
+       Today list. Closing returns here without changing tabs. */
+    if (classDetailId) {
+      var clForDetail = ctx.classes.find(function(x){ return x.id === classDetailId; });
+      if (!clForDetail) { setClassDetailId(null); return null; }
+      return e(ClassDetail, { ctx: ctx, cls: clForDetail, onBack: function(){ setClassDetailId(null); }, canEdit: true });
+    }
+    if (clientDetailId) {
+      var cliForDetail = ctx.clients.find(function(x){ return x.id === clientDetailId; });
+      if (!cliForDetail) { setClientDetailId(null); return null; }
+      return e(ClientDetail, { ctx: ctx, client: cliForDetail, onBack: function(){ setClientDetailId(null); }, canEdit: true });
+    }
 
     return e('div', null,
       /* Today header - emphasizes the actual date */
@@ -3689,13 +3713,15 @@
           var c = o.cls;
           return e('div', {
             key: c.id + ':' + o.date,
+            onClick: function(){ setClassDetailId(c.id); },
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
               borderRadius: '12px',
               padding: '12px 14px',
               marginBottom: '8px',
-              borderLeft: '4px solid #7B68B6'
+              borderLeft: '4px solid #7B68B6',
+              cursor: 'pointer'
             }
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
@@ -3718,13 +3744,15 @@
         ptSessionsToday.map(function(item){
           return e('div', {
             key: item.client.id + ':' + (item.session.id || item.session.timeIn),
+            onClick: function(){ setClientDetailId(item.client.id); },
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
               borderRadius: '12px',
               padding: '12px 14px',
               marginBottom: '8px',
-              borderLeft: '4px solid var(--teal)'
+              borderLeft: '4px solid var(--teal)',
+              cursor: 'pointer'
             }
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
@@ -3749,13 +3777,15 @@
           var state = wroState(w);
           return e('div', {
             key: w.id,
+            onClick: function(){ setWroOpen(w); },
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
               borderRadius: '12px',
               padding: '12px 14px',
               marginBottom: '8px',
-              borderLeft: '4px solid ' + WRO_STATE_COLOR[state]
+              borderLeft: '4px solid ' + WRO_STATE_COLOR[state],
+              cursor: 'pointer'
             }
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
@@ -3793,7 +3823,18 @@
         e('div', { style: { fontSize: '36px', marginBottom: '8px' } }, '\u2728'),
         e('div', { style: { fontSize: '15px', color: 'var(--navy)', fontWeight: 600, marginBottom: '4px' } }, 'Nothing scheduled today'),
         e('div', { style: { fontSize: '13px' } }, 'Tap PT, GX, or Leads tabs to see your full schedule and queue.')
-      )
+      ),
+
+      wroOpen && e(PostWROModal, {
+        ctx: ctx,
+        wro: wroOpen,
+        onClose: function(){ setWroOpen(null); },
+        onSave: function(updated){
+          ctx.upsertWRO(updated);
+          setWroOpen(null);
+          ctx.toast('Orientation saved ✓');
+        }
+      })
     );
   }
 
