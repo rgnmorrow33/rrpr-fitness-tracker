@@ -1561,6 +1561,32 @@
     var u = String(v).toUpperCase().trim();
     return DOW_ALIASES[u] || null;
   }
+
+  /* Field-level intake validation. Applied only on new submits going
+     forward; existing records that lack these fields are not flagged. */
+  function isValidEmail(s){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((s || '').trim()); }
+  function phoneDigitCount(s){ return ((s || '').match(/\d/g) || []).length; }
+  function intakeFieldErrors(form){
+    var errors = {};
+    var name = (form.name || form.participantName || '').trim();
+    var phone = (form.phone || '').trim();
+    var email = (form.email || '').trim();
+    if (!name) errors.name = 'Name is required';
+    if (!phone && !email) {
+      errors.phone = 'At least one contact method (email or phone) is required';
+      errors.email = 'At least one contact method (email or phone) is required';
+    } else {
+      if (email && !isValidEmail(email)) errors.email = 'Email must be a valid email address';
+      if (phone && phoneDigitCount(phone) < 10) errors.phone = 'Phone must be at least 10 digits';
+    }
+    return errors;
+  }
+  function hasErrors(errors){
+    if (!errors) return false;
+    for (var k in errors) { if (errors[k]) return true; }
+    return false;
+  }
+
   function parseYMD(s){
     if (!s) return null;
     var parts = s.split('-');
@@ -2357,6 +2383,57 @@
     }, 0);
     var contactsCapped = (contactsRawMinutes / 60) > CONTACT_ADMIN_CAP_HOURS;
 
+    /* Service recovery hours: optional admin time logged for no_show /
+       late_cancel sessions and cancelled class occurrences. Same admin
+       bucket as manualAdmin (paid, not forward-facing) but tracked
+       separately for time card visibility. Credit goes to recovery.loggedBy
+       when set, falling back to the client's primary trainer (sessions) or
+       the class instructor (cancellations) for legacy records. */
+    var recoveryEntries = [];
+    var recoveryHours = 0;
+    clients.forEach(function(c){
+      (c.sessions || []).forEach(function(s){
+        var r = s.serviceRecovery;
+        if (!r || !(typeof r.durationHours === 'number') || r.durationHours <= 0) return;
+        if (!s.date || s.date < startYMD || s.date > endYMD) return;
+        var loggedBy = r.loggedBy || c.trainerName;
+        if (!trainerNameMatches(trainerName, loggedBy)) return;
+        recoveryEntries.push({
+          kind: 'session',
+          sourceId: s.id,
+          sourceClientId: c.id,
+          sourceClientName: c.name,
+          sourceLabel: c.name + ' · ' + (s.status === 'no_show' ? 'no-show' : s.status === 'late_cancel' ? 'late cancel' : s.status),
+          date: s.date,
+          hours: r.durationHours,
+          description: r.description || (r.note || ''),
+          loggedBy: loggedBy
+        });
+        recoveryHours += r.durationHours;
+      });
+    });
+    classes.forEach(function(cls){
+      (cls.cancellations || []).forEach(function(x){
+        var r = x.serviceRecovery;
+        if (!r || !(typeof r.durationHours === 'number') || r.durationHours <= 0) return;
+        if (!x.date || x.date < startYMD || x.date > endYMD) return;
+        var loggedBy = r.loggedBy || cls.instructor;
+        if (!trainerNameMatches(trainerName, loggedBy)) return;
+        recoveryEntries.push({
+          kind: 'class_cancellation',
+          sourceId: x.id,
+          sourceClassId: cls.id,
+          sourceClassName: cls.name,
+          sourceLabel: cls.name + ' · cancelled (' + (x.reason || 'no reason') + ')',
+          date: x.date,
+          hours: r.durationHours,
+          description: r.description || '',
+          loggedBy: loggedBy
+        });
+        recoveryHours += r.durationHours;
+      });
+    });
+
     return {
       trainer: trainerName,
       payPeriod: {
@@ -2399,7 +2476,11 @@
         capped: contactsCapped,
         cap: CONTACT_ADMIN_CAP_HOURS
       },
-      grandTotal: Math.round((forwardTotal + autoAdmin + manualAdminH + contactAdminH) * 100) / 100,
+      serviceRecovery: {
+        entries: recoveryEntries,
+        hours: Math.round(recoveryHours * 100) / 100
+      },
+      grandTotal: Math.round((forwardTotal + autoAdmin + manualAdminH + contactAdminH + recoveryHours) * 100) / 100,
       subLosses: subLosses
     };
   }
@@ -2665,6 +2746,18 @@
           if (c.id !== classId) return c;
           var copy = Object.assign({}, c);
           copy.cancellations = (c.cancellations || []).filter(function(x){ return x.id !== cancellationId; });
+          return copy;
+        });
+      });
+    }
+    function updateCancellation(classId, cancellationId, patch){
+      setClasses(function(list){
+        return list.map(function(c){
+          if (c.id !== classId) return c;
+          var copy = Object.assign({}, c);
+          copy.cancellations = (c.cancellations || []).map(function(x){
+            return x.id === cancellationId ? Object.assign({}, x, patch) : x;
+          });
           return copy;
         });
       });
@@ -3112,6 +3205,7 @@
       deleteSubAssignment: deleteSubAssignment,
       addCancellation: addCancellation,
       deleteCancellation: deleteCancellation,
+      updateCancellation: updateCancellation,
       addClosure: addClosure,
       removeClosure: removeClosure,
       upsertWRO: upsertWRO,
@@ -3329,7 +3423,7 @@
 
     var keys = ['1','2','3','4','5','6','7','8','9','','0','⌫'];
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '360px' } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Admin PIN'),
@@ -3729,7 +3823,8 @@
             summary.forwardFacing.total.toFixed(2) + ' fwd + ' +
             summary.autoAdmin.hours.toFixed(2) + ' auto + ' +
             summary.manualAdmin.hours.toFixed(2) + ' manual + ' +
-            summary.contacts.hours.toFixed(2) + ' contacts'
+            summary.contacts.hours.toFixed(2) + ' contacts + ' +
+            (summary.serviceRecovery && summary.serviceRecovery.hours || 0).toFixed(2) + ' recovery'
           )
         ),
         e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '22px', color: 'var(--teal)' } },
@@ -3748,7 +3843,10 @@
             key: c.id + ':' + o.date,
             onClick: function(){
               setClassDetailId(c.id);
-              setHeaderContext({ title: c.name, sub: c.location });
+              setHeaderContext({
+                title: c.name, sub: c.location,
+                onBack: function(){ setClassDetailId(null); setHeaderContext(null); }
+              });
             },
             style: {
               background: '#fff',
@@ -3792,7 +3890,10 @@
             key: item.client.id + ':' + (sess.id || sess.date + sess.time),
             onClick: function(){
               setClientDetailId(item.client.id);
-              setHeaderContext({ title: item.client.name, sub: item.client.location });
+              setHeaderContext({
+                title: item.client.name, sub: item.client.location,
+                onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
+              });
             },
             style: {
               background: '#fff',
@@ -3963,6 +4064,18 @@
 
     return e('div', null,
       e('div', { className: 'header' },
+        /* Back chevron when in detail mode. Calls the onBack supplied by
+           the tab that pushed the headerContext (which clears its detail
+           state and the headerContext itself). */
+        headerContext && headerContext.onBack && e('button', {
+          onClick: headerContext.onBack,
+          'aria-label': 'Back',
+          style: {
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: 'var(--navy)', fontSize: '24px', lineHeight: 1,
+            padding: '0 8px 0 0', marginRight: '4px', flexShrink: 0
+          }
+        }, '←'),
         e('div', { style: { minWidth: 0, flex: 1 } },
           headerContext
             ? [
@@ -4017,7 +4130,8 @@
               summary.forwardFacing.total.toFixed(2) + ' fwd + ' +
               summary.autoAdmin.hours.toFixed(2) + ' auto + ' +
               summary.manualAdmin.hours.toFixed(2) + ' manual + ' +
-              summary.contacts.hours.toFixed(2) + ' contacts'
+              summary.contacts.hours.toFixed(2) + ' contacts + ' +
+            (summary.serviceRecovery && summary.serviceRecovery.hours || 0).toFixed(2) + ' recovery'
             ),
             todayContactCount > 0 && e('div', { style: { fontSize: '11px', color: 'var(--teal)', marginTop: '3px', fontWeight: 600 } },
               todayContactCount + ' contact' + (todayContactCount === 1 ? '' : 's') + ' logged today'
@@ -4153,7 +4267,10 @@
               key: c.id, client: c,
               onClick: function(){
                 setDetailId(c.id);
-                setHeaderContext({ title: c.name, sub: c.location });
+                setHeaderContext({
+                  title: c.name, sub: c.location,
+                  onBack: function(){ setDetailId(null); setHeaderContext(null); }
+                });
               }
             });
           }),
@@ -4238,6 +4355,11 @@
     var recoveryTargetTuple = useState(null);
     var recoveryTarget = recoveryTargetTuple[0];
     var setRecoveryTarget = recoveryTargetTuple[1];
+
+    /* Holds the session being viewed in the read-only detail modal. */
+    var detailSessionTuple = useState(null);
+    var detailSession = detailSessionTuple[0];
+    var setDetailSession = detailSessionTuple[1];
 
     var isAdmin = ctx.session && ctx.session.role === 'admin';
 
@@ -4391,7 +4513,12 @@
                 var stColor = SESSION_STATUS_COLOR[st];
                 var stLabel = SESSION_STATUS_LABEL[st];
                 var isAttended = st === 'attended';
-                return e('div', { key: s.id, className: 'log-row' },
+                return e('div', {
+                  key: s.id,
+                  className: 'log-row',
+                  onClick: function(){ setDetailSession(s); },
+                  style: { cursor: 'pointer' }
+                },
                   e('div', null,
                     formatDate(s.date),
                     !isAttended && e('div', {
@@ -4415,11 +4542,11 @@
                     isAttended
                       ? (s.clientSig
                           ? e('img', { className: 'sig-thumb', src: s.clientSig })
-                          : e('button', { className: 'sig-needed-btn', onClick: function(){ setFillSig({ sessId: s.id }); } }, 'Sign'))
+                          : e('button', { className: 'sig-needed-btn', onClick: function(ev){ ev.stopPropagation(); setFillSig({ sessId: s.id }); } }, 'Sign'))
                       : st === 'scheduled'
                           ? e('button', {
                               className: 'btn btn-sm btn-primary',
-                              onClick: function(){ setSignOff(s); }
+                              onClick: function(ev){ ev.stopPropagation(); setSignOff(s); }
                             }, 'Sign off')
                           : e('span', {
                               style: {
@@ -4444,7 +4571,8 @@
                         style: { color: 'var(--red)', opacity: locked ? 0.4 : 1, cursor: locked ? 'not-allowed' : 'pointer' },
                         disabled: locked,
                         title: locked ? 'Signed sessions cannot be deleted - contact admin to override.' : 'Delete this session',
-                        onClick: function(){
+                        onClick: function(ev){
+                          ev.stopPropagation();
                           if (locked) return;
                           if (window.confirm('Delete this session?')) ctx.deleteSession(c.id, s.id);
                         }
@@ -4483,23 +4611,44 @@
               });
               setSignOff(null);
               ctx.toast('Session signed off ✓');
-              if (needsRecovery) setRecoveryTarget({ sessionId: sessId, status: sess.status });
+              if (needsRecovery) setRecoveryTarget({
+                sessionId: sessId,
+                status: sess.status,
+                durationHours: sess.durationHours || 1
+              });
             } else {
               ctx.addSession(c.id, sess);
               setLogOpen(false);
               ctx.toast('Session logged ✓');
-              if (needsRecovery) setRecoveryTarget({ sessionId: sess.id, status: sess.status });
+              if (needsRecovery) setRecoveryTarget({
+                sessionId: sess.id,
+                status: sess.status,
+                durationHours: sess.durationHours || 1
+              });
             }
           }
         }),
         recoveryTarget && e(ServiceRecoveryModal, {
           ctx: ctx,
-          status: recoveryTarget.status,
+          durationHours: recoveryTarget.durationHours,
+          sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
           onClose: function(){ setRecoveryTarget(null); },
           onSave: function(recovery){
             ctx.updateSession(c.id, recoveryTarget.sessionId, { serviceRecovery: recovery });
             setRecoveryTarget(null);
-            ctx.toast('Recovery actions logged ✓');
+            ctx.toast('Recovery logged ✓');
+          }
+        }),
+        detailSession && e(SessionDetailModal, {
+          ctx: ctx,
+          session: detailSession,
+          client: c,
+          onClose: function(){ setDetailSession(null); },
+          onEdit: function(s){
+            /* Reuse the sign-off path: LogSessionModal in edit mode lets
+               admin re-do status/sigs and writes through updateSession. */
+            setDetailSession(null);
+            setSignOff(s);
           }
         }),
         scheduleOpen && e(ScheduleSessionModal, {
@@ -4635,7 +4784,7 @@
       props.onSave(updated);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Add Package'),
@@ -4734,7 +4883,7 @@
       props.onSave(r);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, existing ? 'Edit PT Referral' : 'Refer to PT'),
@@ -4844,6 +4993,9 @@
     var form = formTuple[0];
     var setForm = formTuple[1];
 
+    var errorsTuple = useState({});
+    var errors = errorsTuple[0]; var setErrors = errorsTuple[1];
+
     /* v2: PAR-Q+ (Physical Activity Readiness Questionnaire) state.
        Answers stored separately from the flat form to keep things clean.
        Standard 7-question version. Any 'yes' surfaces a flag banner; doesn't
@@ -4873,7 +5025,9 @@
     function update(k, v){ setForm(function(f){ var n = Object.assign({}, f); n[k] = v; return n; }); }
 
     function submit(){
-      if (!form.name.trim()) { ctx.toast('Name is required', 'error'); return; }
+      var errs = intakeFieldErrors(form);
+      setErrors(errs);
+      if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
       if (!form.trainerName) { ctx.toast('Trainer is required', 'error'); return; }
       var pkg = PACKAGES[form.pkgIdx];
       var pkgRecord = {
@@ -4932,7 +5086,7 @@
       props.onCreate(out);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, isEdit ? 'Edit Client' : 'New Client'),
@@ -4940,17 +5094,33 @@
         ),
         e('div', { className: 'modal-body' },
           e('div', { className: 'field' },
-            e('label', null, 'Full Name'),
-            e('input', { value: form.name, onChange: function(ev){ update('name', ev.target.value); }, placeholder: 'First Last' })
+            e('label', null, 'Full Name *'),
+            e('input', {
+              value: form.name,
+              onChange: function(ev){ update('name', ev.target.value); },
+              placeholder: 'First Last',
+              style: errors.name ? { borderColor: 'var(--red)' } : null
+            }),
+            errors.name && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.name)
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Phone'),
-              e('input', { value: form.phone, onChange: function(ev){ update('phone', ev.target.value); }, type: 'tel', placeholder: '(512) 555-1234' })
+              e('input', {
+                value: form.phone, onChange: function(ev){ update('phone', ev.target.value); },
+                type: 'tel', placeholder: '(512) 555-1234',
+                style: errors.phone ? { borderColor: 'var(--red)' } : null
+              }),
+              errors.phone && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.phone)
             ),
             e('div', { className: 'field' },
               e('label', null, 'Email'),
-              e('input', { value: form.email, onChange: function(ev){ update('email', ev.target.value); }, type: 'email', placeholder: 'name@example.com' })
+              e('input', {
+                value: form.email, onChange: function(ev){ update('email', ev.target.value); },
+                type: 'email', placeholder: 'name@example.com',
+                style: errors.email ? { borderColor: 'var(--red)' } : null
+              }),
+              errors.email && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.email)
             )
           ),
           e('div', { className: 'row2' },
@@ -5184,7 +5354,7 @@
       props.onSchedule(sess);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h3', null, 'Schedule Session'),
@@ -5227,44 +5397,40 @@
     );
   }
 
-  /* Prompted right after a no-show or late-cancel session is saved, to
-     nudge the trainer toward a service-recovery action (call, follow-up
-     text/email, schedule outreach, or none). The session is already saved
-     when this opens; cancelling just means no recovery is logged. Saved
-     recovery attaches to the session record so admin/other trainers can
-     see follow-up was done. Not triggered for excused absences. */
-  var SERVICE_RECOVERY_ACTIONS = [
-    { id: 'call_now', label: 'Call client now' },
-    { id: 'send_followup', label: 'Send follow-up text/email' },
-    { id: 'schedule_outreach', label: 'Schedule outreach for tomorrow' },
-    { id: 'no_followup', label: 'No follow-up needed' }
-  ];
+  /* Prompted after a no-show / late-cancel session save, or after a class
+     cancellation, to capture service-recovery work the trainer did
+     (description) and credit the matched duration as admin time on the
+     time card. The recovery duration is fixed to the missed session/class
+     length - the trainer cannot exceed it. Source is already saved when
+     this opens; Skip just means no recovery is logged. Not triggered for
+     excused absences. Recovery shape: { description, durationHours,
+     loggedBy, loggedAt }. */
   function ServiceRecoveryModal(props){
     var ctx = props.ctx;
-    var actionsTuple = useState({});
-    var actions = actionsTuple[0]; var setActions = actionsTuple[1];
-    var noteTuple = useState('');
-    var note = noteTuple[0]; var setNote = noteTuple[1];
+    var descriptionTuple = useState('');
+    var description = descriptionTuple[0]; var setDescription = descriptionTuple[1];
 
-    function toggle(id){
-      var copy = Object.assign({}, actions);
-      copy[id] = !copy[id];
-      setActions(copy);
-    }
+    var durationHours = (typeof props.durationHours === 'number' && props.durationHours > 0)
+      ? props.durationHours : 1;
+    var durationMinutes = Math.round(durationHours * 60);
+
     function save(){
-      var picked = SERVICE_RECOVERY_ACTIONS.map(function(a){ return a.id; })
-        .filter(function(id){ return actions[id]; });
+      var trimmed = description.trim();
+      if (!trimmed) {
+        ctx.toast && ctx.toast('Description is required to log recovery', 'error');
+        return;
+      }
       props.onSave({
-        actions: picked,
-        note: note || null,
+        description: trimmed,
+        durationHours: durationHours,
         loggedBy: (ctx.session && ctx.session.name) || null,
         loggedAt: new Date().toISOString()
       });
     }
 
-    var statusLabel = props.status === 'no_show' ? 'no-show' : 'late cancel';
+    var sourceLabel = props.sourceLabel || 'session';
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h3', null, 'Service Recovery'),
@@ -5272,43 +5438,207 @@
         ),
         e('div', { className: 'modal-body' },
           e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
-            'Session saved as ', e('b', null, statusLabel),
-            '. Pick any recovery actions you took (or plan to take). You can skip this and save the session without a recovery log.'
-          ),
-          e('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' } },
-            SERVICE_RECOVERY_ACTIONS.map(function(a){
-              var checked = !!actions[a.id];
-              return e('label', {
-                key: a.id,
-                style: {
-                  display: 'flex', alignItems: 'center', gap: '10px',
-                  padding: '10px 12px', borderRadius: '8px',
-                  border: '1.5px solid ' + (checked ? 'var(--teal)' : 'var(--border)'),
-                  background: checked ? 'var(--teal-bg)' : '#fff',
-                  cursor: 'pointer', fontSize: '14px'
-                }
-              },
-                e('input', {
-                  type: 'checkbox', checked: checked,
-                  onChange: function(){ toggle(a.id); }
-                }),
-                e('span', null, a.label)
-              );
-            })
+            sourceLabel + ' saved. You can log recovery work here, or skip - the source record is already saved either way.'
           ),
           e('div', { className: 'field' },
-            e('label', null, 'Note (optional)'),
-            e('input', {
-              type: 'text', value: note,
-              onChange: function(ev){ setNote(ev.target.value); },
-              placeholder: 'e.g. left voicemail, will retry tomorrow'
+            e('label', null, 'What recovery work did you do? *'),
+            e('textarea', {
+              rows: 4,
+              value: description,
+              onChange: function(ev){ setDescription(ev.target.value); },
+              placeholder: 'Describe what you did - e.g. called the client, left voicemail, sent reschedule text. For facility-caused cancellations, describe what facility work you covered instead.'
             })
+          ),
+          e('div', { style: { padding: '10px 12px', background: 'var(--cream-2)', borderRadius: '8px', fontSize: '13px', color: 'var(--slate)' } },
+            'Recovery duration is fixed at ',
+            e('b', { style: { color: 'var(--navy)' } }, durationMinutes + ' min'),
+            ' (matches the ' + sourceLabel.toLowerCase() + ' length). This credits as admin time on your timecard.'
           )
         ),
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Skip'),
-          e('button', { className: 'btn btn-primary', onClick: save }, 'Save Recovery')
+          e('button', { className: 'btn btn-primary', onClick: save, disabled: !description.trim() }, 'Save Recovery')
         )
+      )
+    );
+  }
+
+  /* Read-only detail view for a single PT session. Shown as a modal so the
+     caller's context (ClientDetail / TimeCardView / etc.) is preserved.
+     Edit and Delete are admin-only; Delete disabled when both signatures
+     are present (matches round-1 lock). The Edit button opens
+     LogSessionModal in edit mode via the parent's onEdit callback. */
+  function SessionDetailModal(props){
+    var ctx = props.ctx;
+    var s = props.session;
+    var client = props.client;
+    var status = s.status || 'attended';
+    var stColor = SESSION_STATUS_COLOR[status] || 'var(--slate)';
+    var stLabel = (SESSION_STATUS_LABEL[status] || status).toUpperCase();
+    var bothSigned = !!(s.trainerSig && s.clientSig);
+    var isAdmin = ctx.session && ctx.session.role === 'admin';
+    var canDelete = isAdmin && !bothSigned;
+    var recovery = s.serviceRecovery || null;
+    var hasRecoveryDescription = !!(recovery && (recovery.description || recovery.note));
+    var hasRecoveryActions = !!(recovery && recovery.actions && recovery.actions.length > 0);
+
+    function doDelete(){
+      if (!canDelete) return;
+      if (!window.confirm('Delete this session?')) return;
+      ctx.deleteSession(client.id, s.id);
+      props.onClose();
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Session Details'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { marginBottom: '14px' } },
+            e('div', { style: { fontWeight: 700, color: 'var(--navy)', fontSize: '16px' } }, client.name),
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
+              formatDate(s.date) + (s.time ? (' · ' + formatTime12(s.time)) : '') +
+              (s.durationHours ? (' · ' + Math.round(s.durationHours * 60) + ' min') : '')
+            ),
+            e('span', {
+              style: {
+                display: 'inline-block', marginTop: '8px',
+                background: stColor, color: '#fff',
+                padding: '4px 12px', borderRadius: '999px',
+                fontSize: '11px', fontWeight: 700, letterSpacing: '0.05em'
+              }
+            }, stLabel)
+          ),
+          e('div', { className: 'row2', style: { marginBottom: '14px' } },
+            e('div', null,
+              e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700, marginBottom: '4px' } }, 'Trainer'),
+              e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '6px' } }, client.trainerName || '—'),
+              s.trainerSig
+                ? e('img', { src: s.trainerSig, style: { maxHeight: '60px', maxWidth: '160px', border: '1px solid var(--border)', borderRadius: '6px', background: '#fff' } })
+                : e('span', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No signature')
+            ),
+            e('div', null,
+              e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700, marginBottom: '4px' } }, 'Client'),
+              e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '6px' } }, client.name),
+              s.clientSig
+                ? e('img', { src: s.clientSig, style: { maxHeight: '60px', maxWidth: '160px', border: '1px solid var(--border)', borderRadius: '6px', background: '#fff' } })
+                : e('span', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, status === 'no_show' ? 'N/A (no-show)' : 'No signature')
+            )
+          ),
+          s.note && e('div', { style: { marginBottom: '14px' } },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700, marginBottom: '4px' } }, 'Note'),
+            e('div', { style: { fontSize: '13px', color: 'var(--navy)', padding: '8px 10px', background: 'var(--cream-2)', borderRadius: '6px' } }, s.note)
+          ),
+          recovery && e('div', { style: { marginBottom: '14px', padding: '10px 12px', background: 'var(--teal-bg)', border: '1.5px solid var(--teal)', borderRadius: '8px' } },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--teal)', fontWeight: 700, marginBottom: '4px' } }, '📞 Service Recovery'),
+            hasRecoveryDescription && e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '6px' } }, recovery.description || recovery.note),
+            hasRecoveryActions && e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, 'Actions: ' + recovery.actions.join(', ')),
+            (typeof recovery.durationHours === 'number') && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+              'Duration credited: ' + Math.round(recovery.durationHours * 60) + ' min · logged by ' + (recovery.loggedBy || 'unknown')
+            )
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
+          isAdmin && props.onEdit && e('button', { className: 'btn btn-outline', onClick: function(){ props.onEdit(s); } }, 'Edit'),
+          isAdmin && e('button', {
+            className: 'btn btn-ghost btn-sm',
+            style: { color: 'var(--red)', opacity: canDelete ? 1 : 0.4, cursor: canDelete ? 'pointer' : 'not-allowed' },
+            disabled: !canDelete,
+            title: canDelete ? 'Delete session' : 'Both signatures present - cannot be deleted',
+            onClick: doDelete
+          }, 'Delete')
+        )
+      )
+    );
+  }
+
+  /* Read-only detail view for a single class occurrence (a specific date
+     of a recurring class). Surfaces the attendance record if logged, the
+     cancellation record if cancelled, and the service recovery if any.
+     Recovery can be edited inline from here (admin/instructor) when the
+     occurrence was cancelled. */
+  function ClassOccurrenceDetailModal(props){
+    var ctx = props.ctx;
+    var cls = props.cls;
+    var date = props.date;
+    var attendance = (cls.attendance || []).find(function(a){ return a.date === date; }) || null;
+    var cancellation = (cls.cancellations || []).find(function(x){ return x.date === date; }) || null;
+    var assignedSub = (cls.subAssignments || []).find(function(s){
+      return s.date === date && (subStatus(s) === 'claimed' || subStatus(s) === 'approved');
+    }) || null;
+    var recoveryEditTuple = useState(false);
+    var recoveryEdit = recoveryEditTuple[0]; var setRecoveryEdit = recoveryEditTuple[1];
+
+    var stripeColor = cancellation ? 'var(--red)' : (attendance ? 'var(--teal)' : 'var(--slate-soft)');
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Class Occurrence'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { borderLeft: '4px solid ' + stripeColor, paddingLeft: '12px', marginBottom: '14px' } },
+            e('div', { style: { fontWeight: 700, color: 'var(--navy)', fontSize: '16px' } }, cls.name),
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
+              formatDate(date) +
+              (cls.startTime ? (' · ' + formatTime12(cls.startTime)) : '') +
+              (cls.endTime ? ('–' + formatTime12(cls.endTime)) : '') +
+              ' · ' + (cls.location || '—') +
+              (cls.room ? (' · ' + cls.room) : '')
+            ),
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } },
+              'Instructor: ' + (cls.instructor || '—') +
+              (assignedSub ? (' → Sub: ' + (assignedSub.subInstructor || assignedSub.claimedBy || 'Unclaimed')) : '')
+            )
+          ),
+          cancellation && e('div', { style: { padding: '10px 12px', background: '#fff5f5', border: '1.5px solid var(--red)', borderRadius: '8px', marginBottom: '14px' } },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--red)', fontWeight: 700, marginBottom: '4px' } }, 'Cancelled'),
+            e('div', { style: { fontSize: '13px', color: 'var(--navy)' } }, cancellation.reason || 'No reason recorded'),
+            cancellation.createdAt && e('div', { style: { fontSize: '11px', color: 'var(--slate)', marginTop: '2px' } }, 'Logged ' + formatShort(parseYMD(cancellation.createdAt.substring(0,10))))
+          ),
+          attendance && e('div', { style: { marginBottom: '14px' } },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700, marginBottom: '4px' } }, 'Attendance'),
+            e('div', { style: { fontSize: '13px', color: 'var(--navy)' } },
+              'Headcount: ', e('b', null, attendance.headcount || 0),
+              attendance.instructor && attendance.instructor !== cls.instructor
+                ? ' · taught by ' + attendance.instructor + ' (sub for ' + cls.instructor + ')'
+                : ''
+            ),
+            attendance.note && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px', fontStyle: 'italic' } }, attendance.note)
+          ),
+          (cancellation && cancellation.serviceRecovery) && e('div', { style: { padding: '10px 12px', background: 'var(--teal-bg)', border: '1.5px solid var(--teal)', borderRadius: '8px', marginBottom: '14px' } },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--teal)', fontWeight: 700, marginBottom: '4px' } }, '📞 Service Recovery'),
+            e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '4px' } }, cancellation.serviceRecovery.description),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
+              Math.round((cancellation.serviceRecovery.durationHours || 0) * 60) + ' min · logged by ' + (cancellation.serviceRecovery.loggedBy || 'unknown')
+            )
+          ),
+          (cancellation && !cancellation.serviceRecovery) && e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic', marginBottom: '14px' } },
+            'No service recovery logged for this cancellation.'
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
+          cancellation && e('button', {
+            className: 'btn btn-primary',
+            onClick: function(){ setRecoveryEdit(true); }
+          }, cancellation.serviceRecovery ? 'Edit Recovery' : 'Log Recovery')
+        ),
+        recoveryEdit && e(ServiceRecoveryModal, {
+          ctx: ctx,
+          durationHours: classDurationHours(cls),
+          sourceLabel: 'Cancelled class',
+          onClose: function(){ setRecoveryEdit(false); },
+          onSave: function(recovery){
+            ctx.updateCancellation(cls.id, cancellation.id, { serviceRecovery: recovery });
+            setRecoveryEdit(false);
+            ctx.toast && ctx.toast('Recovery logged ✓');
+          }
+        })
       )
     );
   }
@@ -5523,7 +5853,7 @@
       );
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Log Session'),
@@ -5540,7 +5870,7 @@
     var sigTuple = useState(null);
     var sig = sigTuple[0];
     var setSig = sigTuple[1];
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Client Signature'),
@@ -5619,7 +5949,10 @@
             style: { borderLeftColor: 'var(--amber)', cursor: 'pointer' },
             onClick: function(){
               setDetailId(c.id);
-              setHeaderContext({ title: c.name, sub: c.location });
+              setHeaderContext({
+                title: c.name, sub: c.location,
+                onBack: function(){ setDetailId(null); setHeaderContext(null); }
+              });
             }
           },
             e('div', { style: { display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:'10px' } },
@@ -5659,7 +5992,10 @@
               key: c.id, cls: c,
               onClick: function(){
                 setDetailId(c.id);
-                setHeaderContext({ title: c.name, sub: c.location });
+                setHeaderContext({
+                  title: c.name, sub: c.location,
+                  onBack: function(){ setDetailId(null); setHeaderContext(null); }
+                });
               }
             });
           }),
@@ -5713,7 +6049,7 @@
     /* Sort by start time */
     available.sort(function(a,b){ return (a.startTime || '') < (b.startTime || '') ? -1 : 1; });
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Cover a Class'),
@@ -5865,6 +6201,18 @@
 
     var isAdmin = ctx.session && ctx.session.role === 'admin';
 
+    /* Service-recovery target for one of this class's cancellations. */
+    var classRecoveryTuple = useState(null);
+    var classRecoveryTarget = classRecoveryTuple[0];
+    var setClassRecoveryTarget = classRecoveryTuple[1];
+
+    /* Class-occurrence detail modal target (a date). */
+    var occurrenceDetailTuple = useState(null);
+    var occurrenceDetailDate = occurrenceDetailTuple[0];
+    var setOccurrenceDetailDate = occurrenceDetailTuple[1];
+
+    var cancellationsSorted = (c.cancellations || []).slice().sort(function(a,b){ return a.date < b.date ? 1 : -1; });
+
     return e('div', null,
       /* Header is suppressed when rendered inside TrainerView's
          consolidated header (hideHeader=true). */
@@ -5916,7 +6264,10 @@
         e('div', { className: 'fab-row' },
           e('button', { className: 'btn btn-teal', onClick: function(){ setLogOpen(true); } }, '+ Log Attendance'),
           canManageSubs && e('button', { className: 'btn btn-amber', onClick: function(){ setAssignSubOpen(true); } }, '+ Assign Sub'),
-          props.canEdit && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
+          /* Edit Class is admin-only: changes class structure (name, time,
+             instructor, room, capacity, etc.). Trainers retain attendance,
+             sub assignment, and per-occurrence cancellation. */
+          props.canEdit && isAdmin && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
         ),
 
         /* Sub assignments section */
@@ -5973,7 +6324,11 @@
               ),
               att.slice().reverse().map(function(a){
                 var wasSub = a.instructor && a.instructor !== c.instructor;
-                return e('div', { key: a.id, className: 'log-row' },
+                return e('div', {
+                  key: a.id, className: 'log-row',
+                  onClick: function(){ setOccurrenceDetailDate(a.date); },
+                  style: { cursor: 'pointer' }
+                },
                   e('div', null, formatDate(a.date)),
                   e('div', null, a.time || ''),
                   e('div', { className: 'col-trainer', style: { fontSize: '13px' } },
@@ -5986,16 +6341,65 @@
                   e('button', {
                     className: 'btn btn-ghost btn-sm',
                     style: { color: 'var(--red)' },
-                    onClick: function(){
+                    onClick: function(ev){
+                      ev.stopPropagation();
                       if (window.confirm('Delete this attendance record?')) ctx.deleteAttendance(c.id, a.id);
                     }
                   }, '✕')
                 );
               })
             ),
+        cancellationsSorted.length > 0 && e('div', { style: { marginTop: '18px' } },
+          e('h3', { style: { fontSize: '20px', marginBottom: '8px' } }, 'Cancellations (' + cancellationsSorted.length + ')'),
+          cancellationsSorted.map(function(x){
+            var hasRecovery = !!(x.serviceRecovery && x.serviceRecovery.description);
+            return e('div', {
+              key: x.id,
+              style: {
+                background: 'var(--cream-2)',
+                border: '1.5px solid var(--border)',
+                borderLeft: '4px solid var(--red)',
+                borderRadius: '10px',
+                padding: '10px 12px',
+                marginBottom: '8px',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap'
+              }
+            },
+              e('div', { style: { flex: 1, minWidth: '160px' } },
+                e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, formatShort(parseYMD(x.date)) + ' · ' + (x.reason || 'Cancelled')),
+                hasRecovery
+                  ? e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+                      '📞 Recovery (' + Math.round((x.serviceRecovery.durationHours || 0) * 60) + ' min · ' + (x.serviceRecovery.loggedBy || 'unknown') + '): ' + x.serviceRecovery.description
+                    )
+                  : e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '4px', fontStyle: 'italic' } }, 'No recovery logged')
+              ),
+              e('button', {
+                className: 'btn btn-sm ' + (hasRecovery ? 'btn-outline' : 'btn-primary'),
+                onClick: function(){
+                  setClassRecoveryTarget({ cancellationId: x.id, durationHours: classDurationHours(c), existing: x.serviceRecovery || null });
+                }
+              }, hasRecovery ? 'Edit Recovery' : 'Log Recovery')
+            );
+          })
+        ),
         props.canEdit && isAdmin && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Class')
         ),
+        classRecoveryTarget && e(ServiceRecoveryModal, {
+          ctx: ctx,
+          durationHours: classRecoveryTarget.durationHours,
+          sourceLabel: 'Cancelled class',
+          onClose: function(){ setClassRecoveryTarget(null); },
+          onSave: function(recovery){
+            ctx.updateCancellation(c.id, classRecoveryTarget.cancellationId, { serviceRecovery: recovery });
+            setClassRecoveryTarget(null);
+            ctx.toast('Recovery logged ✓');
+          }
+        }),
+        occurrenceDetailDate && e(ClassOccurrenceDetailModal, {
+          ctx: ctx, cls: c, date: occurrenceDetailDate,
+          onClose: function(){ setOccurrenceDetailDate(null); }
+        }),
         logOpen && e(LogAttendanceModal, {
           ctx: ctx,
           cls: c,
@@ -6124,7 +6528,7 @@
       props.onCreate(out);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, isEdit ? 'Edit Class' : 'New Class'),
@@ -6356,7 +6760,7 @@
       props.onLog(att);
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Log Attendance'),
@@ -6457,7 +6861,7 @@
     var dayMatch = d && IDX_TO_DOW[d.getDay()] === normalizeDow(props.cls.dayOfWeek);
     var existing = getAssignedSubForDate(props.cls, date);
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Assign Sub'),
@@ -6619,7 +7023,7 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop', onClick: props.onClose },
+    return e('div', { className: 'modal-backdrop' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-head' },
           e('h3', null, existing ? 'Edit Admin Time' : 'Log Admin Time'),
@@ -6733,7 +7137,7 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '480px' } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Log Contact'),
@@ -6835,6 +7239,7 @@
     var phoneTuple = useState(''); var phone = phoneTuple[0]; var setPhone = phoneTuple[1];
     var emailTuple = useState(''); var email = emailTuple[0]; var setEmail = emailTuple[1];
     var noteTuple = useState(''); var note = noteTuple[0]; var setNote = noteTuple[1];
+    var errorsTuple = useState({}); var errors = errorsTuple[0]; var setErrors = errorsTuple[1];
     /* v2.3: source captures where the lead came from (drives Rick's report).
        Default to walk_in since that's the most common front-desk capture. */
     var sourceTuple = useState(props.defaultSource || 'walk_in');
@@ -6846,7 +7251,9 @@
     var followUp = followUpTuple[0]; var setFollowUp = followUpTuple[1];
 
     function submit(){
-      if (!name.trim()) { ctx.toast('Name is required', 'error'); return; }
+      var errs = intakeFieldErrors({ name: name, phone: phone, email: email });
+      setErrors(errs);
+      if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
       var nowIso = new Date().toISOString();
       var entry = {
         id: 'q_' + uid(),
@@ -6880,7 +7287,7 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop', onClick: props.onClose },
+    return e('div', { className: 'modal-backdrop' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-head' },
           e('h3', null, 'Add to Consult Queue'),
@@ -6888,17 +7295,32 @@
         ),
         e('div', { className: 'modal-body' },
           e('div', { className: 'field' },
-            e('label', null, 'Name'),
-            e('input', { type: 'text', value: name, onChange: function(ev){ setName(ev.target.value); } })
+            e('label', null, 'Name *'),
+            e('input', {
+              type: 'text', value: name,
+              onChange: function(ev){ setName(ev.target.value); },
+              style: errors.name ? { borderColor: 'var(--red)' } : null
+            }),
+            errors.name && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.name)
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Phone'),
-              e('input', { type: 'tel', value: phone, onChange: function(ev){ setPhone(ev.target.value); } })
+              e('input', {
+                type: 'tel', value: phone,
+                onChange: function(ev){ setPhone(ev.target.value); },
+                style: errors.phone ? { borderColor: 'var(--red)' } : null
+              }),
+              errors.phone && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.phone)
             ),
             e('div', { className: 'field' },
               e('label', null, 'Email'),
-              e('input', { type: 'email', value: email, onChange: function(ev){ setEmail(ev.target.value); } })
+              e('input', {
+                type: 'email', value: email,
+                onChange: function(ev){ setEmail(ev.target.value); },
+                style: errors.email ? { borderColor: 'var(--red)' } : null
+              }),
+              errors.email && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.email)
             )
           ),
           /* v2.3: source picker - drives the Rick conversion-by-source report */
@@ -6967,7 +7389,7 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop', onClick: props.onClose },
+    return e('div', { className: 'modal-backdrop' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-head' },
           e('h3', null, titleMap[newStatus] || 'Update Lead'),
@@ -7068,7 +7490,7 @@
 
     var history = (lead.statusHistory || []).slice().reverse();
 
-    return e('div', { className: 'modal-backdrop', onClick: props.onClose },
+    return e('div', { className: 'modal-backdrop' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '560px' } },
         e('div', { className: 'modal-head' },
           e('h3', null, lead.name),
@@ -7221,7 +7643,7 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop', onClick: props.onClose },
+    return e('div', { className: 'modal-backdrop' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-head' },
           e('h3', null, action === 'approve' ? 'Approve Sub' : 'Deny Sub'),
@@ -7696,6 +8118,61 @@
             )
       ),
 
+      /* Service Recovery section: distinct from manual admin in the
+         display, but accounted in the same paid-but-not-forward bucket.
+         Each entry references the source session or cancellation; clicks
+         drill into the relevant detail modal via props.openSessionDetail
+         / props.openOccurrenceDetail when those handlers are wired in. */
+      e('div', {
+        style: {
+          background: '#fff',
+          border: '1.5px solid var(--border)',
+          borderRadius: '12px',
+          marginBottom: '14px',
+          overflow: 'hidden'
+        },
+        title: 'Service recovery: paid admin time logged for no_show / late_cancel sessions and cancelled class occurrences. Counts toward your total but is not forward-facing.'
+      },
+        e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
+          e('h3', { style: { fontSize: '14px', margin: 0, color: 'var(--navy)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } },
+            '📞 Service Recovery (' + (card.serviceRecovery && card.serviceRecovery.entries.length || 0) + ')'
+          ),
+          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } },
+            'Subtotal: ' + (card.serviceRecovery && card.serviceRecovery.hours || 0).toFixed(2) + ' hr'
+          )
+        ),
+        (card.serviceRecovery && card.serviceRecovery.entries.length === 0)
+          ? e('div', { style: { padding: '14px', fontStyle: 'italic', color: 'var(--slate-soft)', fontSize: '13px' } },
+              'No recovery hours logged this period.'
+            )
+          : (card.serviceRecovery && card.serviceRecovery.entries.slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; }).map(function(en, i){
+              var clickHandler = null;
+              if (en.kind === 'session' && props.openSessionDetail) {
+                clickHandler = function(){ props.openSessionDetail(en.sourceClientId, en.sourceId); };
+              } else if (en.kind === 'class_cancellation' && props.openOccurrenceDetail) {
+                clickHandler = function(){ props.openOccurrenceDetail(en.sourceClassId, en.date); };
+              }
+              return e('div', {
+                key: en.sourceId + ':' + i,
+                onClick: clickHandler,
+                style: {
+                  padding: '10px 14px', borderBottom: '1px solid var(--border)',
+                  cursor: clickHandler ? 'pointer' : 'default'
+                }
+              },
+                e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' } },
+                  e('div', { style: { flex: 1 } },
+                    e('div', { style: { fontWeight: 500, color: 'var(--navy)', fontSize: '13px' } }, en.sourceLabel),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } },
+                      formatShort(parseYMD(en.date)) + ' · ' + en.description.substring(0, 80) + (en.description.length > 80 ? '…' : '')
+                    )
+                  ),
+                  e('div', { style: { fontWeight: 600, color: 'var(--teal)', fontSize: '14px' } }, '+' + en.hours.toFixed(2))
+                )
+              );
+            }))
+      ),
+
       /* Grand total */
       e('div', {
         style: {
@@ -7711,7 +8188,7 @@
         ),
         e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '12px' } },
           e('div', { style: { fontSize: '12px', opacity: 0.9 } },
-            'Forward + auto admin + manual admin + contacts'
+            'Forward + auto admin + manual admin + contacts + recovery'
           ),
           e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '40px', lineHeight: 1 } },
             card.grandTotal.toFixed(2)
@@ -10368,7 +10845,7 @@
       );
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '760px' } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Import Clients from RecTrac · Step ' + step + ' of 3'),
@@ -10595,7 +11072,11 @@
     var sig = sigTuple[0];
     var setSig = sigTuple[1];
 
-    function step1Valid(){ return form.participantName.trim().length > 0; }
+    function step1Errors(){
+      return intakeFieldErrors({ name: form.participantName, phone: form.phone, email: form.email });
+    }
+    function step1Valid(){ return !hasErrors(step1Errors()); }
+    var step1Errs = step1Errors();
     function step2Valid(){ return form.goals.length > 0 || form.goalsOther.trim().length > 0; }
     /* Steps 3 and 4 are optional content - anything goes including nothing. */
     function step5Valid(){ return form.followupInterests.length > 0; }
@@ -10667,7 +11148,13 @@
         e('h3', { style: { fontSize: '18px', marginBottom: '10px' } }, '1 · About you'),
         e('div', { className: 'field' },
           e('label', null, 'Full Name *'),
-          e('input', { value: form.participantName, onChange: function(ev){ update('participantName', ev.target.value); }, placeholder: 'First Last' })
+          e('input', {
+            value: form.participantName,
+            onChange: function(ev){ update('participantName', ev.target.value); },
+            placeholder: 'First Last',
+            style: step1Errs.name ? { borderColor: 'var(--red)' } : null
+          }),
+          step1Errs.name && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.name)
         ),
         e('div', { className: 'row2' },
           e('div', { className: 'field' },
@@ -10676,12 +11163,22 @@
           ),
           e('div', { className: 'field' },
             e('label', null, 'Phone'),
-            e('input', { value: form.phone, onChange: function(ev){ update('phone', ev.target.value); }, type: 'tel', placeholder: '(512) 555-1234' })
+            e('input', {
+              value: form.phone, onChange: function(ev){ update('phone', ev.target.value); },
+              type: 'tel', placeholder: '(512) 555-1234',
+              style: step1Errs.phone ? { borderColor: 'var(--red)' } : null
+            }),
+            step1Errs.phone && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.phone)
           )
         ),
         e('div', { className: 'field' },
           e('label', null, 'Email'),
-          e('input', { value: form.email, onChange: function(ev){ update('email', ev.target.value); }, type: 'email', placeholder: 'name@example.com' })
+          e('input', {
+            value: form.email, onChange: function(ev){ update('email', ev.target.value); },
+            type: 'email', placeholder: 'name@example.com',
+            style: step1Errs.email ? { borderColor: 'var(--red)' } : null
+          }),
+          step1Errs.email && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.email)
         ),
         e('div', { className: 'row2' },
           e('div', { className: 'field' },
@@ -10860,7 +11357,7 @@
       );
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Weight Room Orientation · ' + headerLabel),
@@ -10955,7 +11452,7 @@
       props.onSave(Object.assign({}, w, { post: post, postCompleted: true }));
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Specialist Form · ' + w.participantName),
@@ -12206,7 +12703,7 @@
       });
     }
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Mark Class Cancelled'),
@@ -12260,7 +12757,7 @@
 
     var sorted = (ctx.closures || []).slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; });
 
-    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Facility Closure Dates'),
@@ -12328,6 +12825,12 @@
     var cancelTargetTuple = useState(null); /* { cls, date } */
     var cancelTarget = cancelTargetTuple[0];
     var setCancelTarget = cancelTargetTuple[1];
+
+    /* After a cancellation is saved, prompt for service recovery (optional)
+       so the instructor can describe what they did during that slot. */
+    var cancelRecoveryTuple = useState(null); /* { cls, cancellationId, durationHours } */
+    var cancelRecovery = cancelRecoveryTuple[0];
+    var setCancelRecovery = cancelRecoveryTuple[1];
 
     var period = payPeriodByIndex(selectedIdx);
     var nextPeriod = payPeriodByIndex(selectedIdx + 1);
@@ -13060,9 +13563,23 @@
         date: cancelTarget.date,
         onClose: function(){ setCancelTarget(null); },
         onSave: function(c){
-          ctx.addCancellation(cancelTarget.cls.id, c);
+          var cls = cancelTarget.cls;
+          ctx.addCancellation(cls.id, c);
           setCancelTarget(null);
           ctx.toast('Class marked cancelled \u2713');
+          /* Chain into the service recovery prompt with class-duration auto-match. */
+          setCancelRecovery({ cls: cls, cancellationId: c.id, durationHours: classDurationHours(cls) });
+        }
+      }),
+      cancelRecovery && e(ServiceRecoveryModal, {
+        ctx: ctx,
+        durationHours: cancelRecovery.durationHours,
+        sourceLabel: 'Cancelled class',
+        onClose: function(){ setCancelRecovery(null); },
+        onSave: function(recovery){
+          ctx.updateCancellation(cancelRecovery.cls.id, cancelRecovery.cancellationId, { serviceRecovery: recovery });
+          setCancelRecovery(null);
+          ctx.toast('Recovery logged \u2713');
         }
       })
     );
