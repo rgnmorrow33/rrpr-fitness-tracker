@@ -1543,6 +1543,24 @@
   /* ---- date & schedule helpers (for audit) ---- */
   var DOW_TO_IDX = { Sunday:0, Monday:1, Tuesday:2, Wednesday:3, Thursday:4, Friday:5, Saturday:6 };
   var IDX_TO_DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  /* Older CSV-paste imports stored dayOfWeek as 2-letter codes ('MO','TU',
+     etc.) while the rest of the app expects full names. Read-side reads
+     normalize through this so legacy data still matches. */
+  var DOW_ALIASES = {
+    'SU':'Sunday','SUN':'Sunday','SUNDAY':'Sunday',
+    'MO':'Monday','MON':'Monday','MONDAY':'Monday',
+    'TU':'Tuesday','TUE':'Tuesday','TUES':'Tuesday','TUESDAY':'Tuesday',
+    'WE':'Wednesday','WED':'Wednesday','WEDNESDAY':'Wednesday',
+    'TH':'Thursday','THU':'Thursday','THURS':'Thursday','THURSDAY':'Thursday',
+    'FR':'Friday','FRI':'Friday','FRIDAY':'Friday',
+    'SA':'Saturday','SAT':'Saturday','SATURDAY':'Saturday'
+  };
+  function normalizeDow(v){
+    if (v == null) return null;
+    if (typeof v === 'number') return IDX_TO_DOW[v] || null;
+    var u = String(v).toUpperCase().trim();
+    return DOW_ALIASES[u] || null;
+  }
   function parseYMD(s){
     if (!s) return null;
     var parts = s.split('-');
@@ -2079,7 +2097,7 @@
       var ymd = toYMD(cursor);
       var closure = closureMap[ymd] || null;
       classes.forEach(function(c){
-        if (c.dayOfWeek !== dow) return;
+        if (normalizeDow(c.dayOfWeek) !== dow) return;
         /* v2.2: respect optional season window. seasonStart/seasonEnd are
            inclusive YMD strings. Classes without dates are perpetual. This
            preserves attendance history when a class ends seasonally or
@@ -5259,7 +5277,7 @@
     var dow = d ? IDX_TO_DOW[d.getDay()] : null;
     /* All classes that day, excluding ones the current trainer is the regular instructor for */
     var available = ctx.classes.filter(function(c){
-      return c.dayOfWeek === dow && c.instructor !== props.trainerName;
+      return normalizeDow(c.dayOfWeek) === dow && c.instructor !== props.trainerName;
     });
     /* Sort by start time */
     available.sort(function(a,b){ return (a.startTime || '') < (b.startTime || '') ? -1 : 1; });
@@ -5977,8 +5995,8 @@
       if (sub === props.cls.instructor) { ctx.toast('Sub must be different from regular instructor', 'error'); return; }
       var d = parseYMD(date);
       if (!d) { ctx.toast('Pick a valid date', 'error'); return; }
-      if (IDX_TO_DOW[d.getDay()] !== props.cls.dayOfWeek) {
-        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + props.cls.dayOfWeek, 'error');
+      if (IDX_TO_DOW[d.getDay()] !== normalizeDow(props.cls.dayOfWeek)) {
+        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + (normalizeDow(props.cls.dayOfWeek) || props.cls.dayOfWeek), 'error');
         return;
       }
       var existing = getAssignedSubForDate(props.cls, date);
@@ -6001,7 +6019,7 @@
     }
 
     var d = parseYMD(date);
-    var dayMatch = d && IDX_TO_DOW[d.getDay()] === props.cls.dayOfWeek;
+    var dayMatch = d && IDX_TO_DOW[d.getDay()] === normalizeDow(props.cls.dayOfWeek);
     var existing = getAssignedSubForDate(props.cls, date);
 
     return e('div', { className: 'modal-overlay', onClick: props.onClose },
@@ -7922,19 +7940,7 @@
         return;
       }
 
-      function normDay(s){
-        var u = (s || '').toUpperCase().trim();
-        var map = {
-          'SUNDAY': 'SU', 'SUN': 'SU', 'SU': 'SU',
-          'MONDAY': 'MO', 'MON': 'MO', 'MO': 'MO',
-          'TUESDAY': 'TU', 'TUE': 'TU', 'TU': 'TU', 'TUES': 'TU',
-          'WEDNESDAY': 'WE', 'WED': 'WE', 'WE': 'WE',
-          'THURSDAY': 'TH', 'THU': 'TH', 'TH': 'TH', 'THURS': 'TH',
-          'FRIDAY': 'FR', 'FRI': 'FR', 'FR': 'FR',
-          'SATURDAY': 'SA', 'SAT': 'SA', 'SA': 'SA'
-        };
-        return map[u] || u;
-      }
+      function normDay(s){ return normalizeDow(s) || ''; }
       function normTime(s){
         var t = (s || '').trim();
         var ampm = t.match(/(AM|PM|am|pm)$/);
