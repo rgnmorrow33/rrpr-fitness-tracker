@@ -1725,14 +1725,20 @@
 
   /* Session status helpers - supports the cancellation/no-show/strike policy
      documented in the front desk education doc. */
+  /* SESSION_STATUSES is the picker list of OUTCOMES the trainer can choose
+     when signing off. 'scheduled' is a placeholder state for pre-booked
+     sessions and is intentionally not in this list - it's not a sign-off
+     outcome, it's the state a session is in before sign-off. */
   var SESSION_STATUSES = ['attended', 'late_cancel', 'no_show', 'excused'];
   var SESSION_STATUS_LABEL = {
+    scheduled: 'Scheduled',
     attended: 'Attended',
     late_cancel: 'Late Cancel',
     no_show: 'No Show',
     excused: 'Excused'
   };
   var SESSION_STATUS_COLOR = {
+    scheduled: 'var(--gold)',
     attended: 'var(--green)',
     late_cancel: 'var(--amber)',
     no_show: 'var(--red)',
@@ -3611,16 +3617,31 @@
       return false;
     }).sort(function(a, b){ return (a.time || '') < (b.time || '') ? -1 : 1; });
 
-    /* Today's PT sessions for this trainer */
+    /* Today's PT sessions for this trainer, plus any pre-scheduled
+       sessions that are past-due and still need sign-off. Trainer-name
+       matching is tolerant: prefers s.trainerName when stamped (new
+       scheduled sessions stamp this), falls back to client.trainerName
+       for legacy session records that pre-date the field. */
     var ptSessionsToday = [];
     (ctx.clients || []).forEach(function(client){
       (client.sessions || []).forEach(function(s){
-        if (s.date === todayYMD && trainerNameMatches(trainerName, s.trainerName)) {
+        var sessTrainer = s.trainerName || client.trainerName;
+        if (!trainerNameMatches(trainerName, sessTrainer)) return;
+        var isToday = s.date === todayYMD;
+        var isOverdueScheduled = s.status === 'scheduled' && s.date < todayYMD;
+        if (isToday || isOverdueScheduled) {
           ptSessionsToday.push({ client: client, session: s });
         }
       });
     });
-    ptSessionsToday.sort(function(a, b){ return (a.session.timeIn || '') < (b.session.timeIn || '') ? -1 : 1; });
+    ptSessionsToday.sort(function(a, b){
+      /* Overdue scheduled surface first (oldest first), then today's by time. */
+      var aOverdue = a.session.status === 'scheduled' && a.session.date < todayYMD;
+      var bOverdue = b.session.status === 'scheduled' && b.session.date < todayYMD;
+      if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+      if (aOverdue && bOverdue) return a.session.date < b.session.date ? -1 : 1;
+      return (a.session.time || '') < (b.session.time || '') ? -1 : 1;
+    });
 
     /* WROs scheduled for today (orientation date) where I'm the claimer or specialist */
     var myWrosToday = (ctx.wros || []).filter(function(w){
@@ -3742,8 +3763,18 @@
           '\ud83c\udfcb\ufe0f PT sessions today (' + ptSessionsToday.length + ')'
         ),
         ptSessionsToday.map(function(item){
+          var sess = item.session;
+          var isScheduled = sess.status === 'scheduled';
+          var isOverdue = isScheduled && sess.date < todayYMD;
+          var stripeColor = isOverdue ? 'var(--red)' : (isScheduled ? 'var(--gold)' : 'var(--teal)');
+          var daysOverdue = isOverdue
+            ? Math.floor((parseYMD(todayYMD).getTime() - parseYMD(sess.date).getTime()) / 86400000)
+            : 0;
+          var pillText = isOverdue
+            ? ('Overdue \u00b7 ' + daysOverdue + 'd')
+            : isScheduled ? 'Scheduled' : null;
           return e('div', {
-            key: item.client.id + ':' + (item.session.id || item.session.timeIn),
+            key: item.client.id + ':' + (sess.id || sess.date + sess.time),
             onClick: function(){ setClientDetailId(item.client.id); },
             style: {
               background: '#fff',
@@ -3751,16 +3782,27 @@
               borderRadius: '12px',
               padding: '12px 14px',
               marginBottom: '8px',
-              borderLeft: '4px solid var(--teal)',
+              borderLeft: '4px solid ' + stripeColor,
               cursor: 'pointer'
             }
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
               e('div', { style: { flex: 1, minWidth: '160px' } },
-                e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, item.client.name),
+                e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, item.client.name),
+                  pillText && e('span', {
+                    style: {
+                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                      background: stripeColor, color: '#fff',
+                      fontWeight: 700, letterSpacing: '0.04em'
+                    }
+                  }, pillText)
+                ),
                 e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  (item.session.timeIn ? formatTime12(item.session.timeIn) : '') +
-                  (item.session.timeOut ? (' \u2013 ' + formatTime12(item.session.timeOut)) : '')
+                  (isScheduled
+                    ? (formatShort(parseYMD(sess.date)) + (sess.time ? (' \u00b7 ' + formatTime12(sess.time)) : ''))
+                    : (sess.time ? formatTime12(sess.time) : '')
+                  )
                 )
               )
             )
@@ -4113,6 +4155,17 @@
     var logOpen = logOpenTuple[0];
     var setLogOpen = logOpenTuple[1];
 
+    var scheduleOpenTuple = useState(false);
+    var scheduleOpen = scheduleOpenTuple[0];
+    var setScheduleOpen = scheduleOpenTuple[1];
+
+    /* Holds the scheduled session being signed off, or null. When set,
+       LogSessionModal opens in edit mode and writes through updateSession
+       instead of addSession. */
+    var signOffTuple = useState(null);
+    var signOff = signOffTuple[0];
+    var setSignOff = signOffTuple[1];
+
     var editOpenTuple = useState(false);
     var editOpen = editOpenTuple[0];
     var setEditOpen = editOpenTuple[1];
@@ -4209,6 +4262,11 @@
             onClick: function(){ setLogOpen(true); }
           }, '+ Log Today\'s Session'),
           e('button', {
+            className: 'btn btn-teal',
+            disabled: remaining === 0,
+            onClick: function(){ setScheduleOpen(true); }
+          }, '📅 Schedule Session'),
+          e('button', {
             className: 'btn btn-gold',
             onClick: function(){ setAddPkgOpen(true); }
           }, '+ Add Package (Re-up)'),
@@ -4292,12 +4350,17 @@
                       ? (s.clientSig
                           ? e('img', { className: 'sig-thumb', src: s.clientSig })
                           : e('button', { className: 'sig-needed-btn', onClick: function(){ setFillSig({ sessId: s.id }); } }, 'Sign'))
-                      : e('span', {
-                          style: {
-                            display: 'inline-block', background: stColor, color: '#fff',
-                            padding: '3px 9px', borderRadius: '999px', fontSize: '11px', fontWeight: 700
-                          }
-                        }, stLabel)
+                      : st === 'scheduled'
+                          ? e('button', {
+                              className: 'btn btn-sm btn-primary',
+                              onClick: function(){ setSignOff(s); }
+                            }, 'Sign off')
+                          : e('span', {
+                              style: {
+                                display: 'inline-block', background: stColor, color: '#fff',
+                                padding: '3px 9px', borderRadius: '999px', fontSize: '11px', fontWeight: 700
+                              }
+                            }, stLabel)
                   ),
                   e('button', {
                     className: 'btn btn-ghost btn-sm',
@@ -4312,14 +4375,43 @@
         props.canEdit && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Client')
         ),
-        logOpen && e(LogSessionModal, {
+        (logOpen || signOff) && e(LogSessionModal, {
           ctx: ctx,
           client: c,
-          onClose: function(){ setLogOpen(false); },
+          existingSession: signOff || null,
+          onClose: function(){ setLogOpen(false); setSignOff(null); },
           onLog: function(sess){
+            if (signOff) {
+              /* Sign-off path: flip the scheduled placeholder in place
+                 instead of pushing a new session. id is preserved by
+                 updateSession via signOff.id. */
+              ctx.updateSession(c.id, signOff.id, {
+                status: sess.status,
+                date: sess.date,
+                time: sess.time,
+                note: sess.note,
+                durationHours: sess.durationHours,
+                trainerSig: sess.trainerSig,
+                clientSig: sess.clientSig
+              });
+              setSignOff(null);
+              ctx.toast('Session signed off ✓');
+            } else {
+              ctx.addSession(c.id, sess);
+              setLogOpen(false);
+              ctx.toast('Session logged ✓');
+            }
+          }
+        }),
+        scheduleOpen && e(ScheduleSessionModal, {
+          ctx: ctx,
+          client: c,
+          remaining: remaining,
+          onClose: function(){ setScheduleOpen(false); },
+          onSchedule: function(sess){
             ctx.addSession(c.id, sess);
-            setLogOpen(false);
-            ctx.toast('Session logged ✓');
+            setScheduleOpen(false);
+            ctx.toast('Session scheduled ✓');
           }
         }),
         editOpen && e(NewClientModal, {
@@ -4953,11 +5045,98 @@
   }
 
   /* ============ LOG SESSION MODAL ============ */
+  /* Pre-schedule a future session. Creates a placeholder with status
+     'scheduled' that consumes a slot against the package cap and shows up
+     on the trainer's Today view on the booked date (and as overdue if the
+     date passes without sign-off). The trainer signs off later via
+     LogSessionModal in edit mode, which flips the status to a final
+     outcome. Hard-blocks scheduling when the package has 0 remaining;
+     warns when this is the last session. */
+  function ScheduleSessionModal(props){
+    var ctx = props.ctx;
+    var client = props.client;
+    var remaining = props.remaining;
+
+    var now = new Date();
+    var hh = String(now.getHours()).padStart(2,'0');
+    var mm = String(now.getMinutes()).padStart(2,'0');
+
+    var dateTuple = useState(todayStr());
+    var date = dateTuple[0]; var setDate = dateTuple[1];
+    var timeTuple = useState(hh + ':' + mm);
+    var time = timeTuple[0]; var setTime = timeTuple[1];
+    var noteTuple = useState('');
+    var note = noteTuple[0]; var setNote = noteTuple[1];
+
+    function save(){
+      if (!date) { ctx.toast('Date is required', 'error'); return; }
+      if (!time) { ctx.toast('Time is required', 'error'); return; }
+      if (remaining <= 0) { ctx.toast('No sessions remaining in package', 'error'); return; }
+      var sess = {
+        id: uid(),
+        date: date,
+        time: time,
+        status: 'scheduled',
+        note: note || null,
+        trainerName: client.trainerName,
+        scheduledBy: (ctx.session && ctx.session.name) || null,
+        scheduledAt: new Date().toISOString()
+      };
+      props.onSchedule(sess);
+    }
+
+    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Schedule Session'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Pre-booking a session for ', e('b', null, client.name), '.'
+          ),
+          remaining === 1 && e('div', { className: 'banner amber' },
+            '⚠ This is the LAST session in their package. Discuss renewal at sign-off.'
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Date'),
+              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Time'),
+              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(ev.target.value); } })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Note (optional)'),
+            e('input', {
+              type: 'text', value: note,
+              onChange: function(ev){ setNote(ev.target.value); },
+              placeholder: 'e.g. focus on lower body'
+            })
+          ),
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
+            remaining + ' session' + (remaining === 1 ? '' : 's') + ' remaining after this is consumed.'
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-primary', onClick: save, disabled: !date || !time || remaining <= 0 }, 'Schedule')
+        )
+      )
+    );
+  }
+
   function LogSessionModal(props){
     var ctx = props.ctx;
     var now = new Date();
     var hh = String(now.getHours()).padStart(2,'0');
     var mm = String(now.getMinutes()).padStart(2,'0');
+
+    /* When editing an existing session (sign-off of a pre-scheduled
+       placeholder), prefill date/time/note from the existing record. */
+    var existing = props.existingSession || null;
 
     var stepTuple = useState(1); /* 1: status+date, 2: trainer sig (attended), 3: client sig (attended) */
     var step = stepTuple[0];
@@ -4967,15 +5146,15 @@
     var status = statusTuple[0];
     var setStatus = statusTuple[1];
 
-    var dateTuple = useState(todayStr());
+    var dateTuple = useState(existing ? existing.date : todayStr());
     var date = dateTuple[0];
     var setDate = dateTuple[1];
 
-    var timeTuple = useState(hh + ':' + mm);
+    var timeTuple = useState(existing && existing.time ? existing.time : (hh + ':' + mm));
     var time = timeTuple[0];
     var setTime = timeTuple[1];
 
-    var noteTuple = useState('');
+    var noteTuple = useState(existing && existing.note ? existing.note : '');
     var note = noteTuple[0];
     var setNote = noteTuple[1];
 
@@ -6641,6 +6820,12 @@
 
     function handleAction(s){
       if (s === 'assigned') {
+        /* Admin must assign to a trainer, not pick up the lead themselves.
+           Open the trainer picker (same UI as Reassign) instead of self-claim. */
+        if (isAdmin) {
+          setReassignOpen(true);
+          return;
+        }
         ctx.claimQueueEntry(lead.id, (ctx.session && ctx.session.name) || 'admin', ctx.session.role);
         ctx.toast('Lead claimed \u2713');
         return;
@@ -6655,8 +6840,14 @@
 
     function doReassign(){
       if (!reassignTo) return;
-      ctx.reassignQueueEntry(lead.id, reassignTo, (ctx.session && ctx.session.name) || 'admin');
-      ctx.toast('Lead reassigned \u2713');
+      /* Initial assignment vs reassignment of an already-assigned lead. */
+      if (!lead.assignedTo) {
+        ctx.claimQueueEntry(lead.id, reassignTo, 'admin');
+        ctx.toast('Lead assigned to ' + reassignTo + ' \u2713');
+      } else {
+        ctx.reassignQueueEntry(lead.id, reassignTo, (ctx.session && ctx.session.name) || 'admin');
+        ctx.toast('Lead reassigned \u2713');
+      }
       setReassignOpen(false);
     }
 
@@ -6727,9 +6918,9 @@
             }, 'Reassign')
           ),
 
-          /* Reassign UI */
+          /* Reassign / initial-assign UI */
           reassignOpen && e('div', { style: { padding: '10px 12px', background: 'var(--cream-2)', borderRadius: '8px', marginBottom: '14px' } },
-            e('div', { style: { fontSize: '12px', fontWeight: 700, color: 'var(--navy)', marginBottom: '6px' } }, 'Reassign to:'),
+            e('div', { style: { fontSize: '12px', fontWeight: 700, color: 'var(--navy)', marginBottom: '6px' } }, lead.assignedTo ? 'Reassign to:' : 'Assign to:'),
             e('div', { style: { display: 'flex', gap: '6px' } },
               e('select', { value: reassignTo, onChange: function(ev){ setReassignTo(ev.target.value); }, style: { flex: 1 } },
                 e('option', { value: '' }, 'Pick a trainer...'),
@@ -6737,7 +6928,7 @@
                   return e('option', { key: t, value: t, disabled: t === lead.assignedTo }, t);
                 })
               ),
-              e('button', { className: 'btn btn-sm btn-teal', onClick: doReassign }, 'Reassign'),
+              e('button', { className: 'btn btn-sm btn-teal', onClick: doReassign }, lead.assignedTo ? 'Reassign' : 'Assign'),
               e('button', { className: 'btn btn-sm btn-ghost', onClick: function(){ setReassignOpen(false); } }, 'Cancel')
             )
           ),
