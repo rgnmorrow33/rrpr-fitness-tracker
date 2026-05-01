@@ -1740,7 +1740,7 @@
   var SESSION_STATUS_COLOR = {
     scheduled: 'var(--gold)',
     attended: 'var(--green)',
-    late_cancel: 'var(--amber)',
+    late_cancel: 'var(--red)',
     no_show: 'var(--red)',
     excused: 'var(--slate)'
   };
@@ -3659,16 +3659,28 @@
 
     /* Full-screen detail swaps. Same pattern as TrainerGX/TrainerPT: when
        a detail id is set, return the detail component instead of the
-       Today list. Closing returns here without changing tabs. */
+       Today list. Closing returns here without changing tabs. The detail
+       components run with hideHeader=true so the consolidated header in
+       TrainerView (driven by setHeaderContext below) is the only sticky
+       bar shown to the user. */
+    var setHeaderContext = props.setHeaderContext || function(){};
     if (classDetailId) {
       var clForDetail = ctx.classes.find(function(x){ return x.id === classDetailId; });
       if (!clForDetail) { setClassDetailId(null); return null; }
-      return e(ClassDetail, { ctx: ctx, cls: clForDetail, onBack: function(){ setClassDetailId(null); }, canEdit: true });
+      return e(ClassDetail, {
+        ctx: ctx, cls: clForDetail, hideHeader: true,
+        onBack: function(){ setClassDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
     }
     if (clientDetailId) {
       var cliForDetail = ctx.clients.find(function(x){ return x.id === clientDetailId; });
       if (!cliForDetail) { setClientDetailId(null); return null; }
-      return e(ClientDetail, { ctx: ctx, client: cliForDetail, onBack: function(){ setClientDetailId(null); }, canEdit: true });
+      return e(ClientDetail, {
+        ctx: ctx, client: cliForDetail, hideHeader: true,
+        onBack: function(){ setClientDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
     }
 
     return e('div', null,
@@ -3734,7 +3746,10 @@
           var c = o.cls;
           return e('div', {
             key: c.id + ':' + o.date,
-            onClick: function(){ setClassDetailId(c.id); },
+            onClick: function(){
+              setClassDetailId(c.id);
+              setHeaderContext({ title: c.name, sub: c.location });
+            },
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
@@ -3775,7 +3790,10 @@
             : isScheduled ? 'Scheduled' : null;
           return e('div', {
             key: item.client.id + ':' + (sess.id || sess.date + sess.time),
-            onClick: function(){ setClientDetailId(item.client.id); },
+            onClick: function(){
+              setClientDetailId(item.client.id);
+              setHeaderContext({ title: item.client.name, sub: item.client.location });
+            },
             style: {
               background: '#fff',
               border: '1.5px solid var(--border)',
@@ -3893,6 +3911,18 @@
     var contactOpenTuple = useState(false);
     var contactOpen = contactOpenTuple[0]; var setContactOpen = contactOpenTuple[1];
 
+    /* v2.7: consolidated header. When a tab opens a detail (Client/Class
+       Detail), it pushes { title, sub } here so the global header renders
+       the detail name primary and trainer/location as a smaller subtitle.
+       Cleared on tab change so a switch doesn't carry stale context. */
+    var headerContextTuple = useState(null);
+    var headerContext = headerContextTuple[0]; var setHeaderContext = headerContextTuple[1];
+
+    function navigate(t){
+      setHeaderContext(null);
+      setTab(t);
+    }
+
     var trainerName = ctx.session.name;
 
     var subLabel = {
@@ -3925,17 +3955,27 @@
     }).length;
 
     var content;
-    if (tab === 'today') content = e(TrainerToday, { ctx: ctx });
-    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx });
-    else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx });
+    if (tab === 'today') content = e(TrainerToday, { ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'leads') content = e(TrainerLeadsView, { ctx: ctx });
     else if (tab === 'time_card') content = e(TimeCardView, { ctx: ctx });
 
     return e('div', null,
       e('div', { className: 'header' },
         e('div', { style: { minWidth: 0, flex: 1 } },
-          e('h1', null, ctx.session.name),
-          e('div', { className: 'sub' }, subLabel[tab] || 'Today')
+          headerContext
+            ? [
+                e('div', {
+                  key: 'sub-h',
+                  style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate)', marginBottom: '2px' }
+                }, ctx.session.name + (headerContext.sub ? (' · ' + headerContext.sub) : '')),
+                e('h1', { key: 'title-h' }, headerContext.title)
+              ]
+            : [
+                e('h1', { key: 'title-h' }, ctx.session.name),
+                e('div', { key: 'sub-h', className: 'sub' }, subLabel[tab] || 'Today')
+              ]
         ),
         e('div', { className: 'header-right' },
           e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
@@ -3946,7 +3986,7 @@
            Surfaces available pickups across categories. */
         tab !== 'time_card' && e(TrainerNotificationBar, {
           ctx: ctx,
-          onJumpToTab: function(t){ setTab(t); }
+          onJumpToTab: function(t){ navigate(t); }
         }),
         /* Compact pay-period summary chip (suppressed on today + time_card
            tabs - today shows its own bigger summary, time card is the full
@@ -3966,7 +4006,7 @@
             gap: '10px',
             cursor: 'pointer'
           },
-          onClick: function(){ setTab('time_card'); },
+          onClick: function(){ navigate('time_card'); },
           title: 'Tap to view time card'
         },
           e('div', null,
@@ -4022,28 +4062,28 @@
       e('div', { className: 'bottom-nav' },
         e('button', {
           className: tab === 'today' ? 'active' : '',
-          onClick: function(){ setTab('today'); }
+          onClick: function(){ navigate('today'); }
         },
           e('span', { className: 'icon' }, '\ud83d\udcc5'),
           e('span', null, 'Today')
         ),
         e('button', {
           className: tab === 'pt' ? 'active' : '',
-          onClick: function(){ setTab('pt'); }
+          onClick: function(){ navigate('pt'); }
         },
           e('span', { className: 'icon' }, '\ud83c\udfcb\ufe0f'),
           e('span', null, 'PT')
         ),
         e('button', {
           className: 'gx ' + (tab === 'gx' ? 'active' : ''),
-          onClick: function(){ setTab('gx'); }
+          onClick: function(){ navigate('gx'); }
         },
           e('span', { className: 'icon' }, '\ud83c\udfc3'),
           e('span', null, 'GX')
         ),
         e('button', {
           className: tab === 'leads' ? 'active' : '',
-          onClick: function(){ setTab('leads'); },
+          onClick: function(){ navigate('leads'); },
           style: { position: 'relative' }
         },
           e('span', { className: 'icon' }, '\ud83d\udce5'),
@@ -4051,7 +4091,7 @@
         ),
         e('button', {
           className: tab === 'time_card' ? 'active' : '',
-          onClick: function(){ setTab('time_card'); }
+          onClick: function(){ navigate('time_card'); }
         },
           e('span', { className: 'icon' }, '\ud83d\udcb0'),
           e('span', null, 'Time Card')
@@ -4083,10 +4123,15 @@
       return ctx.clients.filter(function(c){ return c.trainerName === trainerName; });
     }, [ctx.clients, trainerName]);
 
+    var setHeaderContext = props.setHeaderContext || function(){};
     if (detailId) {
       var cl = ctx.clients.find(function(c){ return c.id === detailId; });
       if (!cl) { setDetailId(null); return null; }
-      return e(ClientDetail, { ctx: ctx, client: cl, onBack: function(){ setDetailId(null); }, canEdit: true });
+      return e(ClientDetail, {
+        ctx: ctx, client: cl, hideHeader: true,
+        onBack: function(){ setDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
     }
 
     return e('div', null,
@@ -4104,7 +4149,13 @@
             e('div', null, 'Tap "+ New Client" to add your first client.')
           )
         : myClients.map(function(c){
-            return e(ClientCard, { key: c.id, client: c, onClick: function(){ setDetailId(c.id); } });
+            return e(ClientCard, {
+              key: c.id, client: c,
+              onClick: function(){
+                setDetailId(c.id);
+                setHeaderContext({ title: c.name, sub: c.location });
+              }
+            });
           }),
       newOpen && e(NewClientModal, {
         ctx: ctx,
@@ -4182,6 +4233,14 @@
     var addPkgOpen = addPkgOpenTuple[0];
     var setAddPkgOpen = addPkgOpenTuple[1];
 
+    /* Service recovery prompt target. Set after a session save when status
+       is no_show or late_cancel; cleared when modal closes or saves. */
+    var recoveryTargetTuple = useState(null);
+    var recoveryTarget = recoveryTargetTuple[0];
+    var setRecoveryTarget = recoveryTargetTuple[1];
+
+    var isAdmin = ctx.session && ctx.session.role === 'admin';
+
     var strikes = clientStrikeCount(c);
     var strikeStatus = clientStrikeStatus(c);
     var clientReferrals = (ctx.referrals || []).filter(function(r){ return r.clientId === c.id; });
@@ -4220,7 +4279,10 @@
       : null;
 
     return e('div', null,
-      e('div', { className: 'header' },
+      /* Header is suppressed when rendered inside TrainerView's
+         consolidated header (hideHeader=true). Admin and standalone uses
+         keep their own sticky header. */
+      !props.hideHeader && e('div', { className: 'header' },
         e('div', null,
           e('h1', null, c.name),
           e('div', { className: 'sub' }, c.trainerName + ' · ' + c.location)
@@ -4274,7 +4336,11 @@
             className: 'btn btn-teal',
             onClick: function(){ setReferOpen(true); }
           }, '🩺 Refer to PT'),
-          props.canEdit && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
+          /* Edit button gated to admin: it opens NewClientModal in edit
+             mode, which can change package fields (size, type, sessions
+             remaining, total paid). Trainers retain create flow (different
+             entry point) and the gold "+ Add Package (Re-up)" button. */
+          props.canEdit && isAdmin && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
         ),
         /* Package History - only show if there's more than one package */
         getPackages(c).length > 1 && e('div', { style: { marginTop: '16px' } },
@@ -4362,17 +4428,33 @@
                               }
                             }, stLabel)
                   ),
-                  e('button', {
-                    className: 'btn btn-ghost btn-sm',
-                    style: { color: 'var(--red)' },
-                    onClick: function(){
-                      if (window.confirm('Delete this session?')) ctx.deleteSession(c.id, s.id);
-                    }
-                  }, '✕')
+                  /* Both-signatures lock for trainers: signed sessions are
+                     a record of what happened; only admin can delete. */
+                  (function(){
+                    var bothSigned = !!(s.trainerSig && s.clientSig);
+                    var locked = bothSigned && !isAdmin;
+                    var hasRecovery = !!(s.serviceRecovery && (s.serviceRecovery.actions || []).length > 0);
+                    return e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'flex-end' } },
+                      hasRecovery && e('span', {
+                        title: 'Service recovery logged: ' + (s.serviceRecovery.actions || []).join(', '),
+                        style: { fontSize: '14px' }
+                      }, '📞'),
+                      e('button', {
+                        className: 'btn btn-ghost btn-sm',
+                        style: { color: 'var(--red)', opacity: locked ? 0.4 : 1, cursor: locked ? 'not-allowed' : 'pointer' },
+                        disabled: locked,
+                        title: locked ? 'Signed sessions cannot be deleted - contact admin to override.' : 'Delete this session',
+                        onClick: function(){
+                          if (locked) return;
+                          if (window.confirm('Delete this session?')) ctx.deleteSession(c.id, s.id);
+                        }
+                      }, '✕')
+                    );
+                  })()
                 );
               })
             ),
-        props.canEdit && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+        props.canEdit && isAdmin && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Client')
         ),
         (logOpen || signOff) && e(LogSessionModal, {
@@ -4381,11 +4463,16 @@
           existingSession: signOff || null,
           onClose: function(){ setLogOpen(false); setSignOff(null); },
           onLog: function(sess){
+            /* Trigger service-recovery prompt for no_show / late_cancel.
+               Captured before state resets so we know which session id to
+               attach the recovery patch to. */
+            var needsRecovery = sess.status === 'no_show' || sess.status === 'late_cancel';
             if (signOff) {
               /* Sign-off path: flip the scheduled placeholder in place
                  instead of pushing a new session. id is preserved by
                  updateSession via signOff.id. */
-              ctx.updateSession(c.id, signOff.id, {
+              var sessId = signOff.id;
+              ctx.updateSession(c.id, sessId, {
                 status: sess.status,
                 date: sess.date,
                 time: sess.time,
@@ -4396,11 +4483,23 @@
               });
               setSignOff(null);
               ctx.toast('Session signed off ✓');
+              if (needsRecovery) setRecoveryTarget({ sessionId: sessId, status: sess.status });
             } else {
               ctx.addSession(c.id, sess);
               setLogOpen(false);
               ctx.toast('Session logged ✓');
+              if (needsRecovery) setRecoveryTarget({ sessionId: sess.id, status: sess.status });
             }
+          }
+        }),
+        recoveryTarget && e(ServiceRecoveryModal, {
+          ctx: ctx,
+          status: recoveryTarget.status,
+          onClose: function(){ setRecoveryTarget(null); },
+          onSave: function(recovery){
+            ctx.updateSession(c.id, recoveryTarget.sessionId, { serviceRecovery: recovery });
+            setRecoveryTarget(null);
+            ctx.toast('Recovery actions logged ✓');
           }
         }),
         scheduleOpen && e(ScheduleSessionModal, {
@@ -5128,6 +5227,92 @@
     );
   }
 
+  /* Prompted right after a no-show or late-cancel session is saved, to
+     nudge the trainer toward a service-recovery action (call, follow-up
+     text/email, schedule outreach, or none). The session is already saved
+     when this opens; cancelling just means no recovery is logged. Saved
+     recovery attaches to the session record so admin/other trainers can
+     see follow-up was done. Not triggered for excused absences. */
+  var SERVICE_RECOVERY_ACTIONS = [
+    { id: 'call_now', label: 'Call client now' },
+    { id: 'send_followup', label: 'Send follow-up text/email' },
+    { id: 'schedule_outreach', label: 'Schedule outreach for tomorrow' },
+    { id: 'no_followup', label: 'No follow-up needed' }
+  ];
+  function ServiceRecoveryModal(props){
+    var ctx = props.ctx;
+    var actionsTuple = useState({});
+    var actions = actionsTuple[0]; var setActions = actionsTuple[1];
+    var noteTuple = useState('');
+    var note = noteTuple[0]; var setNote = noteTuple[1];
+
+    function toggle(id){
+      var copy = Object.assign({}, actions);
+      copy[id] = !copy[id];
+      setActions(copy);
+    }
+    function save(){
+      var picked = SERVICE_RECOVERY_ACTIONS.map(function(a){ return a.id; })
+        .filter(function(id){ return actions[id]; });
+      props.onSave({
+        actions: picked,
+        note: note || null,
+        loggedBy: (ctx.session && ctx.session.name) || null,
+        loggedAt: new Date().toISOString()
+      });
+    }
+
+    var statusLabel = props.status === 'no_show' ? 'no-show' : 'late cancel';
+
+    return e('div', { className: 'modal-overlay', onClick: props.onClose },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Service Recovery'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Session saved as ', e('b', null, statusLabel),
+            '. Pick any recovery actions you took (or plan to take). You can skip this and save the session without a recovery log.'
+          ),
+          e('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' } },
+            SERVICE_RECOVERY_ACTIONS.map(function(a){
+              var checked = !!actions[a.id];
+              return e('label', {
+                key: a.id,
+                style: {
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                  padding: '10px 12px', borderRadius: '8px',
+                  border: '1.5px solid ' + (checked ? 'var(--teal)' : 'var(--border)'),
+                  background: checked ? 'var(--teal-bg)' : '#fff',
+                  cursor: 'pointer', fontSize: '14px'
+                }
+              },
+                e('input', {
+                  type: 'checkbox', checked: checked,
+                  onChange: function(){ toggle(a.id); }
+                }),
+                e('span', null, a.label)
+              );
+            })
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Note (optional)'),
+            e('input', {
+              type: 'text', value: note,
+              onChange: function(ev){ setNote(ev.target.value); },
+              placeholder: 'e.g. left voicemail, will retry tomorrow'
+            })
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Skip'),
+          e('button', { className: 'btn btn-primary', onClick: save }, 'Save Recovery')
+        )
+      )
+    );
+  }
+
   function LogSessionModal(props){
     var ctx = props.ctx;
     var now = new Date();
@@ -5173,6 +5358,9 @@
     var setClientSig = clientSigTuple[1];
 
     function finish(skipClientSig){
+      /* trainerSig is captured for both attended (full sig flow) and no_show
+         (trainer-only sig). Other non-attended statuses skip sigs entirely. */
+      var collectsTrainerSig = status === 'attended' || status === 'no_show';
       var sess = {
         id: uid(),
         date: date,
@@ -5182,24 +5370,25 @@
         /* v2.1: trainer-selected duration (1 hour or 30 minutes).
            Only counts toward calcTrainerHours when status === 'attended'. */
         durationHours: duration,
-        trainerSig: status === 'attended' ? trainerSig : null,
+        trainerSig: collectsTrainerSig ? trainerSig : null,
         clientSig: status === 'attended' && !skipClientSig ? clientSig : null
       };
       props.onLog(sess);
     }
     function finishNonAttended(){
-      /* Late cancel / no-show / excused: no signatures needed */
+      /* Late cancel / excused: no signatures collected. (no_show now goes
+         through step 2 to capture a trainer-only signature - see footer.) */
       finish(true);
     }
 
     var statusBanner = null;
     if (status === 'late_cancel') {
       statusBanner = e('div', { className: 'banner amber' },
-        '⚠ Late cancel (less than 24 hr). Per policy: 50% session charge applies and counts as a strike. 3 late cancels per episode = discharge consideration.'
+        '⚠ Late cancel (less than 24 hr). Per policy: counts as a full session loss and a strike. 3 late cancels per episode = discharge consideration.'
       );
     } else if (status === 'no_show') {
       statusBanner = e('div', { className: 'banner red' },
-        '🚫 No-show. Per policy: 50% session charge applies and counts as a strike. 2 no-shows per episode = discharge consideration.'
+        '🚫 No-show. Per policy: counts as a full session loss and a strike. 2 no-shows per episode = discharge consideration.'
       );
     } else if (status === 'excused') {
       statusBanner = e('div', { className: 'banner green' },
@@ -5286,24 +5475,32 @@
       );
       footer = e('div', { className: 'modal-footer' },
         e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
-        status === 'attended'
+        (status === 'attended' || status === 'no_show')
           ? e('button', { className: 'btn btn-primary', onClick: function(){ setStep(2); } }, 'Continue →')
           : e('button', { className: 'btn btn-primary', onClick: finishNonAttended }, 'Save')
       );
     } else if (step === 2) {
       body = e('div', null,
         e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '12px' } },
-          'Step 1 of 2 - ', e('b', null, 'Trainer signature'), ' (' + ctx.session.name + ')'
+          status === 'no_show'
+            ? e('span', null, 'Trainer signature only - no-show, client cannot sign. (' + ctx.session.name + ')')
+            : e('span', null, 'Step 1 of 2 - ', e('b', null, 'Trainer signature'), ' (' + ctx.session.name + ')')
         ),
         e(SignaturePad, { label: 'Trainer', onChange: setTrainerSig, key: 'trainer' })
       );
       footer = e('div', { className: 'modal-footer' },
         e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(1); } }, '← Back'),
-        e('button', {
-          className: 'btn btn-primary',
-          disabled: !trainerSig,
-          onClick: function(){ setStep(3); }
-        }, 'Continue →')
+        status === 'no_show'
+          ? e('button', {
+              className: 'btn btn-primary',
+              disabled: !trainerSig,
+              onClick: function(){ finish(true); }
+            }, 'Save Session')
+          : e('button', {
+              className: 'btn btn-primary',
+              disabled: !trainerSig,
+              onClick: function(){ setStep(3); }
+            }, 'Continue →')
       );
     } else {
       body = e('div', null,
@@ -5393,10 +5590,15 @@
       return getUpcomingSubsFor(ctx.classes, trainerName, todayStr());
     }, [ctx.classes, trainerName]);
 
+    var setHeaderContext = props.setHeaderContext || function(){};
     if (detailId) {
       var cl = ctx.classes.find(function(c){ return c.id === detailId; });
       if (!cl) { setDetailId(null); return null; }
-      return e(ClassDetail, { ctx: ctx, cls: cl, onBack: function(){ setDetailId(null); }, canEdit: true });
+      return e(ClassDetail, {
+        ctx: ctx, cls: cl, hideHeader: true,
+        onBack: function(){ setDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
     }
 
     return e('div', null,
@@ -5415,7 +5617,10 @@
             key: s.id,
             className: 'class-card',
             style: { borderLeftColor: 'var(--amber)', cursor: 'pointer' },
-            onClick: function(){ setDetailId(c.id); }
+            onClick: function(){
+              setDetailId(c.id);
+              setHeaderContext({ title: c.name, sub: c.location });
+            }
           },
             e('div', { style: { display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:'10px' } },
               e('div', null,
@@ -5450,7 +5655,13 @@
             e('div', null, 'Tap "+ New Class" to add a group fitness class.')
           )
         : myClasses.map(function(c){
-            return e(ClassCard, { key: c.id, cls: c, onClick: function(){ setDetailId(c.id); } });
+            return e(ClassCard, {
+              key: c.id, cls: c,
+              onClick: function(){
+                setDetailId(c.id);
+                setHeaderContext({ title: c.name, sub: c.location });
+              }
+            });
           }),
       newOpen && e(NewClassModal, {
         ctx: ctx,
@@ -5652,8 +5863,12 @@
     var upcomingSubs = subs.filter(function(s){ return s.date >= todayYMD; });
     var pastSubs = subs.filter(function(s){ return s.date < todayYMD; });
 
+    var isAdmin = ctx.session && ctx.session.role === 'admin';
+
     return e('div', null,
-      e('div', { className: 'header' },
+      /* Header is suppressed when rendered inside TrainerView's
+         consolidated header (hideHeader=true). */
+      !props.hideHeader && e('div', { className: 'header' },
         e('div', null,
           e('h1', null, c.name),
           e('div', { className: 'sub' }, c.instructor + ' · ' + c.location)
@@ -5778,7 +5993,7 @@
                 );
               })
             ),
-        props.canEdit && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+        props.canEdit && isAdmin && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Class')
         ),
         logOpen && e(LogAttendanceModal, {
