@@ -3691,6 +3691,14 @@
     var clientDetailId = clientDetailIdTuple[0]; var setClientDetailId = clientDetailIdTuple[1];
     var wroOpenTuple = useState(null);
     var wroOpen = wroOpenTuple[0]; var setWroOpen = wroOpenTuple[1];
+    /* Direct sign-off from Today: tapping a 'scheduled' PT card opens
+       LogSessionModal in edit mode without first swapping to ClientDetail.
+       signOff holds { client, session } so onLog has the client id for
+       updateSession. Service recovery prompt fires for no_show/late_cancel. */
+    var signOffTuple = useState(null);
+    var signOff = signOffTuple[0]; var setSignOff = signOffTuple[1];
+    var recoveryTargetTuple = useState(null);
+    var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
 
     /* Today's class occurrences */
     var todayOccs = useMemo(function(){
@@ -3839,6 +3847,7 @@
         ),
         myClassesToday.map(function(o){
           var c = o.cls;
+          var logged = !!o.logged;
           return e('div', {
             key: c.id + ':' + o.date,
             onClick: function(){
@@ -3849,20 +3858,26 @@
               });
             },
             style: {
-              background: '#fff',
+              background: logged ? 'var(--green-bg)' : '#fff',
               border: '1.5px solid var(--border)',
               borderRadius: '12px',
               padding: '12px 14px',
               marginBottom: '8px',
-              borderLeft: '4px solid #7B68B6',
+              borderLeft: '4px solid ' + (logged ? 'var(--green)' : '#7B68B6'),
               cursor: 'pointer'
             }
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
               e('div', { style: { flex: 1, minWidth: '160px' } },
-                e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, c ? c.name : 'Unknown class'),
+                e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, c ? c.name : 'Unknown class'),
+                  logged && e('span', { style: { color: 'var(--green)', fontSize: '14px', fontWeight: 700 } }, '\u2713')
+                ),
                 e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
                   (o.time || c.time || '') + ' \u00b7 ' + (c ? c.location : '')
+                ),
+                logged && e('div', { style: { fontSize: '12px', color: 'var(--green)', marginTop: '4px', fontWeight: 600 } },
+                  'Attendance recorded' + (o.headcount != null ? (' \u00b7 ' + o.headcount) : '')
                 )
               )
             )
@@ -3889,11 +3904,16 @@
           return e('div', {
             key: item.client.id + ':' + (sess.id || sess.date + sess.time),
             onClick: function(){
-              setClientDetailId(item.client.id);
-              setHeaderContext({
-                title: item.client.name, sub: item.client.location,
-                onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
-              });
+              if (isScheduled) {
+                /* Direct sign-off: skip the ClientDetail intermediate. */
+                setSignOff({ client: item.client, session: sess });
+              } else {
+                setClientDetailId(item.client.id);
+                setHeaderContext({
+                  title: item.client.name, sub: item.client.location,
+                  onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
+                });
+              }
             },
             style: {
               background: '#fff',
@@ -3995,7 +4015,437 @@
           setWroOpen(null);
           ctx.toast('Orientation saved ✓');
         }
+      }),
+      signOff && e(LogSessionModal, {
+        ctx: ctx,
+        client: signOff.client,
+        existingSession: signOff.session,
+        onClose: function(){ setSignOff(null); },
+        onLog: function(sess){
+          var needsRecovery = sess.status === 'no_show' || sess.status === 'late_cancel';
+          var clientId = signOff.client.id;
+          var sessId = signOff.session.id;
+          ctx.updateSession(clientId, sessId, {
+            status: sess.status,
+            date: sess.date,
+            time: sess.time,
+            note: sess.note,
+            durationHours: sess.durationHours,
+            trainerSig: sess.trainerSig,
+            clientSig: sess.clientSig
+          });
+          setSignOff(null);
+          ctx.toast('Session signed off ✓');
+          if (needsRecovery) setRecoveryTarget({
+            clientId: clientId,
+            sessionId: sessId,
+            status: sess.status,
+            durationHours: sess.durationHours || 1
+          });
+        }
+      }),
+      recoveryTarget && e(ServiceRecoveryModal, {
+        ctx: ctx,
+        durationHours: recoveryTarget.durationHours,
+        sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
+        onClose: function(){ setRecoveryTarget(null); },
+        onSave: function(recovery){
+          ctx.updateSession(recoveryTarget.clientId, recoveryTarget.sessionId, { serviceRecovery: recovery });
+          setRecoveryTarget(null);
+          ctx.toast('Recovery logged ✓');
+        }
       })
+    );
+  }
+
+  /* ============ WEEK VIEW (trainer + admin) ============
+     7-day stacked schedule for a single trainer. Reused by the trainer
+     Schedule tab and the admin Cross-Cutting Schedule tab (with a trainer
+     picker on top). Forward navigation is unlimited (long-range planning);
+     back is capped at 4 weeks. Each day collects:
+       - GX classes the trainer is scheduled to teach
+       - PT sessions on the trainer's clients (any status)
+       - WROs the trainer is the specialist for (orientationDate)
+     Per-card try/catch keeps a single bad record from crashing the view.
+     allowDirectSignOff defaults true (trainer); admin sets false. */
+  function TrainerWeekView(props){
+    var ctx = props.ctx;
+    var trainerName = props.trainerName;
+    var setHeaderContext = props.setHeaderContext || function(){};
+    var allowDirectSignOff = props.allowDirectSignOff !== false;
+    var hideDetailHeader = !!props.setHeaderContext;
+
+    var offsetTuple = useState(0);
+    var offset = offsetTuple[0]; var setOffset = offsetTuple[1];
+
+    var classDetailIdTuple = useState(null);
+    var classDetailId = classDetailIdTuple[0]; var setClassDetailId = classDetailIdTuple[1];
+    var clientDetailIdTuple = useState(null);
+    var clientDetailId = clientDetailIdTuple[0]; var setClientDetailId = clientDetailIdTuple[1];
+    var signOffTuple = useState(null);
+    var signOff = signOffTuple[0]; var setSignOff = signOffTuple[1];
+    var recoveryTargetTuple = useState(null);
+    var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
+    var wroOpenTuple = useState(null);
+    var wroOpen = wroOpenTuple[0]; var setWroOpen = wroOpenTuple[1];
+
+    var todayYMD = todayStr();
+    var todayDate = parseYMD(todayYMD);
+    var startOfThisWeek = (function(){
+      var d = new Date(todayDate.getTime());
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() - d.getDay()); /* back to Sunday */
+      return d;
+    })();
+    var weekStart = addDays(startOfThisWeek, offset * 7);
+    var weekEnd = addDays(weekStart, 6);
+    var weekStartYMD = toYMD(weekStart);
+    var weekEndYMD = toYMD(weekEnd);
+
+    /* Detail swaps. hideDetailHeader is false on admin (admin keeps inner
+       header) and true on trainer (consolidated header at top). */
+    if (classDetailId) {
+      var clForDetail = ctx.classes.find(function(x){ return x.id === classDetailId; });
+      if (!clForDetail) { setClassDetailId(null); return null; }
+      return e(ClassDetail, {
+        ctx: ctx, cls: clForDetail, hideHeader: hideDetailHeader,
+        onBack: function(){ setClassDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
+    }
+    if (clientDetailId) {
+      var cliForDetail = ctx.clients.find(function(x){ return x.id === clientDetailId; });
+      if (!cliForDetail) { setClientDetailId(null); return null; }
+      return e(ClientDetail, {
+        ctx: ctx, client: cliForDetail, hideHeader: hideDetailHeader,
+        onBack: function(){ setClientDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
+    }
+
+    /* Week data */
+    var occs = trainerName ? occurrencesInWindow(ctx.classes, weekStart, weekEnd, ctx.closures) : [];
+    var gxByDate = {};
+    occs.forEach(function(o){
+      var assignedSub = o.assignedSub;
+      var teaching = trainerNameMatches(trainerName, o.cls.instructor) ||
+                     (assignedSub && trainerNameMatches(trainerName, assignedSub.subInstructor || assignedSub.claimedBy));
+      if (!teaching) return;
+      if (!gxByDate[o.date]) gxByDate[o.date] = [];
+      gxByDate[o.date].push(o);
+    });
+
+    var ptByDate = {};
+    (ctx.clients || []).forEach(function(client){
+      (client.sessions || []).forEach(function(s){
+        var sessTrainer = s.trainerName || client.trainerName;
+        if (!trainerNameMatches(trainerName, sessTrainer)) return;
+        if (!s.date || s.date < weekStartYMD || s.date > weekEndYMD) return;
+        if (!ptByDate[s.date]) ptByDate[s.date] = [];
+        ptByDate[s.date].push({ client: client, session: s });
+      });
+    });
+
+    var wrosByDate = {};
+    (ctx.wros || []).forEach(function(w){
+      var orientYMD = (w.post && w.post.orientationDate) || w.date;
+      if (!orientYMD || orientYMD < weekStartYMD || orientYMD > weekEndYMD) return;
+      var sp = (w.post && w.post.specialistName) || w.claimedBy;
+      if (!trainerNameMatches(trainerName, sp)) return;
+      if (!wrosByDate[orientYMD]) wrosByDate[orientYMD] = [];
+      wrosByDate[orientYMD].push(w);
+    });
+
+    function weekLabel(){
+      var startStr = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      var endStr = weekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      if (offset === 0) return 'This week · ' + startStr + ' – ' + endStr;
+      if (offset === 1) return 'Next week · ' + startStr + ' – ' + endStr;
+      if (offset === -1) return 'Last week · ' + startStr + ' – ' + endStr;
+      return startStr + ' – ' + endStr;
+    }
+
+    /* Per-card error boundary: a single bad record shouldn't crash the
+       whole view. Returns a small inline error placeholder if fn throws. */
+    function safeRender(key, fn){
+      try { return fn(); }
+      catch (err) {
+        return e('div', {
+          key: key,
+          style: {
+            padding: '8px 12px', background: '#fff5f5',
+            border: '1px solid var(--red)', borderRadius: '6px',
+            fontSize: '12px', color: 'var(--red)', marginBottom: '6px'
+          }
+        }, 'Could not render this card.' + (err && err.message ? (' ' + err.message) : ''));
+      }
+    }
+
+    function gxCard(o){
+      var c = o.cls;
+      var logged = !!o.logged;
+      var stripeColor = logged ? 'var(--green)' : (CLASS_TYPE_COLOR[c.classType] || 'var(--teal)');
+      return e('div', {
+        key: 'gx-' + c.id + ':' + o.date,
+        onClick: function(){
+          if (props.onOpenClass) {
+            /* Admin: delegate detail nav up so admin's outer single-header
+               swap pattern is preserved. */
+            props.onOpenClass(c.id);
+            return;
+          }
+          setClassDetailId(c.id);
+          setHeaderContext({
+            title: c.name, sub: c.location,
+            onBack: function(){ setClassDetailId(null); setHeaderContext(null); }
+          });
+        },
+        style: {
+          background: logged ? 'var(--green-bg)' : '#fff',
+          border: '1.5px solid var(--border)',
+          borderLeft: '4px solid ' + stripeColor,
+          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
+          cursor: 'pointer', fontSize: '13px'
+        }
+      },
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          e('div', { style: { flex: 1, minWidth: 0 } },
+            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } },
+              c.name,
+              logged && e('span', { style: { color: 'var(--green)', marginLeft: '6px', fontWeight: 700 } }, '✓')
+            ),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+              (c.startTime ? formatTime12(c.startTime) : '') +
+              ' · ' + (c.location || '—') +
+              (c.room ? (' · ' + c.room) : '')
+            )
+          ),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'GX')
+        )
+      );
+    }
+
+    function ptCard(item){
+      var sess = item.session;
+      var client = item.client;
+      var status = sess.status || 'attended';
+      var stColor = SESSION_STATUS_COLOR[status] || 'var(--slate)';
+      var stLabel = SESSION_STATUS_LABEL[status] || status;
+      var isScheduled = status === 'scheduled';
+      var isOverdueScheduled = isScheduled && sess.date < todayYMD;
+      var stripeColor = isOverdueScheduled ? 'var(--red)' : (isScheduled ? 'var(--gold)' : stColor);
+      return e('div', {
+        key: 'pt-' + sess.id,
+        onClick: function(){
+          if (isScheduled && allowDirectSignOff) {
+            setSignOff({ client: client, session: sess });
+            return;
+          }
+          if (props.onOpenClient) {
+            props.onOpenClient(client.id);
+            return;
+          }
+          setClientDetailId(client.id);
+          setHeaderContext({
+            title: client.name, sub: client.location,
+            onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
+          });
+        },
+        style: {
+          background: '#fff',
+          border: '1.5px solid var(--border)',
+          borderLeft: '4px solid ' + stripeColor,
+          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
+          cursor: 'pointer', fontSize: '13px'
+        }
+      },
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          e('div', { style: { flex: 1, minWidth: 0 } },
+            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, client.name),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+              (sess.time ? formatTime12(sess.time) : '—') + ' · ' + stLabel
+            )
+          ),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'PT')
+        )
+      );
+    }
+
+    function wroCard(w){
+      return e('div', {
+        key: 'wro-' + w.id,
+        onClick: function(){ setWroOpen(w); },
+        style: {
+          background: '#fff',
+          border: '1.5px solid var(--border)',
+          borderLeft: '4px solid var(--gold)',
+          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
+          cursor: 'pointer', fontSize: '13px'
+        }
+      },
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          e('div', { style: { flex: 1, minWidth: 0 } },
+            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, w.participantName || 'WRO'),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+              ((w.post && w.post.timeIn) ? formatTime12(w.post.timeIn) : '—') + ' · ' + (w.location || 'CMRC')
+            )
+          ),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'WRO')
+        )
+      );
+    }
+
+    var days = [];
+    for (var i = 0; i < 7; i++) {
+      var d = addDays(weekStart, i);
+      var ymd = toYMD(d);
+      var isToday = ymd === todayYMD;
+      var dayLabel = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      var gxList = gxByDate[ymd] || [];
+      var ptList = ptByDate[ymd] || [];
+      var wroList = wrosByDate[ymd] || [];
+      var hasAny = gxList.length + ptList.length + wroList.length > 0;
+      days.push(e('div', {
+        key: ymd,
+        style: {
+          background: isToday ? 'var(--cream-2)' : '#fff',
+          border: '1.5px solid ' + (isToday ? 'var(--teal)' : 'var(--border)'),
+          borderRadius: '12px',
+          padding: '10px 12px',
+          marginBottom: '10px'
+        }
+      },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: hasAny ? '8px' : '0' } },
+          e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, dayLabel),
+          isToday && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '999px', background: 'var(--teal)', color: '#fff', fontWeight: 700, letterSpacing: '0.05em' } }, 'TODAY')
+        ),
+        hasAny
+          ? e('div', null,
+              gxList.map(function(o){ return safeRender('gx-' + (o.cls && o.cls.id) + ':' + o.date, function(){ return gxCard(o); }); }),
+              ptList.map(function(it){ return safeRender('pt-' + (it.session && it.session.id), function(){ return ptCard(it); }); }),
+              wroList.map(function(w){ return safeRender('wro-' + w.id, function(){ return wroCard(w); }); })
+            )
+          : e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No sessions or classes')
+      ));
+    }
+
+    var canGoBack = offset > -4;
+
+    return e('div', null,
+      /* Week navigation */
+      e('div', {
+        style: {
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: '10px',
+          background: 'var(--navy)', color: '#fff',
+          padding: '10px 14px', borderRadius: '12px', marginBottom: '12px'
+        }
+      },
+        e('button', {
+          onClick: function(){ if (canGoBack) setOffset(offset - 1); },
+          disabled: !canGoBack,
+          'aria-label': 'Previous week',
+          style: {
+            background: 'transparent', border: 'none',
+            color: canGoBack ? '#fff' : 'rgba(255,255,255,0.3)',
+            fontSize: '20px', cursor: canGoBack ? 'pointer' : 'not-allowed',
+            padding: '4px 10px'
+          }
+        }, '←'),
+        e('div', { style: { fontSize: '14px', fontWeight: 700, textAlign: 'center', flex: 1 } }, weekLabel()),
+        e('button', {
+          onClick: function(){ setOffset(offset + 1); },
+          'aria-label': 'Next week',
+          style: {
+            background: 'transparent', border: 'none', color: '#fff',
+            fontSize: '20px', cursor: 'pointer', padding: '4px 10px'
+          }
+        }, '→')
+      ),
+      offset === -4 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginBottom: '8px', textAlign: 'center' } },
+        'Earliest viewable week (4 weeks back).'
+      ),
+      days,
+      /* Modals/swaps */
+      signOff && e(LogSessionModal, {
+        ctx: ctx,
+        client: signOff.client,
+        existingSession: signOff.session,
+        onClose: function(){ setSignOff(null); },
+        onLog: function(sess){
+          var needsRecovery = sess.status === 'no_show' || sess.status === 'late_cancel';
+          var clientId = signOff.client.id;
+          var sessId = signOff.session.id;
+          ctx.updateSession(clientId, sessId, {
+            status: sess.status, date: sess.date, time: sess.time,
+            note: sess.note, durationHours: sess.durationHours,
+            trainerSig: sess.trainerSig, clientSig: sess.clientSig
+          });
+          setSignOff(null);
+          ctx.toast('Session signed off ✓');
+          if (needsRecovery) setRecoveryTarget({
+            clientId: clientId, sessionId: sessId,
+            status: sess.status, durationHours: sess.durationHours || 1
+          });
+        }
+      }),
+      recoveryTarget && e(ServiceRecoveryModal, {
+        ctx: ctx,
+        durationHours: recoveryTarget.durationHours,
+        sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
+        onClose: function(){ setRecoveryTarget(null); },
+        onSave: function(recovery){
+          ctx.updateSession(recoveryTarget.clientId, recoveryTarget.sessionId, { serviceRecovery: recovery });
+          setRecoveryTarget(null);
+          ctx.toast('Recovery logged ✓');
+        }
+      }),
+      wroOpen && e(PostWROModal, {
+        ctx: ctx,
+        wro: wroOpen,
+        onClose: function(){ setWroOpen(null); },
+        onSave: function(updated){
+          ctx.upsertWRO(updated);
+          setWroOpen(null);
+          ctx.toast('Orientation saved ✓');
+        }
+      })
+    );
+  }
+
+  /* ============ ADMIN: Schedule (per-trainer week view) ============
+     Wraps TrainerWeekView with a trainer dropdown. Admin uses callback
+     props (onOpenClient/onOpenClass) so detail navigation lifts back up to
+     AdminDashboard's existing single-swap pattern instead of double-stacking
+     headers. Direct sign-off is disabled - admin opens ClientDetail. */
+  function AdminScheduleView(props){
+    var ctx = props.ctx;
+    var trainerTuple = useState((ctx.trainers && ctx.trainers[0]) || '');
+    var trainer = trainerTuple[0]; var setTrainer = trainerTuple[1];
+    return e('div', null,
+      e('div', { className: 'field', style: { marginBottom: '14px' } },
+        e('label', null, 'Trainer'),
+        e('select', {
+          value: trainer,
+          onChange: function(ev){ setTrainer(ev.target.value); }
+        },
+          (ctx.trainers || []).map(function(t){
+            return e('option', { key: t, value: t }, t);
+          })
+        )
+      ),
+      trainer
+        ? e(TrainerWeekView, {
+            ctx: ctx,
+            trainerName: trainer,
+            allowDirectSignOff: false,
+            onOpenClient: props.onOpenClient,
+            onOpenClass: props.onOpenClass
+          })
+        : e('div', { className: 'empty' },
+            e('div', { className: 'icon' }, '📆'),
+            e('div', null, 'Pick a trainer to see their week.')
+          )
     );
   }
 
@@ -4028,6 +4478,7 @@
 
     var subLabel = {
       today: 'Today',
+      schedule: 'Schedule',
       pt: 'Personal Training',
       gx: 'Group Exercise',
       leads: 'Leads',
@@ -4057,6 +4508,7 @@
 
     var content;
     if (tab === 'today') content = e(TrainerToday, { ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'schedule') content = e(TrainerWeekView, { ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
     else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'leads') content = e(TrainerLeadsView, { ctx: ctx });
@@ -4182,6 +4634,13 @@
           e('span', null, 'Today')
         ),
         e('button', {
+          className: tab === 'schedule' ? 'active' : '',
+          onClick: function(){ navigate('schedule'); }
+        },
+          e('span', { className: 'icon' }, '\ud83d\udcc6'),
+          e('span', null, 'Schedule')
+        ),
+        e('button', {
           className: tab === 'pt' ? 'active' : '',
           onClick: function(){ navigate('pt'); }
         },
@@ -4237,6 +4696,28 @@
       return ctx.clients.filter(function(c){ return c.trainerName === trainerName; });
     }, [ctx.clients, trainerName]);
 
+    /* Upcoming scheduled sessions across this trainer's clients. Includes
+       overdue (past-due 'scheduled' that still need sign-off) at the top,
+       then today's, then future ascending. */
+    var todayYMD = todayStr();
+    var upcomingScheduled = useMemo(function(){
+      var rows = [];
+      myClients.forEach(function(client){
+        (client.sessions || []).forEach(function(s){
+          if (s.status !== 'scheduled') return;
+          rows.push({ client: client, session: s });
+        });
+      });
+      rows.sort(function(a, b){
+        var aOverdue = a.session.date < todayYMD;
+        var bOverdue = b.session.date < todayYMD;
+        if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+        if (a.session.date !== b.session.date) return a.session.date < b.session.date ? -1 : 1;
+        return (a.session.time || '') < (b.session.time || '') ? -1 : 1;
+      });
+      return rows;
+    }, [myClients, todayYMD]);
+
     var setHeaderContext = props.setHeaderContext || function(){};
     if (detailId) {
       var cl = ctx.clients.find(function(c){ return c.id === detailId; });
@@ -4249,6 +4730,81 @@
     }
 
     return e('div', null,
+      /* Upcoming scheduled sessions section - chronological forward,
+         overdue at top in red, taps route to ClientDetail. */
+      e('div', { style: { marginBottom: '20px' } },
+        e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } },
+          'Upcoming Scheduled Sessions' + (upcomingScheduled.length > 0 ? (' (' + upcomingScheduled.length + ')') : '')
+        ),
+        upcomingScheduled.length === 0
+          ? e('div', {
+              style: {
+                background: 'var(--cream-2)', border: '1.5px solid var(--border)',
+                borderRadius: '10px', padding: '14px',
+                fontSize: '13px', color: 'var(--slate-soft)', fontStyle: 'italic',
+                textAlign: 'center'
+              }
+            }, 'No upcoming scheduled sessions')
+          : upcomingScheduled.map(function(item){
+              var sess = item.session;
+              var client = item.client;
+              var isOverdue = sess.date < todayYMD;
+              var isToday = sess.date === todayYMD;
+              var stripeColor = isOverdue ? 'var(--red)' : (isToday ? 'var(--gold)' : 'var(--teal)');
+              var daysOverdue = isOverdue
+                ? Math.floor((parseYMD(todayYMD).getTime() - parseYMD(sess.date).getTime()) / 86400000)
+                : 0;
+              var pillText = isOverdue
+                ? ('Overdue · ' + daysOverdue + 'd')
+                : isToday ? 'Today' : null;
+              var remaining = sessionsRemaining(client);
+              return e('div', {
+                key: client.id + ':' + sess.id,
+                onClick: function(){
+                  setDetailId(client.id);
+                  setHeaderContext({
+                    title: client.name, sub: client.location,
+                    onBack: function(){ setDetailId(null); setHeaderContext(null); }
+                  });
+                },
+                style: {
+                  background: '#fff',
+                  border: '1.5px solid var(--border)',
+                  borderLeft: '4px solid ' + stripeColor,
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  marginBottom: '8px',
+                  cursor: 'pointer',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  gap: '10px', flexWrap: 'wrap'
+                }
+              },
+                e('div', { style: { flex: 1, minWidth: '160px' } },
+                  e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                    e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, client.name),
+                    pillText && e('span', {
+                      style: {
+                        fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                        background: stripeColor, color: '#fff',
+                        fontWeight: 700, letterSpacing: '0.04em'
+                      }
+                    }, pillText)
+                  ),
+                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+                    formatShort(parseYMD(sess.date)) + (sess.time ? (' · ' + formatTime12(sess.time)) : '')
+                  )
+                ),
+                e('span', {
+                  style: {
+                    fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
+                    background: remaining === 0 ? 'var(--red)' : (remaining <= 2 ? 'var(--amber)' : 'var(--teal-bg)'),
+                    color: remaining <= 2 ? '#fff' : 'var(--teal)',
+                    fontWeight: 700, fontSize: '11px', whiteSpace: 'nowrap'
+                  }
+                }, remaining + ' left')
+              );
+            })
+      ),
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'My Clients'),
@@ -6110,6 +6666,13 @@
     var fill = (cap && avg) ? Math.round((avg / cap) * 100) : null;
     var typeColor = CLASS_TYPE_COLOR[c.classType] || 'var(--teal)';
 
+    /* "Today logged" indicator: only positive state (no clutter when not
+       logged). Today qualifies only if the class meets today (dayOfWeek
+       matches) and today's date has an attendance record. */
+    var todayYMDClass = todayStr();
+    var meetsToday = normalizeDow(c.dayOfWeek) === IDX_TO_DOW[parseYMD(todayYMDClass).getDay()];
+    var todayLogged = meetsToday && !!att.find(function(a){ return a.date === todayYMDClass; });
+
     /* v2.2: season status. Ended classes get a strike-through styling and
        a status pill so they're visible in lists but clearly retired. */
     var seasonStatus = classSeasonStatus(c);
@@ -6148,11 +6711,18 @@
         ),
         e('span', { className: 'pill pill-' + (c.location === 'CMRC' ? 'cmrc' : 'baca') }, c.location)
       ),
-      e('div', { style: { display:'flex', gap:'14px', fontSize:'13px', color:'var(--slate)', marginTop:'8px', flexWrap:'wrap' } },
+      e('div', { style: { display:'flex', gap:'14px', fontSize:'13px', color:'var(--slate)', marginTop:'8px', flexWrap:'wrap', alignItems: 'center' } },
         e('span', null, e('b', null, total), ' logged'),
         e('span', null, 'Avg: ', e('b', null, avg)),
         fill != null && e('span', { style: { color: fill >= 80 ? 'var(--green)' : fill >= 50 ? 'var(--amber)' : 'var(--slate)' } },
-          'Fill: ', e('b', null, fill + '%'))
+          'Fill: ', e('b', null, fill + '%')),
+        todayLogged && e('span', {
+          style: {
+            background: 'var(--green-bg)', color: 'var(--green)',
+            padding: '2px 8px', borderRadius: '999px',
+            fontSize: '11px', fontWeight: 700, letterSpacing: '0.04em'
+          }
+        }, 'Today logged ✓')
       )
     );
   }
@@ -10023,6 +10593,7 @@
       ],
       both: [
         { id: 'audit',       label: 'Audit' },
+        { id: 'schedule',    label: 'Schedule' },
         { id: 'admin_time',  label: 'Admin Time' },
         { id: 'contacts',    label: 'Contacts' },
         { id: 'instructors', label: 'Manage Team' }
@@ -10087,6 +10658,12 @@
       tabView = e(SubApprovalPanel, { ctx: ctx });
     } else if (tab === 'audit') {
       tabView = e(AuditView, { ctx: ctx, onClassClick: function(id){ setClassDetailId(id); } });
+    } else if (tab === 'schedule') {
+      tabView = e(AdminScheduleView, {
+        ctx: ctx,
+        onOpenClient: function(id){ setClientDetailId(id); },
+        onOpenClass: function(id){ setClassDetailId(id); }
+      });
     } else {
       tabView = e(AdminManageInstructors, { ctx: ctx });
     }
