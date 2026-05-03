@@ -1751,6 +1751,51 @@
 
   /* Session status helpers - supports the cancellation/no-show/strike policy
      documented in the front desk education doc. */
+  /* Threshold for flagging a client's package as "stale" (no recent
+     session activity). Tunable here. */
+  var STALE_DAYS_THRESHOLD = 30;
+
+  /* Package-renewal flags for a single client. Pure function, recomputed
+     on each render. Excludes depleted packages (handled elsewhere). Returns
+     { lastSessionFlag, staleFlag, daysSince, lastSessionDate }. */
+  function clientPackageFlags(c){
+    var out = { lastSessionFlag: false, staleFlag: false, daysSince: null, lastSessionDate: null };
+    if (!c) return out;
+    var remaining = sessionsRemaining(c);
+    if (remaining <= 0) return out;
+    /* Last session: only flag when exactly 1 remaining (consistent with
+       existing 1-remaining banner). */
+    if (remaining === 1) out.lastSessionFlag = true;
+    /* Stale: derive reference date from most recent session, falling back
+       to package purchase / creation. */
+    var sessions = c.sessions || [];
+    var lastDate = null;
+    sessions.forEach(function(s){
+      if (!s.date) return;
+      if (!lastDate || s.date > lastDate) lastDate = s.date;
+    });
+    if (!lastDate) {
+      var pkgs = getPackages(c);
+      pkgs.forEach(function(p){
+        var d = p.purchaseDate;
+        if (!d) return;
+        if (!lastDate || d > lastDate) lastDate = d;
+      });
+    }
+    if (!lastDate) lastDate = c.createdAt ? c.createdAt.substring(0,10) : null;
+    out.lastSessionDate = lastDate;
+    if (lastDate) {
+      var ref = parseYMD(lastDate);
+      var today = parseYMD(todayStr());
+      if (ref && today) {
+        var days = Math.floor((today.getTime() - ref.getTime()) / 86400000);
+        out.daysSince = days;
+        if (days >= STALE_DAYS_THRESHOLD) out.staleFlag = true;
+      }
+    }
+    return out;
+  }
+
   /* SESSION_STATUSES is the picker list of OUTCOMES the trainer can choose
      when signing off. 'scheduled' is a placeholder state for pre-booked
      sessions and is intentionally not in this list - it's not a sign-off
@@ -3581,7 +3626,15 @@
       return wroState(w) === 'pending';
     });
 
-    var totalCount = openSubs.length + waitingLeads.length + availableWros.length;
+    /* This trainer's own clients with package alerts */
+    var myClients = (ctx.clients || []).filter(function(c){
+      return trainerNameMatches(trainerName, c.trainerName);
+    });
+    var lastSessionClients = myClients.filter(function(c){ return clientPackageFlags(c).lastSessionFlag; });
+    var staleClients = myClients.filter(function(c){ return clientPackageFlags(c).staleFlag; });
+
+    var totalCount = openSubs.length + waitingLeads.length + availableWros.length +
+                     lastSessionClients.length + staleClients.length;
     if (totalCount === 0) return null;
 
     function chip(label, count, color, onClick){
@@ -3649,6 +3702,18 @@
           openSubs.length,
           '#7B68B6',
           function(){ onJumpToTab && onJumpToTab('gx'); }
+        ),
+        lastSessionClients.length > 0 && chip(
+          'On last session',
+          lastSessionClients.length,
+          'var(--amber)',
+          function(){ onJumpToTab && onJumpToTab('pt', { filter: 'last_session' }); }
+        ),
+        staleClients.length > 0 && chip(
+          'Stale packages',
+          staleClients.length,
+          'var(--slate)',
+          function(){ onJumpToTab && onJumpToTab('pt', { filter: 'stale' }); }
         ),
         waitingLeads.length > 0 && chip(
           'New clients waiting',
@@ -4469,8 +4534,15 @@
     var headerContextTuple = useState(null);
     var headerContext = headerContextTuple[0]; var setHeaderContext = headerContextTuple[1];
 
-    function navigate(t){
+    /* PT tab filter signal. Set by notification-bar chip taps to land the
+       user on a pre-filtered PT client list. Cleared on every tab nav so
+       it never leaks across switches. */
+    var ptFilterTuple = useState(null);
+    var ptFilter = ptFilterTuple[0]; var setPtFilter = ptFilterTuple[1];
+
+    function navigate(t, opts){
       setHeaderContext(null);
+      setPtFilter((opts && opts.filter) || null);
       setTab(t);
     }
 
@@ -4509,7 +4581,7 @@
     var content;
     if (tab === 'today') content = e(TrainerToday, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'schedule') content = e(TrainerWeekView, { ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
-    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: ptFilter });
     else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'leads') content = e(TrainerLeadsView, { ctx: ctx });
     else if (tab === 'time_card') content = e(TimeCardView, { ctx: ctx });
@@ -4551,7 +4623,7 @@
            Surfaces available pickups across categories. */
         tab !== 'time_card' && e(TrainerNotificationBar, {
           ctx: ctx,
-          onJumpToTab: function(t){ navigate(t); }
+          onJumpToTab: function(t, opts){ navigate(t, opts); }
         }),
         /* Compact pay-period summary chip (suppressed on today + time_card
            tabs - today shows its own bigger summary, time card is the full
@@ -4696,6 +4768,19 @@
       return ctx.clients.filter(function(c){ return c.trainerName === trainerName; });
     }, [ctx.clients, trainerName]);
 
+    /* Filter signal from a notification-bar chip tap. Filters the My
+       Clients list to just last-session or stale clients. The full client
+       set still drives the upcoming-sessions list above so the trainer
+       sees the full week regardless of filter. */
+    var initialFilter = props.initialFilter || null;
+    var visibleClients = myClients.filter(function(c){
+      if (!initialFilter) return true;
+      var f = clientPackageFlags(c);
+      if (initialFilter === 'last_session') return f.lastSessionFlag;
+      if (initialFilter === 'stale') return f.staleFlag;
+      return true;
+    });
+
     /* Upcoming scheduled sessions across this trainer's clients. Includes
        overdue (past-due 'scheduled' that still need sign-off) at the top,
        then today's, then future ascending. */
@@ -4808,17 +4893,22 @@
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'My Clients'),
-          e('div', { className: 'meta' }, myClients.length + ' active · ' + myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0) + ' sessions remaining')
+          e('div', { className: 'meta' },
+            (initialFilter
+              ? (visibleClients.length + ' of ' + myClients.length + ' shown · filter: ' + (initialFilter === 'last_session' ? 'on last session' : 'stale'))
+              : (myClients.length + ' active · ' + myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0) + ' sessions remaining')
+            )
+          )
         ),
         e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New Client')
       ),
-      myClients.length === 0
+      visibleClients.length === 0
         ? e('div', { className: 'empty' },
             e('div', { className: 'icon' }, '🏋️'),
-            e('h3', null, 'No clients yet'),
-            e('div', null, 'Tap "+ New Client" to add your first client.')
+            e('h3', null, initialFilter ? 'No clients match this filter' : 'No clients yet'),
+            e('div', null, initialFilter ? 'Switch tabs and back to clear the filter.' : 'Tap "+ New Client" to add your first client.')
           )
-        : myClients.map(function(c){
+        : visibleClients.map(function(c){
             return e(ClientCard, {
               key: c.id, client: c,
               onClick: function(){
@@ -4850,11 +4940,30 @@
     var pct = progressPct(c);
     var color = remainingColor(c);
     var barColor = color === 'red' ? 'var(--red)' : color === 'amber' ? 'var(--amber)' : 'var(--green)';
+    var flags = clientPackageFlags(c);
 
     return e('div', { className: 'client-card', onClick: props.onClick },
       e('div', { className: 'top' },
         e('div', null,
-          e('div', { className: 'name' }, c.name),
+          e('div', { className: 'name' },
+            c.name,
+            flags.lastSessionFlag && e('span', {
+              style: {
+                fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                background: 'var(--amber)', color: '#fff',
+                fontWeight: 700, letterSpacing: '0.04em',
+                marginLeft: '8px', verticalAlign: 'middle'
+              }
+            }, '1 left'),
+            flags.staleFlag && e('span', {
+              style: {
+                fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                background: 'var(--slate)', color: '#fff',
+                fontWeight: 700, letterSpacing: '0.04em',
+                marginLeft: '8px', verticalAlign: 'middle'
+              }
+            }, 'stale (' + flags.daysSince + 'd)')
+          ),
           e('div', { className: 'sub' }, 'Trainer: ' + c.trainerName + ' · Purchased ' + formatDate(c.datePurchased))
         ),
         e('span', { className: 'pill pill-' + (c.location === 'CMRC' ? 'cmrc' : 'baca') }, c.location)
@@ -10588,6 +10697,7 @@
       gx: [
         { id: 'today',           label: 'Today' },
         { id: 'classes',         label: 'Group Classes' },
+        { id: 'fill_rate',       label: 'Fill Rate' },
         { id: 'schedule_versions', label: 'Schedule Versions' },
         { id: 'sub_approvals',   label: 'Sub Approvals' }
       ],
@@ -10664,6 +10774,8 @@
         onOpenClient: function(id){ setClientDetailId(id); },
         onOpenClass: function(id){ setClassDetailId(id); }
       });
+    } else if (tab === 'fill_rate') {
+      tabView = e(AdminGXFillRate, { ctx: ctx });
     } else {
       tabView = e(AdminManageInstructors, { ctx: ctx });
     }
@@ -10876,6 +10988,11 @@
     var filterLoc = filterLocTuple[0];
     var setFilterLoc = filterLocTuple[1];
 
+    /* Package-alert filter: '' (off), 'last_session', or 'stale'. */
+    var alertFilterTuple = useState('');
+    var alertFilter = alertFilterTuple[0];
+    var setAlertFilter = alertFilterTuple[1];
+
     var newOpenTuple = useState(false);
     var newOpen = newOpenTuple[0];
     var setNewOpen = newOpenTuple[1];
@@ -10884,12 +11001,123 @@
     var importOpen = importOpenTuple[0];
     var setImportOpen = importOpenTuple[1];
 
+    /* Counts for the alert chips (computed against full client set) */
+    var alertCounts = (function(){
+      var ls = 0, st = 0;
+      ctx.clients.forEach(function(c){
+        var f = clientPackageFlags(c);
+        if (f.lastSessionFlag) ls++;
+        if (f.staleFlag) st++;
+      });
+      return { last_session: ls, stale: st };
+    })();
+
     var filtered = ctx.clients.filter(function(c){
       if (filterLoc && c.location !== filterLoc) return false;
       if (search && c.name.toLowerCase().indexOf(search.toLowerCase()) === -1 &&
           (c.trainerName || '').toLowerCase().indexOf(search.toLowerCase()) === -1) return false;
+      if (alertFilter) {
+        var f = clientPackageFlags(c);
+        if (alertFilter === 'last_session' && !f.lastSessionFlag) return false;
+        if (alertFilter === 'stale' && !f.staleFlag) return false;
+      }
       return true;
     }).sort(function(a,b){ return a.name.localeCompare(b.name); });
+
+    function exportPTClientsCSV(){
+      function csv(v){
+        if (v == null) return '';
+        var s = String(v).replace(/"/g, '""');
+        return '"' + s + '"';
+      }
+      var rows = [];
+      rows.push([
+        'Client Name','Phone','Email','Active Package Type','Sessions Purchased',
+        'Sessions Used','Sessions Remaining','Utilization %','Last Session Date',
+        'Days Since Last Session','Total Lifetime Sessions','Created Date','Primary Trainer'
+      ].join(','));
+      filtered.forEach(function(c){
+        var pkgs = getPackages(c);
+        var activePkg = pkgs[0] || null;
+        var purchased = totalSessionsPurchased(c);
+        var sessions = c.sessions || [];
+        var used = sessions.filter(function(s){ return s.status !== 'excused'; }).length;
+        var remaining = sessionsRemaining(c);
+        var utilization = purchased > 0 ? Math.round((used / purchased) * 100) : '';
+        var lastDate = null;
+        sessions.forEach(function(s){ if (s.date && (!lastDate || s.date > lastDate)) lastDate = s.date; });
+        var daysSince = '';
+        if (lastDate) {
+          var ref = parseYMD(lastDate); var today = parseYMD(todayStr());
+          if (ref && today) daysSince = Math.floor((today.getTime() - ref.getTime()) / 86400000);
+        }
+        rows.push([
+          csv(c.name),
+          csv(c.phone),
+          csv(c.email),
+          csv(activePkg ? (activePkg.type || (activePkg.sessions + '-session')) : ''),
+          csv(purchased),
+          csv(used),
+          csv(remaining),
+          csv(utilization === '' ? '' : utilization),
+          csv(lastDate || ''),
+          csv(daysSince === '' ? '' : daysSince),
+          csv(sessions.length),
+          csv(c.createdAt ? c.createdAt.substring(0,10) : ''),
+          csv(c.trainerName)
+        ].join(','));
+      });
+      var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'RRPR_pt_clients_' + todayStr().replace(/-/g, '') + '.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
+      ctx.toast('Clients CSV exported ✓');
+    }
+
+    function exportPTSessionsCSV(){
+      function csv(v){
+        if (v == null) return '';
+        var s = String(v).replace(/"/g, '""');
+        return '"' + s + '"';
+      }
+      var rows = [];
+      rows.push([
+        'Date','Client Name','Trainer','Status','Duration (min)',
+        'Package Type','Both Signed','Notes'
+      ].join(','));
+      ctx.clients.forEach(function(c){
+        var pkgs = getPackages(c);
+        var activePkg = pkgs[0] || null;
+        var pkgLabel = activePkg ? (activePkg.type || (activePkg.sessions + '-session')) : '';
+        (c.sessions || []).forEach(function(s){
+          var bothSigned = (s.trainerSig && s.clientSig) ? 'yes' : 'no';
+          var dur = (typeof s.durationHours === 'number') ? Math.round(s.durationHours * 60) : '';
+          var note = s.note || '';
+          if (note.length > 200) note = note.substring(0, 200);
+          rows.push([
+            csv(s.date || ''),
+            csv(c.name),
+            csv(c.trainerName),
+            csv(s.status || ''),
+            csv(dur === '' ? '' : dur),
+            csv(pkgLabel),
+            csv(bothSigned),
+            csv(note)
+          ].join(','));
+        });
+      });
+      var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'RRPR_pt_sessions_' + todayStr().replace(/-/g, '') + '.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
+      ctx.toast('Sessions CSV exported ✓');
+    }
 
     return e('div', null,
       e('div', { className: 'section-head' },
@@ -10897,17 +11125,42 @@
           e('h2', null, 'All Clients'),
           e('div', { className: 'meta' }, filtered.length + ' of ' + ctx.clients.length)
         ),
-        e('div', { style: { display: 'flex', gap: '8px' } },
+        e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTClientsCSV, title: 'Export filtered clients to CSV' }, '↓ Export Clients CSV'),
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTSessionsCSV, title: 'Export all sessions across all clients to CSV' }, '↓ Export Sessions CSV'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setImportOpen(true); } }, '↑ Import from RecTrac'),
           e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New Client')
         )
       ),
-      e('div', { style: { display: 'flex', gap: '10px', marginBottom: '16px' } },
+      e('div', { style: { display: 'flex', gap: '10px', marginBottom: '10px' } },
         e('input', { placeholder: 'Search name or trainer…', value: search, onChange: function(ev){ setSearch(ev.target.value); } }),
         e('select', { value: filterLoc, onChange: function(ev){ setFilterLoc(ev.target.value); }, style: { maxWidth: '140px' } },
           e('option', { value: '' }, 'All'),
           LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
         )
+      ),
+      /* Package-alert filter chips */
+      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' } },
+        [
+          { id: '', label: 'All clients', count: ctx.clients.length },
+          { id: 'last_session', label: 'On last session', count: alertCounts.last_session, color: 'var(--amber)' },
+          { id: 'stale', label: 'Stale (' + STALE_DAYS_THRESHOLD + 'd+)', count: alertCounts.stale, color: 'var(--slate)' }
+        ].map(function(opt){
+          var active = alertFilter === opt.id;
+          var color = opt.color || 'var(--navy)';
+          return e('button', {
+            key: opt.id || 'all',
+            onClick: function(){ setAlertFilter(opt.id); },
+            style: {
+              padding: '6px 12px', borderRadius: '999px',
+              border: '1.5px solid ' + (active ? color : 'var(--border)'),
+              background: active ? color : '#fff',
+              color: active ? '#fff' : 'var(--slate)',
+              fontWeight: 600, fontSize: '12px',
+              cursor: 'pointer'
+            }
+          }, opt.label + ' (' + opt.count + ')');
+        })
       ),
       filtered.length === 0
         ? e('div', { className: 'empty' },
@@ -11457,6 +11710,56 @@
       .slice()
       .sort(function(a,b){ return a.name.localeCompare(b.name); });
 
+    function exportGXClassesCSV(){
+      function csv(v){
+        if (v == null) return '';
+        var s = String(v).replace(/"/g, '""');
+        return '"' + s + '"';
+      }
+      /* Default window is the current pay period. */
+      var period = payPeriodForDate(new Date());
+      var occs = occurrencesInWindow(ctx.classes, period.start, period.end, ctx.closures);
+      var byClassId = {};
+      occs.forEach(function(o){
+        var id = o.cls.id;
+        if (!byClassId[id]) byClassId[id] = { occCount: 0, attTotal: 0 };
+        byClassId[id].occCount++;
+        if (o.attendance) byClassId[id].attTotal += (o.attendance.headcount || 0);
+      });
+      var rows = [];
+      rows.push([
+        'Class Name','Day of Week','Time','Instructor','Capacity',
+        'Occurrences in Window','Total Attendance','Avg Attendance','Fill Rate %'
+      ].join(','));
+      visible.forEach(function(c){
+        var stats = byClassId[c.id] || { occCount: 0, attTotal: 0 };
+        var avg = stats.occCount > 0 ? Math.round((stats.attTotal / stats.occCount) * 10) / 10 : '';
+        var fill = '';
+        if (c.capacity && stats.occCount > 0) {
+          fill = Math.round((stats.attTotal / (c.capacity * stats.occCount)) * 100);
+        }
+        rows.push([
+          csv(c.name),
+          csv(c.dayOfWeek || ''),
+          csv(c.startTime || ''),
+          csv(c.instructor || ''),
+          csv(c.capacity == null ? '' : c.capacity),
+          csv(stats.occCount),
+          csv(stats.attTotal),
+          csv(avg === '' ? '' : avg),
+          csv(fill === '' ? '' : fill)
+        ].join(','));
+      });
+      var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'RRPR_gx_classes_' + todayStr().replace(/-/g, '') + '.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 500);
+      ctx.toast('Classes CSV exported \u2713');
+    }
+
     return e('div', null,
       e('div', { className: 'section-head' },
         e('div', null,
@@ -11468,7 +11771,10 @@
             counts.all + ' total'
           )
         ),
-        e('button', { className: 'btn btn-teal', onClick: function(){ setNewOpen(true); } }, '+ New Class')
+        e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: exportGXClassesCSV, title: 'Export classes with attendance/fill stats over the current pay period' }, '\u2193 Export CSV'),
+          e('button', { className: 'btn btn-teal', onClick: function(){ setNewOpen(true); } }, '+ New Class')
+        )
       ),
       e('div', { style: { display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap' } },
         ['active', 'upcoming', 'ended', 'all'].map(function(s){
@@ -11506,6 +11812,251 @@
           ctx.toast('Class created \u2713');
         }
       })
+    );
+  }
+
+  /* ============ ADMIN: GX Fill Rate analytics ============
+     Sortable per-class fill stats over a configurable date window. Default
+     window is last 90 days. Reuses occurrencesInWindow for occurrence count
+     and attendance roll-up. */
+  function AdminGXFillRate(props){
+    var ctx = props.ctx;
+
+    /* Window preset: last_30 | last_90 | pay_period | custom */
+    var presetTuple = useState('last_90');
+    var preset = presetTuple[0]; var setPreset = presetTuple[1];
+
+    /* Custom range (only used when preset === 'custom'). */
+    var todayY = todayStr();
+    var customStartTuple = useState(toYMD(addDays(parseYMD(todayY), -90)));
+    var customStart = customStartTuple[0]; var setCustomStart = customStartTuple[1];
+    var customEndTuple = useState(todayY);
+    var customEnd = customEndTuple[0]; var setCustomEnd = customEndTuple[1];
+
+    var instructorTuple = useState('');
+    var instructorFilter = instructorTuple[0]; var setInstructorFilter = instructorTuple[1];
+
+    var sortColTuple = useState('fill');
+    var sortCol = sortColTuple[0]; var setSortCol = sortColTuple[1];
+    var sortDirTuple = useState('desc');
+    var sortDir = sortDirTuple[0]; var setSortDir = sortDirTuple[1];
+
+    /* Resolve window dates */
+    var windowStart, windowEnd;
+    if (preset === 'last_30') {
+      windowEnd = parseYMD(todayY);
+      windowStart = addDays(windowEnd, -30);
+    } else if (preset === 'last_90') {
+      windowEnd = parseYMD(todayY);
+      windowStart = addDays(windowEnd, -90);
+    } else if (preset === 'pay_period') {
+      var period = payPeriodForDate(new Date());
+      windowStart = period.start;
+      windowEnd = period.end;
+    } else {
+      windowStart = parseYMD(customStart) || parseYMD(todayY);
+      windowEnd = parseYMD(customEnd) || parseYMD(todayY);
+    }
+
+    var occs = occurrencesInWindow(ctx.classes, windowStart, windowEnd, ctx.closures);
+
+    /* Roll up per class */
+    var byClassId = {};
+    occs.forEach(function(o){
+      var id = o.cls.id;
+      if (!byClassId[id]) byClassId[id] = { cls: o.cls, occCount: 0, attTotal: 0 };
+      byClassId[id].occCount++;
+      if (o.attendance) byClassId[id].attTotal += (o.attendance.headcount || 0);
+    });
+
+    var rows = Object.keys(byClassId).map(function(id){
+      var rec = byClassId[id];
+      var c = rec.cls;
+      var avg = rec.occCount > 0 ? rec.attTotal / rec.occCount : 0;
+      var fill = (c.capacity && rec.occCount > 0)
+        ? (rec.attTotal / (c.capacity * rec.occCount)) * 100
+        : null;
+      return {
+        cls: c,
+        name: c.name,
+        dayTime: (c.dayOfWeek || '') + (c.startTime ? (' ' + formatTime12(c.startTime)) : ''),
+        instructor: c.instructor || '',
+        capacity: c.capacity,
+        occCount: rec.occCount,
+        attTotal: rec.attTotal,
+        avg: avg,
+        fill: fill
+      };
+    });
+
+    /* Instructor filter */
+    if (instructorFilter) {
+      rows = rows.filter(function(r){ return r.instructor === instructorFilter; });
+    }
+
+    /* Sort */
+    rows.sort(function(a, b){
+      var av, bv;
+      if (sortCol === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+      else if (sortCol === 'instructor') { av = a.instructor.toLowerCase(); bv = b.instructor.toLowerCase(); }
+      else if (sortCol === 'capacity') { av = a.capacity || 0; bv = b.capacity || 0; }
+      else if (sortCol === 'occCount') { av = a.occCount; bv = b.occCount; }
+      else if (sortCol === 'attTotal') { av = a.attTotal; bv = b.attTotal; }
+      else if (sortCol === 'avg') { av = a.avg; bv = b.avg; }
+      else { av = a.fill == null ? -1 : a.fill; bv = b.fill == null ? -1 : b.fill; }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    function toggleSort(col){
+      if (sortCol === col) {
+        setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+      } else {
+        setSortCol(col);
+        setSortDir(col === 'name' || col === 'instructor' ? 'asc' : 'desc');
+      }
+    }
+    function sortIndicator(col){
+      if (sortCol !== col) return '';
+      return sortDir === 'asc' ? ' ▲' : ' ▼';
+    }
+    function fillCellStyle(fill){
+      if (fill == null) return { color: 'var(--slate)' };
+      if (fill >= 80) return { color: 'var(--green)', fontWeight: 700 };
+      if (fill >= 25) return { color: 'var(--amber)', fontWeight: 700 };
+      return { color: 'var(--red)', fontWeight: 700 };
+    }
+
+    /* Distinct instructors for the filter dropdown */
+    var instructorOptions = (function(){
+      var seen = {};
+      ctx.classes.forEach(function(c){ if (c.instructor) seen[c.instructor] = true; });
+      return Object.keys(seen).sort();
+    })();
+
+    var presets = [
+      { id: 'last_30', label: 'Last 30 days' },
+      { id: 'last_90', label: 'Last 90 days' },
+      { id: 'pay_period', label: 'Current pay period' },
+      { id: 'custom', label: 'Custom range' }
+    ];
+
+    return e('div', null,
+      e('div', { className: 'section-head' },
+        e('div', null,
+          e('h2', null, 'Fill Rate'),
+          e('div', { className: 'meta' },
+            toYMD(windowStart) + ' to ' + toYMD(windowEnd) +
+            ' · ' + occs.length + ' occurrence' + (occs.length === 1 ? '' : 's')
+          )
+        )
+      ),
+      /* Window preset chips */
+      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' } },
+        presets.map(function(p){
+          var active = preset === p.id;
+          return e('button', {
+            key: p.id,
+            onClick: function(){ setPreset(p.id); },
+            style: {
+              padding: '6px 12px', borderRadius: '999px',
+              border: '1.5px solid ' + (active ? 'var(--navy)' : 'var(--border)'),
+              background: active ? 'var(--navy)' : '#fff',
+              color: active ? '#fff' : 'var(--slate)',
+              fontWeight: 600, fontSize: '12px',
+              cursor: 'pointer'
+            }
+          }, p.label);
+        })
+      ),
+      /* Custom range inputs (only when preset is custom) */
+      preset === 'custom' && e('div', { style: { display: 'flex', gap: '10px', marginBottom: '10px' } },
+        e('div', { className: 'field', style: { flex: 1, marginBottom: 0 } },
+          e('label', null, 'Start'),
+          e('input', { type: 'date', value: customStart, onChange: function(ev){ setCustomStart(ev.target.value); } })
+        ),
+        e('div', { className: 'field', style: { flex: 1, marginBottom: 0 } },
+          e('label', null, 'End'),
+          e('input', { type: 'date', value: customEnd, onChange: function(ev){ setCustomEnd(ev.target.value); } })
+        )
+      ),
+      /* Instructor filter */
+      e('div', { style: { marginBottom: '14px' } },
+        e('label', { style: { fontSize: '12px', color: 'var(--slate)', marginRight: '8px' } }, 'Instructor:'),
+        e('select', {
+          value: instructorFilter,
+          onChange: function(ev){ setInstructorFilter(ev.target.value); },
+          style: { maxWidth: '200px' }
+        },
+          e('option', { value: '' }, 'All instructors'),
+          instructorOptions.map(function(t){ return e('option', { key: t, value: t }, t); })
+        )
+      ),
+      /* Table */
+      rows.length === 0
+        ? e('div', { className: 'empty' },
+            e('div', { className: 'icon' }, '🏃'),
+            e('h3', null, 'No data'),
+            e('div', null, 'No classes in this window. Try expanding the date range.')
+          )
+        : e('div', {
+            style: {
+              background: '#fff',
+              border: '1.5px solid var(--border)',
+              borderRadius: '12px',
+              overflow: 'hidden',
+              overflowX: 'auto'
+            }
+          },
+            e('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' } },
+              e('thead', null,
+                e('tr', { style: { background: 'var(--cream-2)' } },
+                  [
+                    { id: 'name', label: 'Class' },
+                    { id: 'dayTime', label: 'Day / Time' },
+                    { id: 'instructor', label: 'Instructor' },
+                    { id: 'capacity', label: 'Cap' },
+                    { id: 'occCount', label: 'Occ' },
+                    { id: 'attTotal', label: 'Total Att' },
+                    { id: 'avg', label: 'Avg' },
+                    { id: 'fill', label: 'Fill %' }
+                  ].map(function(col){
+                    return e('th', {
+                      key: col.id,
+                      onClick: col.id === 'dayTime' ? null : function(){ toggleSort(col.id); },
+                      style: {
+                        padding: '10px 12px',
+                        textAlign: 'left',
+                        fontSize: '11px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        color: 'var(--slate)',
+                        cursor: col.id === 'dayTime' ? 'default' : 'pointer',
+                        whiteSpace: 'nowrap'
+                      }
+                    }, col.label + sortIndicator(col.id));
+                  })
+                )
+              ),
+              e('tbody', null,
+                rows.map(function(r){
+                  return e('tr', { key: r.cls.id, style: { borderTop: '1px solid var(--border)' } },
+                    e('td', { style: { padding: '10px 12px', fontWeight: 600, color: 'var(--navy)' } }, r.name),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)' } }, r.dayTime),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)' } }, r.instructor || '—'),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)', textAlign: 'right' } }, r.capacity == null ? '—' : r.capacity),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)', textAlign: 'right' } }, r.occCount),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)', textAlign: 'right' } }, r.attTotal),
+                    e('td', { style: { padding: '10px 12px', color: 'var(--slate)', textAlign: 'right' } }, r.avg.toFixed(1)),
+                    e('td', { style: Object.assign({ padding: '10px 12px', textAlign: 'right' }, fillCellStyle(r.fill)) },
+                      r.fill == null ? '—' : (Math.round(r.fill) + '%')
+                    )
+                  );
+                })
+              )
+            )
+          )
     );
   }
 
