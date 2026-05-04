@@ -1086,7 +1086,7 @@
      Note on leads/queue: the adapter exposes 'leads' but the on-disk
      localStorage key remains cmrc_queue_v1 (no migration). Sub coverage
      is not in localStorage; it lives on class.subAssignments. */
-  var STORAGE_MODE = 'localStorage'; /* 'localStorage' | 'supabase' */
+  var STORAGE_MODE = 'supabase'; /* 'localStorage' | 'supabase' */
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
   var supabaseClient = (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined')
@@ -1213,12 +1213,20 @@
       'followUpBy', 'rectracMemberId', 'packageInfo', 'lostAt'
     ]}),
 
-    /* Trainers: stored as a single settings-row whose value is the array
-       of name strings. Identity passthrough on translation (no per-record
-       fields to remap). */
+    /* Trainers: real table in Supabase (id, name, role, is_active). Local
+       in-memory shape is still an array of name strings - components
+       throughout the app expect ctx.trainers to be ['Alejandra', ...].
+       Translation happens at the storage boundary only. */
     trainers: {
-      toSupabase: function(arr){ return arr; },
-      fromSupabase: function(v){ return v; }
+      toSupabase: function(name){
+        return {
+          name: name,
+          role: 'trainer',
+          is_active: true,
+          updated_at: new Date().toISOString()
+        };
+      },
+      fromSupabase: function(row){ return row.name; }
     },
 
     /* AdminPin: same settings-row pattern. */
@@ -1393,8 +1401,51 @@
     };
   }
 
+  /* Custom trainers storage: replace-all on save since the local shape is
+     name strings (no stable per-name id) and we need removes to propagate.
+     Diff-based save is a session 2c+ optimization. Trainers churn rarely. */
+  var trainersStorage = {
+    load: function(){
+      if (STORAGE_MODE === 'supabase') {
+        return supabaseClient.from('trainers').select('*')
+          .eq('is_active', true)
+          .order('name', { ascending: true })
+          .then(function(res){
+            if (res.error) throw res.error;
+            return (res.data || []).map(translate.trainers.fromSupabase);
+          });
+      }
+      try {
+        var raw = localStorage.getItem('pt_trainers_v4');
+        return Promise.resolve(raw ? JSON.parse(raw) : null);
+      } catch (err) {
+        return Promise.resolve(null);
+      }
+    },
+    save: function(arr){
+      if (STORAGE_MODE === 'supabase') {
+        /* Hard-delete all then re-insert. .delete() requires a predicate;
+           .not('id','is',null) acts as "all rows". */
+        return supabaseClient.from('trainers').delete().not('id', 'is', null)
+          .then(function(res){
+            if (res.error) throw res.error;
+            if (!arr || arr.length === 0) return;
+            var rows = arr.map(translate.trainers.toSupabase);
+            return supabaseClient.from('trainers').insert(rows)
+              .then(function(res2){ if (res2.error) throw res2.error; });
+          });
+      }
+      try {
+        localStorage.setItem('pt_trainers_v4', JSON.stringify(arr));
+        return Promise.resolve();
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    }
+  };
+
   var storage = {
-    trainers:         makeSettingsRow('pt_trainers_v4', 'trainers'),
+    trainers:         trainersStorage,
     clients:          makeEntity('pt_clients_v3', 'clients', translate.clients),
     classes:          makeEntity('cmrc_classes_v2', 'classes', translate.classes),
     closures:         makeEntity('cmrc_closures_v2', 'closures', translate.closures),
@@ -2966,8 +3017,55 @@
     var loadingTuple = useState(true);
     var loading = loadingTuple[0];
     var setLoading = loadingTuple[1];
+    var loadErrorTuple = useState(null);
+    var loadError = loadErrorTuple[0];
+    var setLoadError = loadErrorTuple[1];
 
-    useEffect(function(){
+    /* Real-time sync status: 'connected' | 'disconnected' | 'idle'
+       (idle = localStorage mode or pre-subscribe). Drives the sync dot. */
+    var syncStatusTuple = useState(STORAGE_MODE === 'supabase' ? 'disconnected' : 'idle');
+    var syncStatus = syncStatusTuple[0];
+    var setSyncStatus = syncStatusTuple[1];
+
+    /* Dirty-check refs: each save effect compares current state to the
+       last-persisted value. Refs are populated synchronously inside the
+       load .then so the initial save effect (fired by loading→false) sees
+       state===ref via reference equality and skips. */
+    var trainersRef = useRef(null);
+    var clientsRef = useRef(null);
+    var classesRef = useRef(null);
+    var closuresRef = useRef(null);
+    var wrosRef = useRef(null);
+    var referralsRef = useRef(null);
+    var itemsRef = useRef(null);
+    var queueRef = useRef(null);
+    var contactsRef = useRef(null);
+    var schedVersionsRef = useRef(null);
+    var pinRef = useRef(null);
+
+    /* Strip server-managed timestamps before stringify-comparing local
+       state to last-persisted state. Avoids round-trips chasing clock
+       skew on created_at / updated_at. */
+    function _stripTimestamps(v){
+      if (v == null) return v;
+      if (Array.isArray(v)) return v.map(_stripTimestamps);
+      if (typeof v !== 'object') return v;
+      var out = {};
+      Object.keys(v).forEach(function(k){
+        if (k === 'created_at' || k === 'updated_at' || k === 'createdAt' || k === 'updatedAt') return;
+        out[k] = _stripTimestamps(v[k]);
+      });
+      return out;
+    }
+    function _eq(a, b){
+      if (a === b) return true;
+      try { return JSON.stringify(_stripTimestamps(a)) === JSON.stringify(_stripTimestamps(b)); }
+      catch(_){ return false; }
+    }
+
+    function loadAll(){
+      setLoading(true);
+      setLoadError(null);
       Promise.all([
         storage.trainers.load(),
         storage.clients.load(),
@@ -2981,40 +3079,118 @@
         storage.scheduleVersions.load(),
         storage.adminPin.load()
       ]).then(function(r){
-        if (r[0] != null) setTrainers(r[0]);
-        if (r[1] != null) setClients(r[1]);
-        if (r[2] != null) setClasses(r[2]);
-        if (r[3] != null) setClosures(r[3]);
-        if (r[4] != null) setWros(r[4]);
-        if (r[5] != null) setReferrals(r[5]);
-        if (r[6] != null) setItems(r[6]);
-        if (r[7] != null) setQueue(r[7]);
-        if (r[8] != null) setContacts(r[8]);
-        if (r[9] != null) setScheduleVersions(r[9]);
-        if (r[10] != null) setPin(r[10]);
+        /* Hydrate refs synchronously BEFORE the setX calls so the save
+           useEffects see state === ref on the loading→false transition
+           and skip the redundant initial save. */
+        var t  = r[0] != null ? r[0] : trainers;
+        var c  = r[1] != null ? r[1] : clients;
+        var cl = r[2] != null ? r[2] : classes;
+        var co = r[3] != null ? r[3] : closures;
+        var w  = r[4] != null ? r[4] : wros;
+        var rf = r[5] != null ? r[5] : referrals;
+        var it = r[6] != null ? r[6] : items;
+        var q  = r[7] != null ? r[7] : queue;
+        var ct = r[8] != null ? r[8] : contacts;
+        var sv = r[9] != null ? r[9] : scheduleVersions;
+        var pn = r[10] != null ? r[10] : pin;
+        trainersRef.current = t;
+        clientsRef.current = c;
+        classesRef.current = cl;
+        closuresRef.current = co;
+        wrosRef.current = w;
+        referralsRef.current = rf;
+        itemsRef.current = it;
+        queueRef.current = q;
+        contactsRef.current = ct;
+        schedVersionsRef.current = sv;
+        pinRef.current = pn;
+        setTrainers(t);
+        setClients(c);
+        setClasses(cl);
+        setClosures(co);
+        setWros(w);
+        setReferrals(rf);
+        setItems(it);
+        setQueue(q);
+        setContacts(ct);
+        setScheduleVersions(sv);
+        setPin(pn);
         setLoading(false);
       }).catch(function(err){
-        /* If storage fails, fall through with seeds rather than block the
-           UI forever. The user-visible result matches a fresh-browser load. */
         console.error('Storage initial load failed:', err);
+        setLoadError(err && err.message ? err.message : 'Unknown error');
         setLoading(false);
       });
+    }
+
+    useEffect(function(){ loadAll(); }, []);
+
+    /* Real-time subscriptions. Mounts once, tears down on unmount. Each
+       table subscription reloads its entity on any change event. The
+       dirty-check on save effects prevents echo-from-our-own-write from
+       triggering an infinite save loop. */
+    useEffect(function(){
+      if (STORAGE_MODE !== 'supabase') return;
+      if (!supabaseClient) return;
+      var channel = supabaseClient.channel('app-changes');
+      var subs = [
+        ['clients',           setClients,           'clients'],
+        ['classes',           setClasses,           'classes'],
+        ['wros',              setWros,              'wros'],
+        ['leads',             setQueue,             'leads'],
+        ['contacts',          setContacts,          'contacts'],
+        ['admin_items',       setItems,             'adminItems'],
+        ['referrals',         setReferrals,         'referrals'],
+        ['closures',          setClosures,          'closures'],
+        ['trainers',          setTrainers,          'trainers'],
+        ['schedule_versions', setScheduleVersions,  'scheduleVersions']
+      ];
+      subs.forEach(function(sub){
+        var table = sub[0]; var setter = sub[1]; var entity = sub[2];
+        channel.on('postgres_changes',
+          { event: '*', schema: 'public', table: table },
+          function(){
+            storage[entity].load().then(function(fresh){
+              if (fresh != null) setter(fresh);
+            }).catch(function(err){
+              console.error('Subscription reload failed for ' + table + ':', err);
+            });
+          });
+      });
+      channel.subscribe(function(status){
+        /* Supabase v2 emits 'SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT',
+           'CLOSED'. Map to a binary connected/disconnected for the dot. */
+        if (status === 'SUBSCRIBED') setSyncStatus('connected');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setSyncStatus('disconnected');
+      });
+      return function(){
+        try { supabaseClient.removeChannel(channel); } catch(_){}
+        setSyncStatus(STORAGE_MODE === 'supabase' ? 'disconnected' : 'idle');
+      };
     }, []);
 
-    /* Per-entity save effects. Each fires on its own state change; the
-       `loading` guard prevents the seed values from being written back
-       to storage during the initial load window. */
-    useEffect(function(){ if (!loading) storage.trainers.save(trainers).catch(function(err){ console.error('Save trainers failed:', err); }); }, [trainers, loading]);
-    useEffect(function(){ if (!loading) storage.clients.save(clients).catch(function(err){ console.error('Save clients failed:', err); }); }, [clients, loading]);
-    useEffect(function(){ if (!loading) storage.classes.save(classes).catch(function(err){ console.error('Save classes failed:', err); }); }, [classes, loading]);
-    useEffect(function(){ if (!loading) storage.closures.save(closures).catch(function(err){ console.error('Save closures failed:', err); }); }, [closures, loading]);
-    useEffect(function(){ if (!loading) storage.wros.save(wros).catch(function(err){ console.error('Save wros failed:', err); }); }, [wros, loading]);
-    useEffect(function(){ if (!loading) storage.referrals.save(referrals).catch(function(err){ console.error('Save referrals failed:', err); }); }, [referrals, loading]);
-    useEffect(function(){ if (!loading) storage.adminItems.save(items).catch(function(err){ console.error('Save items failed:', err); }); }, [items, loading]);
-    useEffect(function(){ if (!loading) storage.leads.save(queue).catch(function(err){ console.error('Save leads failed:', err); }); }, [queue, loading]);
-    useEffect(function(){ if (!loading) storage.contacts.save(contacts).catch(function(err){ console.error('Save contacts failed:', err); }); }, [contacts, loading]);
-    useEffect(function(){ if (!loading) storage.scheduleVersions.save(scheduleVersions).catch(function(err){ console.error('Save scheduleVersions failed:', err); }); }, [scheduleVersions, loading]);
-    useEffect(function(){ if (!loading) storage.adminPin.save(pin).catch(function(err){ console.error('Save pin failed:', err); }); }, [pin, loading]);
+    /* Per-entity save effects with dirty-check refs. Ref is set BEFORE
+       save so a fast follow-up mutation sees the just-saved value, not
+       a stale one (avoids race when async save resolves after the next
+       state change is already in flight). */
+    function _saveIfDirty(ref, current, saver, label){
+      if (loading) return;
+      if (ref.current === current) return;
+      if (_eq(ref.current, current)) { ref.current = current; return; }
+      ref.current = current;
+      saver(current).catch(function(err){ console.error('Save ' + label + ' failed:', err); });
+    }
+    useEffect(function(){ _saveIfDirty(trainersRef,     trainers,         storage.trainers.save,         'trainers'); },         [trainers, loading]);
+    useEffect(function(){ _saveIfDirty(clientsRef,      clients,          storage.clients.save,          'clients'); },          [clients, loading]);
+    useEffect(function(){ _saveIfDirty(classesRef,      classes,          storage.classes.save,          'classes'); },          [classes, loading]);
+    useEffect(function(){ _saveIfDirty(closuresRef,     closures,         storage.closures.save,         'closures'); },         [closures, loading]);
+    useEffect(function(){ _saveIfDirty(wrosRef,         wros,             storage.wros.save,             'wros'); },             [wros, loading]);
+    useEffect(function(){ _saveIfDirty(referralsRef,    referrals,        storage.referrals.save,        'referrals'); },        [referrals, loading]);
+    useEffect(function(){ _saveIfDirty(itemsRef,        items,            storage.adminItems.save,       'items'); },            [items, loading]);
+    useEffect(function(){ _saveIfDirty(queueRef,        queue,            storage.leads.save,            'leads'); },            [queue, loading]);
+    useEffect(function(){ _saveIfDirty(contactsRef,     contacts,         storage.contacts.save,         'contacts'); },         [contacts, loading]);
+    useEffect(function(){ _saveIfDirty(schedVersionsRef, scheduleVersions, storage.scheduleVersions.save, 'scheduleVersions'); }, [scheduleVersions, loading]);
+    useEffect(function(){ _saveIfDirty(pinRef,          pin,              storage.adminPin.save,         'pin'); },              [pin, loading]);
 
     /* v2: idempotent sub-status migration. Walks every class once on mount;
        any subAssignment without an explicit status field is upgraded to
@@ -3727,22 +3903,36 @@
       activateScheduleVersion: activateScheduleVersion
     };
 
-    /* Loading screen until the initial Promise.all resolves. Brief in
-       localStorage mode (sync-wrapped), longer in session 2 when Supabase
-       calls are real network round-trips. */
-    if (loading) {
-      return e('div', {
-        style: {
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'var(--cream)',
-          color: 'var(--slate)',
-          fontSize: '14px',
-          letterSpacing: '0.04em'
-        }
-      }, 'Loading…');
+    /* Loading / error screen. Initial Promise.all hits Supabase over the
+       network; on failure, show a retry button rather than hanging. */
+    if (loading || loadError) {
+      var screenStyle = {
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '14px',
+        background: 'var(--cream)',
+        color: 'var(--slate)',
+        fontSize: '14px',
+        letterSpacing: '0.04em',
+        padding: '20px',
+        textAlign: 'center'
+      };
+      if (loadError) {
+        return e('div', { style: screenStyle },
+          e('div', { style: { fontSize: '15px', color: 'var(--navy)' } },
+            'Couldn\'t connect to the server. Check connection and retry.'
+          ),
+          e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', maxWidth: '320px' } }, loadError),
+          e('button', {
+            className: 'btn btn-primary',
+            onClick: function(){ loadAll(); }
+          }, 'Retry')
+        );
+      }
+      return e('div', { style: screenStyle }, 'Loading…');
     }
 
     var view;
@@ -3756,9 +3946,31 @@
       view = e(TrainerView, { ctx: ctx });
     }
 
+    /* Sync status dot. Bottom-right corner. Only rendered when
+       STORAGE_MODE === 'supabase'. Tooltip explains state. */
+    var syncDot = STORAGE_MODE !== 'supabase' ? null : e('div', {
+      title: syncStatus === 'connected'
+        ? 'Real-time sync: connected'
+        : 'Real-time sync: disconnected, refresh to retry',
+      style: {
+        position: 'fixed',
+        bottom: '8px',
+        right: '8px',
+        width: '10px',
+        height: '10px',
+        borderRadius: '50%',
+        background: syncStatus === 'connected' ? 'var(--green)' : 'var(--amber)',
+        boxShadow: '0 0 0 2px rgba(255,255,255,0.6)',
+        zIndex: 9999,
+        pointerEvents: 'auto',
+        cursor: 'help'
+      }
+    });
+
     return e('div', { className: 'app-shell' },
       view,
-      e(ToastStack, { toasts: toasts })
+      e(ToastStack, { toasts: toasts }),
+      syncDot
     );
   }
 
