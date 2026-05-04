@@ -4402,7 +4402,7 @@
           'Open GX classes',
           openSubs.length,
           '#7B68B6',
-          function(){ onJumpToTab && onJumpToTab('gx'); }
+          function(){ onJumpToTab && onJumpToTab('gx', { filter: 'available_subs' }); }
         ),
         lastSessionClients.length > 0 && chip(
           'On last session',
@@ -5235,15 +5235,17 @@
     var headerContextTuple = useState(null);
     var headerContext = headerContextTuple[0]; var setHeaderContext = headerContextTuple[1];
 
-    /* PT tab filter signal. Set by notification-bar chip taps to land the
-       user on a pre-filtered PT client list. Cleared on every tab nav so
-       it never leaks across switches. */
-    var ptFilterTuple = useState(null);
-    var ptFilter = ptFilterTuple[0]; var setPtFilter = ptFilterTuple[1];
+    /* Tab filter signal. Set by notification-bar chip taps to land the
+       user on a pre-filtered tab view. Each tab interprets relevant
+       filter values in its own context (PT: 'last_session' | 'stale';
+       GX: 'available_subs'). Cleared on every tab nav so it never
+       leaks across switches. */
+    var tabFilterTuple = useState(null);
+    var tabFilter = tabFilterTuple[0]; var setTabFilter = tabFilterTuple[1];
 
     function navigate(t, opts){
       setHeaderContext(null);
-      setPtFilter((opts && opts.filter) || null);
+      setTabFilter((opts && opts.filter) || null);
       setTab(t);
     }
 
@@ -5282,8 +5284,8 @@
     var content;
     if (tab === 'today') content = e(TrainerToday, { ctx: ctx, setHeaderContext: setHeaderContext });
     else if (tab === 'schedule') content = e(TrainerWeekView, { ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
-    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: ptFilter });
-    else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
+    else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
     else if (tab === 'leads') content = e(TrainerLeadsView, { ctx: ctx });
     else if (tab === 'time_card') content = e(TimeCardView, { ctx: ctx });
 
@@ -7297,6 +7299,77 @@
         onBack: function(){ setDetailId(null); setHeaderContext(null); },
         canEdit: true
       });
+    }
+
+    /* Available subs filter mode (entered via the notification-bar
+       "Open GX classes" chip). Shows every open sub_assignment from
+       another trainer, sorted by date. Tapping a card claims the sub
+       through the existing claimSub state machine. Tapping the GX
+       bottom-nav button clears the filter and returns to the default
+       view. */
+    if (props.initialFilter === 'available_subs') {
+      var todayY = todayStr();
+      var availableSubs = [];
+      (ctx.classes || []).forEach(function(c){
+        (c.subAssignments || []).forEach(function(s){
+          if (subStatus(s) !== 'open') return;
+          if (trainerNameMatches(trainerName, s.originalInstructor)) return;
+          if (s.date < todayY) return;
+          availableSubs.push({ cls: c, sub: s });
+        });
+      });
+      availableSubs.sort(function(a, b){
+        if (a.sub.date !== b.sub.date) return a.sub.date < b.sub.date ? -1 : 1;
+        return (a.cls.startTime || '') < (b.cls.startTime || '') ? -1 : 1;
+      });
+      function claim(item){
+        if (!window.confirm('Claim ' + item.cls.name + ' on ' + formatShort(parseYMD(item.sub.date)) + '?')) return;
+        ctx.claimSub(item.cls.id, item.sub.id, trainerName);
+        ctx.toast('Claimed ✓');
+      }
+      return e('div', null,
+        e('div', { className: 'section-head' },
+          e('div', null,
+            e('h2', null, 'Available Subs'),
+            e('div', { className: 'meta' },
+              availableSubs.length + ' open · tap GX in the nav to clear filter'
+            )
+          )
+        ),
+        availableSubs.length === 0
+          ? e('div', { className: 'empty' },
+              e('div', { className: 'icon' }, '🤷'),
+              e('h3', null, 'No open sub requests right now'),
+              e('div', null, 'When a teammate posts a class to the queue, it shows up here.')
+            )
+          : availableSubs.map(function(item){
+              var c = item.cls; var s = item.sub;
+              return e('div', {
+                key: s.id,
+                className: 'class-card',
+                style: { borderLeftColor: 'var(--gold)' }
+              },
+                e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
+                  e('div', { style: { flex: 1, minWidth: '200px' } },
+                    e('div', { className: 'name', style: { color: 'var(--gold)' } }, c.name),
+                    e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
+                      formatShort(parseYMD(s.date)) +
+                      (c.startTime ? (' · ' + formatTime12(c.startTime) + (c.endTime ? ('–' + formatTime12(c.endTime)) : '')) : '') +
+                      ' · ' + (c.location || '—')
+                    ),
+                    e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } },
+                      'Asked by ' + (s.requestedBy || s.originalInstructor) +
+                      (s.note ? ' · ' + s.note : '')
+                    )
+                  ),
+                  e('button', {
+                    className: 'btn btn-amber btn-sm',
+                    onClick: function(){ claim(item); }
+                  }, 'Claim')
+                )
+              );
+            })
+      );
     }
 
     return e('div', null,
