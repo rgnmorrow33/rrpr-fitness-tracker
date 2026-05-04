@@ -1067,36 +1067,307 @@
   var useCallback = React.useCallback;
 
   /* ============ STORAGE MODE + ADAPTER ============
-     Session 1: localStorage active, Supabase prep only. The adapter wraps
-     every entity load/save behind a Promise-based API. STORAGE_MODE flips
-     in session 2 to swap localStorage for Supabase calls without touching
-     component code. The 'leads' adapter intentionally backs onto the
-     existing cmrc_queue_v1 key so existing data stays in place; the
-     queue/leads naming was never overloaded (sub coverage lives on
-     class.subAssignments, not in localStorage). */
+     Session 2a: Supabase plumbing wired in. STORAGE_MODE remains
+     'localStorage' so behavior is unchanged; flipping the flag locally
+     lets dev-test the full Supabase round-trip without committing the
+     cutover. Session 2b will flip the flag and add real-time subs.
+
+     Architecture:
+       - translate.X: per-entity {toSupabase, fromSupabase}. Identity
+         passthrough where no rename is needed; custom for WROs (5-flat +
+         data jsonb), schedule_versions (flat + data jsonb), trainers
+         and adminPin (settings-row).
+       - storage.X: {load, save} that branches on STORAGE_MODE.
+       - Local-only fields (followUpBy, rectracMemberId, packageInfo,
+         lostAt) are dropped on writes to Supabase. They round-trip via
+         localStorage but disappear after a Supabase load. Trade-off
+         flagged in spec.
+
+     Note on leads/queue: the adapter exposes 'leads' but the on-disk
+     localStorage key remains cmrc_queue_v1 (no migration). Sub coverage
+     is not in localStorage; it lives on class.subAssignments. */
   var STORAGE_MODE = 'localStorage'; /* 'localStorage' | 'supabase' */
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = '[paste anon key here]';
-  /* Supabase client is created lazily only when STORAGE_MODE === 'supabase'.
-     Session 1 leaves this null. The CDN script tag in <head> exposes
-     window.supabase but we don't call createClient until session 2. */
-  var supabaseClient = null;
-  if (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined') {
-    supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  var supabaseClient = (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined')
+    ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
+
+  /* Current sign-in name accessor. Used by translators that need to
+     populate a created_by column when no local equivalent exists.
+     Updated by App via a useEffect on session change. */
+  var _appSessionName = null;
+  function getAppSessionName(){ return _appSessionName || 'system'; }
+  function setAppSessionName(name){ _appSessionName = name || null; }
+
+  function _newId(){
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    /* Fallback for environments without crypto.randomUUID. Not cryptographic;
+       sufficient for client-id generation. */
+    return 'id_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   }
 
-  /* Per-key load/save factory. Returns a {load, save} pair that branches on
-     STORAGE_MODE. localStorage branch wraps sync I/O in resolved promises
-     so callers can await uniformly. Supabase branch throws until session 2
-     wires it up. */
-  function _ls(key){
+  /* Generic camelCase ↔ snake_case translator builder. Identity passthrough
+     for keys not in the map. Always sets updated_at on toSupabase; never
+     sets created_at (DB default fires on insert, untouched on update).
+     drop[] are local-only fields stripped on write. */
+  function makeFieldTranslator(map, opts){
+    var camelToSnake = {};
+    var snakeToCamel = {};
+    map.forEach(function(pair){
+      camelToSnake[pair[0]] = pair[1];
+      snakeToCamel[pair[1]] = pair[0];
+    });
+    var drop = (opts && opts.drop) || [];
+    /* createdAt always dropped on write so DB controls created_at. */
+    if (drop.indexOf('createdAt') === -1) drop.push('createdAt');
+    return {
+      toSupabase: function(o){
+        var out = { id: o.id || _newId() };
+        Object.keys(o).forEach(function(k){
+          if (k === 'id') return;
+          if (drop.indexOf(k) !== -1) return;
+          var snake = camelToSnake.hasOwnProperty(k) ? camelToSnake[k] : k;
+          out[snake] = o[k];
+        });
+        out.updated_at = new Date().toISOString();
+        return out;
+      },
+      fromSupabase: function(row){
+        var out = {};
+        Object.keys(row).forEach(function(k){
+          var camel = snakeToCamel.hasOwnProperty(k) ? snakeToCamel[k] : k;
+          out[camel] = row[k];
+        });
+        return out;
+      }
+    };
+  }
+
+  var translate = {
+    clients: makeFieldTranslator([
+      ['datePurchased', 'date_purchased'],
+      ['paymentType', 'payment_type'],
+      ['teamMember', 'team_member'],
+      ['membershipVerified', 'membership_verified'],
+      ['membershipType', 'membership_type'],
+      ['membershipEnd', 'membership_end'],
+      ['trainerName', 'trainer_name'],
+      ['referralSource', 'referral_source'],
+      ['parQ', 'par_q'],
+      ['createdAt', 'created_at']
+    ]),
+
+    classes: makeFieldTranslator([
+      ['dayOfWeek', 'day_of_week'],
+      ['startTime', 'start_time'],
+      ['endTime', 'end_time'],
+      ['classType', 'class_type'],
+      ['isPremium', 'is_premium'],
+      ['subAssignments', 'sub_assignments'],
+      ['seasonStart', 'season_start'],
+      ['seasonEnd', 'season_end'],
+      ['scheduleVersionId', 'schedule_version_id'],
+      ['createdAt', 'created_at']
+    ]),
+
+    contacts: makeFieldTranslator([
+      ['loggedAt', 'logged_at'],
+      ['trainerName', 'trainer_name']
+    ]),
+
+    adminItems: makeFieldTranslator([
+      ['customType', 'custom_type'],
+      ['timeIn', 'time_in'],
+      ['timeOut', 'time_out'],
+      ['createdBy', 'created_by'],
+      ['createdAt', 'created_at']
+    ]),
+
+    referrals: makeFieldTranslator([
+      ['clientId', 'client_id'],
+      ['clientName', 'client_name'],
+      ['referredBy', 'referred_by'],
+      ['createdAt', 'created_at']
+    ]),
+
+    closures: makeFieldTranslator([
+      ['createdAt', 'created_at']
+    ]),
+
+    leads: makeFieldTranslator([
+      ['assignedTo', 'assigned_to'],
+      ['convertedAt', 'converted_at'],
+      ['statusHistory', 'status_history'],
+      ['note', 'notes'],
+      ['convertedToClientId', 'converted_to_client_id'],
+      ['sourceTag', 'source_tag'],
+      ['consultDate', 'consult_date'],
+      ['interestArea', 'interest_area'],
+      ['createdAt', 'created_at']
+    ], { drop: [
+      /* Local-only fields (no Supabase column). Round-trip via localStorage
+         only; absent on the in-memory record after a Supabase load. */
+      'followUpBy', 'rectracMemberId', 'packageInfo', 'lostAt'
+    ]}),
+
+    /* Trainers: stored as a single settings-row whose value is the array
+       of name strings. Identity passthrough on translation (no per-record
+       fields to remap). */
+    trainers: {
+      toSupabase: function(arr){ return arr; },
+      fromSupabase: function(v){ return v; }
+    },
+
+    /* AdminPin: same settings-row pattern. */
+    adminPin: {
+      toSupabase: function(p){ return p; },
+      fromSupabase: function(v){ return v; }
+    },
+
+    /* Schedule versions: flat columns (id, label, effective_date,
+       is_active, created_by, created_at) plus a data jsonb. The local
+       'classes' array nests under data.classes. endDate and activatedAt
+       have no flat columns and live in data too. */
+    scheduleVersions: {
+      toSupabase: function(v){
+        return {
+          id: v.id || _newId(),
+          label: v.name || null,
+          effective_date: v.startDate || null,
+          is_active: !!v.activatedAt,
+          created_by: v.createdBy || getAppSessionName(),
+          data: {
+            endDate: v.endDate || null,
+            activatedAt: v.activatedAt || null,
+            classes: v.classes || []
+          },
+          updated_at: new Date().toISOString()
+        };
+      },
+      fromSupabase: function(row){
+        var d = row.data || {};
+        return {
+          id: row.id,
+          name: row.label,
+          startDate: row.effective_date,
+          endDate: d.endDate || null,
+          classes: d.classes || [],
+          activatedAt: d.activatedAt || null,
+          createdAt: row.created_at,
+          createdBy: row.created_by
+        };
+      }
+    },
+
+    /* WROs: 5 flat columns (trainer_name, client_name, date, notes,
+       signature_data) plus data jsonb for everything else. The post
+       sub-object's specialistName and postNotes get promoted to the flat
+       columns on write and re-merged on read. post is ALWAYS reconstructed
+       as an object on fromSupabase, even when all its fields are null. */
+    wros: {
+      toSupabase: function(w){
+        var rest = {};
+        Object.keys(w).forEach(function(k){
+          if (k === 'id' || k === 'participantName' || k === 'date' || k === 'signature') return;
+          if (k === 'post') {
+            if (w.post) {
+              var postCopy = Object.assign({}, w.post);
+              delete postCopy.specialistName;
+              delete postCopy.postNotes;
+              rest.post = postCopy;
+            } else {
+              rest.post = null;
+            }
+            return;
+          }
+          rest[k] = w[k];
+        });
+        return {
+          id: w.id || _newId(),
+          trainer_name: (w.post && w.post.specialistName) || null,
+          client_name: w.participantName || null,
+          date: w.date || null,
+          notes: (w.post && w.post.postNotes) || null,
+          signature_data: w.signature || null,
+          data: rest,
+          updated_at: new Date().toISOString()
+        };
+      },
+      fromSupabase: function(row){
+        var d = row.data || {};
+        var out = Object.assign({}, d);
+        out.id = row.id;
+        out.participantName = row.client_name;
+        out.date = row.date;
+        out.signature = row.signature_data;
+        /* post always an object - components access wro.post.specialistName
+           without null-guarding wro.post itself. */
+        out.post = Object.assign({}, d.post || {}, {
+          specialistName: row.trainer_name,
+          postNotes: row.notes
+        });
+        return out;
+      }
+    }
+  };
+
+  /* Entity factory: localStorage-key + Supabase-table + translator =
+     {load, save}. Save is upsert-everything (idempotent, simple). Diff
+     strategy is a session 2b optimization. */
+  function makeEntity(localKey, supabaseTable, translator){
     return {
       load: function(){
         if (STORAGE_MODE === 'supabase') {
-          return Promise.reject(new Error('Supabase mode not yet enabled'));
+          return supabaseClient.from(supabaseTable).select('*')
+            .order('created_at', { ascending: true })
+            .then(function(res){
+              if (res.error) throw res.error;
+              return (res.data || []).map(translator.fromSupabase);
+            });
         }
         try {
-          var raw = localStorage.getItem(key);
+          var raw = localStorage.getItem(localKey);
+          return Promise.resolve(raw ? JSON.parse(raw) : null);
+        } catch (err) {
+          return Promise.resolve(null);
+        }
+      },
+      save: function(arr){
+        if (STORAGE_MODE === 'supabase') {
+          var rows = (arr || []).map(translator.toSupabase);
+          if (rows.length === 0) return Promise.resolve();
+          return supabaseClient.from(supabaseTable).upsert(rows, { onConflict: 'id' })
+            .then(function(res){ if (res.error) throw res.error; });
+        }
+        try {
+          localStorage.setItem(localKey, JSON.stringify(arr));
+          return Promise.resolve();
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
+    };
+  }
+
+  /* Settings-row factory: trainers list and adminPin live in a single
+     row of the settings table, keyed by name. The whole value is stored
+     in a 'value' column. */
+  function makeSettingsRow(localKey, settingsKey){
+    return {
+      load: function(){
+        if (STORAGE_MODE === 'supabase') {
+          return supabaseClient.from('settings').select('value')
+            .eq('key', settingsKey).maybeSingle()
+            .then(function(res){
+              if (res.error) throw res.error;
+              return res.data ? res.data.value : null;
+            });
+        }
+        try {
+          var raw = localStorage.getItem(localKey);
           return Promise.resolve(raw ? JSON.parse(raw) : null);
         } catch (err) {
           return Promise.resolve(null);
@@ -1104,10 +1375,16 @@
       },
       save: function(v){
         if (STORAGE_MODE === 'supabase') {
-          return Promise.reject(new Error('Supabase mode not yet enabled'));
+          return supabaseClient.from('settings').upsert({
+            key: settingsKey,
+            value: v,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'key' }).then(function(res){
+            if (res.error) throw res.error;
+          });
         }
         try {
-          localStorage.setItem(key, JSON.stringify(v));
+          localStorage.setItem(localKey, JSON.stringify(v));
           return Promise.resolve();
         } catch (err) {
           return Promise.reject(err);
@@ -1117,32 +1394,37 @@
   }
 
   var storage = {
-    trainers:         _ls('pt_trainers_v4'),
-    clients:          _ls('pt_clients_v3'),
-    classes:          _ls('cmrc_classes_v2'),
-    closures:         _ls('cmrc_closures_v2'),
-    wros:             _ls('cmrc_wros_v1'),
-    referrals:        _ls('cmrc_pt_referrals_v1'),
-    adminItems:       _ls('cmrc_items_v1'),
-    /* leads backs onto the existing cmrc_queue_v1 key. The on-disk key is
-       unchanged; only the adapter API surface uses the 'leads' name. */
-    leads:            _ls('cmrc_queue_v1'),
-    contacts:         _ls('cmrc_contacts_v1'),
-    scheduleVersions: _ls('cmrc_schedule_versions_v1'),
-    adminPin:         _ls('admin_pin_v1'),
-    /* Sign-in session: stubbed, non-persistent. Session 2 may wire actual
-       persistence; for now sign-in still resets on reload (existing
-       behavior). API exists for forward compat. */
+    trainers:         makeSettingsRow('pt_trainers_v4', 'trainers'),
+    clients:          makeEntity('pt_clients_v3', 'clients', translate.clients),
+    classes:          makeEntity('cmrc_classes_v2', 'classes', translate.classes),
+    closures:         makeEntity('cmrc_closures_v2', 'closures', translate.closures),
+    wros:             makeEntity('cmrc_wros_v1', 'wros', translate.wros),
+    referrals:        makeEntity('cmrc_pt_referrals_v1', 'referrals', translate.referrals),
+    adminItems:       makeEntity('cmrc_items_v1', 'admin_items', translate.adminItems),
+    /* leads backs onto cmrc_queue_v1 in localStorage (no migration); the
+       Supabase table is 'leads'. */
+    leads:            makeEntity('cmrc_queue_v1', 'leads', translate.leads),
+    contacts:         makeEntity('cmrc_contacts_v1', 'contacts', translate.contacts),
+    scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
+    adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
+    /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
+       'supabase'. Sign-in is per-device by design. The current implementation
+       is a non-persistent stub (sign-in resets on reload), kept that way to
+       avoid behavior changes. Session 2b can wire real localStorage persistence
+       if Selisa wants sign-in to survive reloads. Future Claude: do NOT move
+       this to Supabase. */
     session: {
       load:  function(){ return Promise.resolve(null); },
       save:  function(_v){ return Promise.resolve(); },
       clear: function(){ return Promise.resolve(); }
     }
   };
-  /* Expose for debugging (validation step 7). */
+  /* Expose for debugging and the admin Maintenance "Clear local data" tool. */
   if (typeof window !== 'undefined') {
     window.STORAGE_MODE = STORAGE_MODE;
     window.storage = storage;
+    window.translate = translate;
+    window.supabaseClient = supabaseClient;
   }
 
   /* ============ CONSTANTS ============ */
@@ -2797,6 +3079,13 @@
     var sessionTuple = useState(null); // { role:'trainer'|'admin', name? }
     var session = sessionTuple[0];
     var setSession = sessionTuple[1];
+
+    /* Sync session name into the module-level accessor used by translators
+       (e.g., schedule_versions.created_by) when no local equivalent exists
+       on the record being saved. */
+    useEffect(function(){
+      setAppSessionName(session && session.name);
+    }, [session]);
 
     var toastTuple = useState([]);
     var toasts = toastTuple[0];
@@ -10872,7 +11161,8 @@
         { id: 'schedule',    label: 'Schedule' },
         { id: 'admin_time',  label: 'Admin Time' },
         { id: 'contacts',    label: 'Contacts' },
-        { id: 'instructors', label: 'Manage Team' }
+        { id: 'instructors', label: 'Manage Team' },
+        { id: 'maintenance', label: 'Maintenance' }
       ]
     };
 
@@ -10942,6 +11232,8 @@
       });
     } else if (tab === 'fill_rate') {
       tabView = e(AdminGXFillRate, { ctx: ctx });
+    } else if (tab === 'maintenance') {
+      tabView = e(AdminMaintenance, { ctx: ctx });
     } else {
       tabView = e(AdminManageInstructors, { ctx: ctx });
     }
@@ -12223,6 +12515,84 @@
               )
             )
           )
+    );
+  }
+
+  /* ============ ADMIN: Maintenance ============
+     Hidden admin tools, primarily a one-shot device-reset for the
+     localStorage-to-Supabase cutover. Behind a confirm dialog so it can
+     stay in the UI long-term. */
+  function AdminMaintenance(props){
+    var ctx = props.ctx;
+    var KNOWN_KEYS = [
+      'pt_trainers_v4',
+      'pt_clients_v3',
+      'cmrc_classes_v2',
+      'cmrc_closures_v2',
+      'cmrc_wros_v1',
+      'cmrc_pt_referrals_v1',
+      'cmrc_items_v1',
+      'cmrc_queue_v1',
+      'cmrc_contacts_v1',
+      'cmrc_schedule_versions_v1',
+      'admin_pin_v1'
+    ];
+    function clearLocalData(){
+      var ok = window.confirm(
+        'This wipes localStorage on this iPad. Used at Supabase cutover. ' +
+        'Sub coverage and offline data will be lost on this device. ' +
+        'Other devices unaffected. Continue?'
+      );
+      if (!ok) return;
+      KNOWN_KEYS.forEach(function(k){
+        try { localStorage.removeItem(k); } catch(_){}
+      });
+      window.location.reload();
+    }
+    return e('div', null,
+      e('div', { className: 'section-head' },
+        e('div', null,
+          e('h2', null, 'Maintenance'),
+          e('div', { className: 'meta' }, 'Admin-only device tools')
+        )
+      ),
+      e('div', {
+        style: {
+          background: '#fff',
+          border: '1.5px solid var(--border)',
+          borderLeft: '4px solid var(--red)',
+          borderRadius: '12px',
+          padding: '14px 16px',
+          marginBottom: '14px'
+        }
+      },
+        e('h3', { style: { fontSize: '15px', marginTop: 0, marginBottom: '6px', color: 'var(--navy)' } }, 'Clear local data on this device'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px', lineHeight: 1.5 } },
+          'Wipes every cmrc_* and pt_* localStorage key on this iPad plus ' +
+          'the admin PIN. Used at Supabase cutover so the device starts ' +
+          'fresh against the cloud-of-record. Other devices are not affected.'
+        ),
+        e('button', {
+          className: 'btn btn-ghost btn-sm',
+          style: { color: 'var(--red)', borderColor: 'var(--red)' },
+          onClick: clearLocalData
+        }, 'Clear all local data on this device')
+      ),
+      e('div', {
+        style: {
+          background: 'var(--cream-2)',
+          border: '1.5px solid var(--border)',
+          borderRadius: '12px',
+          padding: '12px 14px',
+          fontSize: '12px',
+          color: 'var(--slate)',
+          lineHeight: 1.5
+        }
+      },
+        e('div', { style: { fontWeight: 700, marginBottom: '4px', color: 'var(--navy)' } }, 'Storage diagnostics'),
+        e('div', null, 'Mode: ', e('b', null, (typeof window !== 'undefined' && window.STORAGE_MODE) || 'unknown')),
+        e('div', null, 'Supabase client: ', e('b', null, (typeof window !== 'undefined' && window.supabaseClient) ? 'connected' : 'not initialized'))
+      )
     );
   }
 
