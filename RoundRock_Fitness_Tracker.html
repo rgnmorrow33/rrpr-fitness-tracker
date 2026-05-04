@@ -1455,7 +1455,7 @@
     /* leads backs onto cmrc_queue_v1 in localStorage (no migration); the
        Supabase table is 'leads'. */
     leads:            makeEntity('cmrc_queue_v1', 'leads', translate.leads),
-    contacts:         makeEntity('cmrc_contacts_v1', 'contacts', translate.contacts),
+    contacts:         makeEntity('cmrc_contacts_v1', 'member_contacts', translate.contacts),
     scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
     adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
     /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
@@ -3138,7 +3138,7 @@
         ['classes',           setClasses,           'classes'],
         ['wros',              setWros,              'wros'],
         ['leads',             setQueue,             'leads'],
-        ['contacts',          setContacts,          'contacts'],
+        ['member_contacts',   setContacts,          'contacts'],
         ['admin_items',       setItems,             'adminItems'],
         ['referrals',         setReferrals,         'referrals'],
         ['closures',          setClosures,          'closures'],
