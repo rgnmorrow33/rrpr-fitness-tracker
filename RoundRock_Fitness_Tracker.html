@@ -1088,7 +1088,7 @@
      is not in localStorage; it lives on class.subAssignments. */
   var STORAGE_MODE = 'localStorage'; /* 'localStorage' | 'supabase' */
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
-  var SUPABASE_ANON_KEY = '[paste anon key here]';
+  var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
   var supabaseClient = (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined')
     ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
