@@ -1401,9 +1401,13 @@
     };
   }
 
-  /* Custom trainers storage: replace-all on save since the local shape is
-     name strings (no stable per-name id) and we need removes to propagate.
-     Diff-based save is a session 2c+ optimization. Trainers churn rarely. */
+  /* Custom trainers storage: upsert local names by name (requires
+     trainers_name_unique constraint), then soft-delete (set is_active=false)
+     on any server rows whose name isn't in the local list. No DELETE
+     statements - the row always survives, only is_active toggles. This
+     replaced an earlier replace-all pattern that was racey under sub
+     events and could nuke rows mid-save. Diff-based add/remove is a
+     2c+ optimization. */
   var trainersStorage = {
     load: function(){
       if (STORAGE_MODE === 'supabase') {
@@ -1424,16 +1428,35 @@
     },
     save: function(arr){
       if (STORAGE_MODE === 'supabase') {
-        /* Hard-delete all then re-insert. .delete() requires a predicate;
-           .not('id','is',null) acts as "all rows". */
-        return supabaseClient.from('trainers').delete().not('id', 'is', null)
-          .then(function(res){
-            if (res.error) throw res.error;
-            if (!arr || arr.length === 0) return;
-            var rows = arr.map(translate.trainers.toSupabase);
-            return supabaseClient.from('trainers').insert(rows)
-              .then(function(res2){ if (res2.error) throw res2.error; });
-          });
+        var localNames = (arr || []).slice();
+        /* Step 1: upsert local trainers by name. New names get inserted
+           (DB generates id), existing names get is_active=true and
+           updated_at refreshed. */
+        var step1;
+        if (localNames.length > 0) {
+          var rows = localNames.map(translate.trainers.toSupabase);
+          step1 = supabaseClient.from('trainers').upsert(rows, { onConflict: 'name' })
+            .then(function(res){ if (res.error) throw res.error; });
+        } else {
+          step1 = Promise.resolve();
+        }
+        /* Step 2: soft-delete any server rows whose name is not in the
+           local list. Two-step (select then update by id) keeps the
+           query simple and avoids fragile NOT IN list-encoding. */
+        return step1.then(function(){
+          return supabaseClient.from('trainers').select('id, name')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var toDeactivate = (res.data || [])
+                .filter(function(r){ return localNames.indexOf(r.name) === -1; })
+                .map(function(r){ return r.id; });
+              if (toDeactivate.length === 0) return;
+              return supabaseClient.from('trainers')
+                .update({ is_active: false, updated_at: new Date().toISOString() })
+                .in('id', toDeactivate)
+                .then(function(res2){ if (res2.error) throw res2.error; });
+            });
+        });
       }
       try {
         localStorage.setItem('pt_trainers_v4', JSON.stringify(arr));
@@ -3423,7 +3446,11 @@
     function addClosure(closure){
       setClosures(function(list){
         var existing = list.filter(function(x){ return x.date !== closure.date; });
-        return existing.concat([closure]);
+        /* Stamp a stable id on the new record. Without this, makeFieldTranslator
+           generates a fresh uuid every save round-trip and rapid-fire mutations
+           can create duplicate rows for the same closure. */
+        var withId = Object.assign({ id: uid() }, closure);
+        return existing.concat([withId]);
       });
     }
     function removeClosure(date){
