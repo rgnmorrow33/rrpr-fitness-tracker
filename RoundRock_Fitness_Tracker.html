@@ -1100,15 +1100,6 @@
   function getAppSessionName(){ return _appSessionName || 'system'; }
   function setAppSessionName(name){ _appSessionName = name || null; }
 
-  function _newId(){
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID();
-    }
-    /* Fallback for environments without crypto.randomUUID. Not cryptographic;
-       sufficient for client-id generation. */
-    return 'id_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-  }
-
   /* Generic camelCase ↔ snake_case translator builder. Identity passthrough
      for keys not in the map. Always sets updated_at on toSupabase; never
      sets created_at (DB default fires on insert, untouched on update).
@@ -1125,7 +1116,7 @@
     if (drop.indexOf('createdAt') === -1) drop.push('createdAt');
     return {
       toSupabase: function(o){
-        var out = { id: o.id || _newId() };
+        var out = { id: o.id || uid() };
         Object.keys(o).forEach(function(k){
           if (k === 'id') return;
           if (drop.indexOf(k) !== -1) return;
@@ -1242,7 +1233,7 @@
     scheduleVersions: {
       toSupabase: function(v){
         return {
-          id: v.id || _newId(),
+          id: v.id || uid(),
           label: v.name || null,
           effective_date: v.startDate || null,
           is_active: !!v.activatedAt,
@@ -1294,7 +1285,7 @@
           rest[k] = w[k];
         });
         return {
-          id: w.id || _newId(),
+          id: w.id || uid(),
           trainer_name: (w.post && w.post.specialistName) || null,
           client_name: w.participantName || null,
           date: w.date || null,
@@ -1701,7 +1692,16 @@
   ];
 
   /* ============ UTILITIES ============ */
-  function uid(){ return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
+  /* UUID v4 generator. Uses crypto.randomUUID() in modern browsers
+     (everywhere we run). Fallback only kicks in for ancient environments
+     and produces a non-UUID string that will fail uuid-typed Supabase
+     columns - intentional, surfaces the missing-API issue loudly. */
+  function uid(){
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+  }
   function todayStr(){
     var d = new Date();
     var m = String(d.getMonth()+1).padStart(2,'0');
@@ -8629,7 +8629,7 @@
       if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
       var nowIso = new Date().toISOString();
       var entry = {
-        id: 'q_' + uid(),
+        id: uid(),
         name: name.trim(),
         phone: phone.trim() || null,
         email: email.trim() || null,
@@ -12128,7 +12128,7 @@
           var c = classified.candidate;
           var pkg = c.packages[0];
           var queueEntry = {
-            id: 'q_' + uid(),
+            id: uid(),
             name: c.name,
             phone: c.phone || null,
             email: c.email || null,
