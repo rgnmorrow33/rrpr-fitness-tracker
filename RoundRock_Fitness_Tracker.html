@@ -2067,8 +2067,15 @@
     var em = parseInt(e[0],10)*60 + parseInt(e[1],10);
     return Math.max(0, em - sm);
   }
+  /* Prefer c.duration (minutes) when set - that's what CSV schedule-paste
+     classes carry. Fall back to startTime/endTime difference for seed and
+     manually-created classes. */
+  function _classMinutes(c){
+    if (typeof c.duration === 'number' && c.duration > 0) return c.duration;
+    return minutesBetween(c.startTime, c.endTime);
+  }
   function classDurationHours(c){
-    return minutesBetween(c.startTime, c.endTime) / 60;
+    return _classMinutes(c) / 60;
   }
   /* GX class hours rule (v2.1): a "1-hour class" in this department actually
      runs 50-60 minutes on the schedule. Per Reagan's call: anything in the
@@ -2076,7 +2083,7 @@
      Shorter (e.g., 30-min express) = 0.5. Longer (e.g., 90-min workshop) = 1.5.
      Returns hours rounded to 2 decimals. */
   function gxClassHours(c){
-    var mins = minutesBetween(c.startTime, c.endTime);
+    var mins = _classMinutes(c);
     if (mins >= 50 && mins <= 60) return 1.0;
     return Math.round((mins / 60) * 100) / 100;
   }
