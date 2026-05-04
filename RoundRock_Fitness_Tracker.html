@@ -5943,6 +5943,11 @@
     var addPkgOpen = addPkgOpenTuple[0];
     var setAddPkgOpen = addPkgOpenTuple[1];
 
+    /* Holds the package being edited in EditPackageModal, or null. */
+    var editPkgTargetTuple = useState(null);
+    var editPkgTarget = editPkgTargetTuple[0];
+    var setEditPkgTarget = editPkgTargetTuple[1];
+
     /* Service recovery prompt target. Set after a session save when status
        is no_show or late_cancel; cleared when modal closes or saves. */
     var recoveryTargetTuple = useState(null);
@@ -5955,6 +5960,21 @@
     var setDetailSession = detailSessionTuple[1];
 
     var isAdmin = ctx.session && ctx.session.role === 'admin';
+
+    /* Lazy id-stamping: legacy packages may not have ids. Admin viewing the
+       client triggers a one-time backfill so edit/delete can identify rows
+       deterministically. */
+    useEffect(function(){
+      if (!isAdmin) return;
+      if (!c.packages || c.packages.length === 0) return;
+      var needsIds = c.packages.some(function(p){ return !p.id; });
+      if (!needsIds) return;
+      ctx.upsertClient(Object.assign({}, c, {
+        packages: c.packages.map(function(p){
+          return p.id ? p : Object.assign({}, p, { id: uid() });
+        })
+      }));
+    }, [c.id, isAdmin]);
 
     var strikes = clientStrikeCount(c);
     var strikeStatus = clientStrikeStatus(c);
@@ -6043,7 +6063,9 @@
             disabled: remaining === 0,
             onClick: function(){ setScheduleOpen(true); }
           }, '📅 Schedule Session'),
-          e('button', {
+          /* Add Package is admin-only as of the package edit/delete commit.
+             Trainers see only Log Session, Schedule Session, Refer to PT. */
+          isAdmin && e('button', {
             className: 'btn btn-gold',
             onClick: function(){ setAddPkgOpen(true); }
           }, '+ Add Package (Re-up)'),
@@ -6051,14 +6073,14 @@
             className: 'btn btn-teal',
             onClick: function(){ setReferOpen(true); }
           }, '🩺 Refer to PT'),
-          /* Edit button gated to admin: it opens NewClientModal in edit
-             mode, which can change package fields (size, type, sessions
-             remaining, total paid). Trainers retain create flow (different
-             entry point) and the gold "+ Add Package (Re-up)" button. */
+          /* Edit button gated to admin: opens NewClientModal in edit mode.
+             Per-package edit/delete lives on the Package History rows below. */
           props.canEdit && isAdmin && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
         ),
-        /* Package History - only show if there's more than one package */
-        getPackages(c).length > 1 && e('div', { style: { marginTop: '16px' } },
+        /* Package History - shown when more than one package exists, or
+           always for admins (so per-row edit/delete is reachable even on
+           single-package clients). */
+        (getPackages(c).length > 1 || isAdmin) && getPackages(c).length > 0 && e('div', { style: { marginTop: '16px' } },
           e('h3', { style: { fontSize: '20px', marginBottom: '4px' } }, 'Package History'),
           e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
             getPackages(c).length + ' packages \u00b7 ' + totalSessionsPurchased(c) + ' total sessions \u00b7 ' + formatMoney(totalPaid(c)) + ' lifetime'
@@ -6068,10 +6090,11 @@
               e('div', null, 'Date'),
               e('div', null, 'Package'),
               e('div', null, 'Paid'),
-              e('div', null, 'Source')
+              e('div', null, 'Source'),
+              isAdmin && e('div', null, '')
             ),
             getPackages(c).slice().sort(function(a,b){ return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1; }).map(function(p, i){
-              return e('div', { key: i, className: 'log-row' },
+              return e('div', { key: p.id || i, className: 'log-row' },
                 e('div', null, p.purchaseDate ? formatDate(p.purchaseDate) : '\u2014'),
                 e('div', null, p.sessions + '-sess'),
                 e('div', null, formatMoney(p.amountPaid != null ? p.amountPaid : p.price)),
@@ -6080,6 +6103,42 @@
                   p.source === 'manual_reup' ? 'Re-up (manual)' :
                   p.source === 'rectrac_reup' ? 'Re-up (RecTrac)' :
                   'Initial'
+                ),
+                isAdmin && e('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
+                  e('button', {
+                    className: 'btn btn-ghost',
+                    style: { padding: '4px 8px', fontSize: '13px' },
+                    title: 'Edit package',
+                    onClick: function(){
+                      var target = p;
+                      if (!target.id) {
+                        target = Object.assign({}, p, { id: uid() });
+                        ctx.upsertClient(Object.assign({}, c, {
+                          packages: (c.packages || []).map(function(q){ return q === p ? target : q; })
+                        }));
+                      }
+                      setEditPkgTarget(target);
+                    }
+                  }, '\u270e'),
+                  e('button', {
+                    className: 'btn btn-ghost',
+                    style: { padding: '4px 8px', fontSize: '13px', color: 'var(--red)' },
+                    title: 'Delete package',
+                    onClick: function(){
+                      if (!window.confirm('This will permanently remove this package from ' + c.name + '\'s history. Sessions logged against it will become orphaned. This cannot be undone.')) return;
+                      var target = p;
+                      if (!target.id) {
+                        target = Object.assign({}, p, { id: uid() });
+                      }
+                      var updated = Object.assign({}, c, {
+                        packages: (c.packages || []).filter(function(q){
+                          return q !== p && q.id !== target.id;
+                        })
+                      });
+                      ctx.upsertClient(updated);
+                      ctx.toast('Package deleted \u2713', 'error');
+                    }
+                  }, '\u00d7')
                 )
               );
             })
@@ -6326,6 +6385,12 @@
             setAddPkgOpen(false);
             ctx.toast('Package added \u2713');
           }
+        }),
+        editPkgTarget && e(EditPackageModal, {
+          ctx: ctx,
+          client: c,
+          pkg: editPkgTarget,
+          onClose: function(){ setEditPkgTarget(null); }
         })
       )
     );
@@ -6424,6 +6489,142 @@
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
           e('button', { className: 'btn btn-gold', onClick: submit }, 'Add Package')
+        )
+      )
+    );
+  }
+
+  /* Edit an existing package on a client. Free-text type per spec
+     (allows entries beyond the PACKAGES preset). Stores sessionsUsed,
+     sessionsRemaining, and is_active on the package on save - these
+     fields are admin-tracked metadata; the existing client.sessions[]
+     count remains the source of truth for live remaining displays. */
+  function EditPackageModal(props){
+    var ctx = props.ctx;
+    var client = props.client;
+    var original = props.pkg;
+
+    var typeTuple = useState(original.type || '');
+    var type = typeTuple[0]; var setType = typeTuple[1];
+    var sessionsTuple = useState(String(original.sessions != null ? original.sessions : ''));
+    var sessions = sessionsTuple[0]; var setSessions = sessionsTuple[1];
+    var sessionsUsedTuple = useState(String(original.sessionsUsed != null ? original.sessionsUsed : 0));
+    var sessionsUsed = sessionsUsedTuple[0]; var setSessionsUsed = sessionsUsedTuple[1];
+    var purchaseDateTuple = useState(original.purchaseDate || '');
+    var purchaseDate = purchaseDateTuple[0]; var setPurchaseDate = purchaseDateTuple[1];
+    var paymentTypeTuple = useState(original.paymentType || '');
+    var paymentType = paymentTypeTuple[0]; var setPaymentType = paymentTypeTuple[1];
+    var totalPaidTuple = useState(String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : '')));
+    var totalPaid = totalPaidTuple[0]; var setTotalPaid = totalPaidTuple[1];
+
+    var errorTuple = useState(null);
+    var error = errorTuple[0]; var setError = errorTuple[1];
+
+    var sessionsInt = parseInt(sessions, 10);
+    var sessionsUsedInt = parseInt(sessionsUsed, 10);
+
+    var dirty = (
+      type.trim() !== (original.type || '') ||
+      (isNaN(sessionsInt) ? '' : String(sessionsInt)) !== String(original.sessions != null ? original.sessions : '') ||
+      (isNaN(sessionsUsedInt) ? '' : String(sessionsUsedInt)) !== String(original.sessionsUsed != null ? original.sessionsUsed : 0) ||
+      purchaseDate !== (original.purchaseDate || '') ||
+      paymentType !== (original.paymentType || '') ||
+      totalPaid !== String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : ''))
+    );
+
+    function validate(){
+      if (!type.trim()) return 'Package type is required';
+      if (isNaN(sessionsInt) || sessionsInt < 0) return 'Sessions purchased must be 0 or more';
+      if (isNaN(sessionsUsedInt) || sessionsUsedInt < 0) return 'Sessions used must be 0 or more';
+      if (sessionsUsedInt > sessionsInt) return 'Sessions used cannot exceed sessions purchased';
+      return null;
+    }
+
+    function save(){
+      var err = validate();
+      if (err) { setError(err); return; }
+      setError(null);
+      var paid = totalPaid === '' ? null : parseFloat(totalPaid);
+      var sessionsRemaining = sessionsInt - sessionsUsedInt;
+      var updatedPkg = Object.assign({}, original, {
+        type: type.trim(),
+        sessions: sessionsInt,
+        sessionsUsed: sessionsUsedInt,
+        sessionsRemaining: sessionsRemaining,
+        is_active: sessionsRemaining > 0,
+        purchaseDate: purchaseDate || null,
+        paymentType: paymentType || null,
+        amountPaid: (paid == null || isNaN(paid)) ? null : paid
+      });
+      var updatedClient = Object.assign({}, client, {
+        packages: (client.packages || []).map(function(p){
+          return p.id === original.id ? updatedPkg : p;
+        })
+      });
+      ctx.upsertClient(updatedClient);
+      ctx.toast('Package updated ✓');
+      props.onClose();
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Edit Package'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Editing a package on ', e('b', null, client.name), '. Use this to fix accidental purchase entries.'
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Package type *'),
+            e('input', {
+              type: 'text', value: type,
+              onChange: function(ev){ setType(ev.target.value); },
+              placeholder: 'E.g. Personal-10'
+            })
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Sessions purchased *'),
+              e('input', {
+                type: 'number', step: '1', min: '0',
+                value: sessions,
+                onChange: function(ev){ setSessions(ev.target.value); }
+              })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Sessions used *'),
+              e('input', {
+                type: 'number', step: '1', min: '0',
+                value: sessionsUsed,
+                onChange: function(ev){ setSessionsUsed(ev.target.value); }
+              })
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Date purchased'),
+              e('input', { type: 'date', value: purchaseDate, onChange: function(ev){ setPurchaseDate(ev.target.value); } })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Payment type'),
+              e('input', { type: 'text', value: paymentType, onChange: function(ev){ setPaymentType(ev.target.value); }, placeholder: 'E.g. Card' })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Total paid (dollars)'),
+            e('input', {
+              type: 'number', step: '0.01', min: '0',
+              value: totalPaid,
+              onChange: function(ev){ setTotalPaid(ev.target.value); }
+            })
+          ),
+          error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error)
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-primary', onClick: save, disabled: !dirty }, 'Save')
         )
       )
     );
