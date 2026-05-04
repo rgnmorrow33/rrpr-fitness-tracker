@@ -1148,6 +1148,7 @@
       ['trainerName', 'trainer_name'],
       ['referralSource', 'referral_source'],
       ['parQ', 'par_q'],
+      ['fromQueueId', 'from_queue_id'],
       ['createdAt', 'created_at']
     ]),
 
@@ -1161,6 +1162,7 @@
       ['seasonStart', 'season_start'],
       ['seasonEnd', 'season_end'],
       ['scheduleVersionId', 'schedule_version_id'],
+      ['duration', 'duration_minutes'],
       ['createdAt', 'created_at']
     ]),
 
@@ -1197,6 +1199,11 @@
       ['sourceTag', 'source_tag'],
       ['consultDate', 'consult_date'],
       ['interestArea', 'interest_area'],
+      ['addedBy', 'added_by'],
+      ['assignedAt', 'assigned_at'],
+      ['assignedBy', 'assigned_by'],
+      ['lostReason', 'lost_reason'],
+      ['fromWroId', 'from_wro_id'],
       ['createdAt', 'created_at']
     ], { drop: [
       /* Local-only fields (no Supabase column). Round-trip via localStorage
