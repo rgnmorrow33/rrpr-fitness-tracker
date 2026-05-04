@@ -1053,6 +1053,9 @@
 
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Supabase JS client. Loaded for forward-compat with the storage adapter
+     in session 1. Not initialized while STORAGE_MODE === 'localStorage'. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 /* Round Rock Parks and Recreation Fitness Tracker - single file, no build step */
 (function(){
@@ -1062,6 +1065,85 @@
   var useRef = React.useRef;
   var useMemo = React.useMemo;
   var useCallback = React.useCallback;
+
+  /* ============ STORAGE MODE + ADAPTER ============
+     Session 1: localStorage active, Supabase prep only. The adapter wraps
+     every entity load/save behind a Promise-based API. STORAGE_MODE flips
+     in session 2 to swap localStorage for Supabase calls without touching
+     component code. The 'leads' adapter intentionally backs onto the
+     existing cmrc_queue_v1 key so existing data stays in place; the
+     queue/leads naming was never overloaded (sub coverage lives on
+     class.subAssignments, not in localStorage). */
+  var STORAGE_MODE = 'localStorage'; /* 'localStorage' | 'supabase' */
+  var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
+  var SUPABASE_ANON_KEY = '[paste anon key here]';
+  /* Supabase client is created lazily only when STORAGE_MODE === 'supabase'.
+     Session 1 leaves this null. The CDN script tag in <head> exposes
+     window.supabase but we don't call createClient until session 2. */
+  var supabaseClient = null;
+  if (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined') {
+    supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  }
+
+  /* Per-key load/save factory. Returns a {load, save} pair that branches on
+     STORAGE_MODE. localStorage branch wraps sync I/O in resolved promises
+     so callers can await uniformly. Supabase branch throws until session 2
+     wires it up. */
+  function _ls(key){
+    return {
+      load: function(){
+        if (STORAGE_MODE === 'supabase') {
+          return Promise.reject(new Error('Supabase mode not yet enabled'));
+        }
+        try {
+          var raw = localStorage.getItem(key);
+          return Promise.resolve(raw ? JSON.parse(raw) : null);
+        } catch (err) {
+          return Promise.resolve(null);
+        }
+      },
+      save: function(v){
+        if (STORAGE_MODE === 'supabase') {
+          return Promise.reject(new Error('Supabase mode not yet enabled'));
+        }
+        try {
+          localStorage.setItem(key, JSON.stringify(v));
+          return Promise.resolve();
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
+    };
+  }
+
+  var storage = {
+    trainers:         _ls('pt_trainers_v4'),
+    clients:          _ls('pt_clients_v3'),
+    classes:          _ls('cmrc_classes_v2'),
+    closures:         _ls('cmrc_closures_v2'),
+    wros:             _ls('cmrc_wros_v1'),
+    referrals:        _ls('cmrc_pt_referrals_v1'),
+    adminItems:       _ls('cmrc_items_v1'),
+    /* leads backs onto the existing cmrc_queue_v1 key. The on-disk key is
+       unchanged; only the adapter API surface uses the 'leads' name. */
+    leads:            _ls('cmrc_queue_v1'),
+    contacts:         _ls('cmrc_contacts_v1'),
+    scheduleVersions: _ls('cmrc_schedule_versions_v1'),
+    adminPin:         _ls('admin_pin_v1'),
+    /* Sign-in session: stubbed, non-persistent. Session 2 may wire actual
+       persistence; for now sign-in still resets on reload (existing
+       behavior). API exists for forward compat. */
+    session: {
+      load:  function(){ return Promise.resolve(null); },
+      save:  function(_v){ return Promise.resolve(); },
+      clear: function(){ return Promise.resolve(); }
+    }
+  };
+  /* Expose for debugging (validation step 7). */
+  if (typeof window !== 'undefined') {
+    window.STORAGE_MODE = STORAGE_MODE;
+    window.storage = storage;
+  }
 
   /* ============ CONSTANTS ============ */
   var PACKAGES = [
@@ -2532,42 +2614,54 @@
 
   /* ============ APP ROOT ============ */
   function App(){
-    var trainersTuple = useLocal('pt_trainers_v4', SEED_TRAINERS.slice());
+    /* Storage adapter refactor (session 1):
+       - Initial state holds seeds (used briefly while the loading screen is
+         up; never displayed since `loading` short-circuits the render).
+       - On mount, Promise.all loads all entities in parallel via the storage
+         adapter. Each successful load overwrites state. Loading flips false
+         when all complete (or fail).
+       - Per-entity save effects fire on state change but are gated on
+         !loading so they don't write seeds back over real data during the
+         initial load window.
+       - In session 2 the localStorage branch swaps for Supabase calls; this
+         component shape doesn't change. */
+    var trainersTuple = useState(SEED_TRAINERS.slice());
     var trainers = trainersTuple[0];
     var setTrainers = trainersTuple[1];
 
-    var clientsTuple = useLocal('pt_clients_v3', buildSeedClients());
+    var clientsTuple = useState(buildSeedClients());
     var clients = clientsTuple[0];
     var setClients = clientsTuple[1];
 
-    var classesTuple = useLocal('cmrc_classes_v2', buildSeedClasses());
+    var classesTuple = useState(buildSeedClasses());
     var classes = classesTuple[0];
     var setClasses = classesTuple[1];
 
-    var closuresTuple = useLocal('cmrc_closures_v2', SEED_CLOSURES_2026.slice());
+    var closuresTuple = useState(SEED_CLOSURES_2026.slice());
     var closures = closuresTuple[0];
     var setClosures = closuresTuple[1];
 
-    var wrosTuple = useLocal('cmrc_wros_v1', []);
+    var wrosTuple = useState([]);
     var wros = wrosTuple[0];
     var setWros = wrosTuple[1];
 
-    var referralsTuple = useLocal('cmrc_pt_referrals_v1', []);
+    var referralsTuple = useState([]);
     var referrals = referralsTuple[0];
     var setReferrals = referralsTuple[1];
 
     /* v2: manual admin time entries (Items) */
-    var itemsTuple = useLocal('cmrc_items_v1', []);
+    var itemsTuple = useState([]);
     var items = itemsTuple[0];
     var setItems = itemsTuple[1];
 
-    /* v2: consult queue for new PT lead intake */
-    var queueTuple = useLocal('cmrc_queue_v1', []);
+    /* v2: leads / consult pipeline. Adapter API is storage.leads; the
+       on-disk localStorage key remains cmrc_queue_v1 (no data migration). */
+    var queueTuple = useState([]);
     var queue = queueTuple[0];
     var setQueue = queueTuple[1];
 
     /* v2.4: member contacts - quick log of floor interactions */
-    var contactsTuple = useLocal('cmrc_contacts_v1', []);
+    var contactsTuple = useState([]);
     var contacts = contactsTuple[0];
     var setContacts = contactsTuple[1];
 
@@ -2578,13 +2672,67 @@
        a new version activates, classes from the prior version that aren't
        in the new one get seasonEnd set (preserved as historical, not
        deleted). */
-    var schedVersionsTuple = useLocal('cmrc_schedule_versions_v1', []);
+    var schedVersionsTuple = useState([]);
     var scheduleVersions = schedVersionsTuple[0];
     var setScheduleVersions = schedVersionsTuple[1];
 
-    var pinTuple = useLocal('admin_pin_v1', DEFAULT_PIN);
+    var pinTuple = useState(DEFAULT_PIN);
     var pin = pinTuple[0];
     var setPin = pinTuple[1];
+
+    /* Async load coordination */
+    var loadingTuple = useState(true);
+    var loading = loadingTuple[0];
+    var setLoading = loadingTuple[1];
+
+    useEffect(function(){
+      Promise.all([
+        storage.trainers.load(),
+        storage.clients.load(),
+        storage.classes.load(),
+        storage.closures.load(),
+        storage.wros.load(),
+        storage.referrals.load(),
+        storage.adminItems.load(),
+        storage.leads.load(),
+        storage.contacts.load(),
+        storage.scheduleVersions.load(),
+        storage.adminPin.load()
+      ]).then(function(r){
+        if (r[0] != null) setTrainers(r[0]);
+        if (r[1] != null) setClients(r[1]);
+        if (r[2] != null) setClasses(r[2]);
+        if (r[3] != null) setClosures(r[3]);
+        if (r[4] != null) setWros(r[4]);
+        if (r[5] != null) setReferrals(r[5]);
+        if (r[6] != null) setItems(r[6]);
+        if (r[7] != null) setQueue(r[7]);
+        if (r[8] != null) setContacts(r[8]);
+        if (r[9] != null) setScheduleVersions(r[9]);
+        if (r[10] != null) setPin(r[10]);
+        setLoading(false);
+      }).catch(function(err){
+        /* If storage fails, fall through with seeds rather than block the
+           UI forever. The user-visible result matches a fresh-browser load. */
+        console.error('Storage initial load failed:', err);
+        setLoading(false);
+      });
+    }, []);
+
+    /* Per-entity save effects. Each fires on its own state change; the
+       `loading` guard prevents the seed values from being written back
+       to storage during the initial load window. */
+    useEffect(function(){ if (!loading) storage.trainers.save(trainers).catch(function(err){ console.error('Save trainers failed:', err); }); }, [trainers, loading]);
+    useEffect(function(){ if (!loading) storage.clients.save(clients).catch(function(err){ console.error('Save clients failed:', err); }); }, [clients, loading]);
+    useEffect(function(){ if (!loading) storage.classes.save(classes).catch(function(err){ console.error('Save classes failed:', err); }); }, [classes, loading]);
+    useEffect(function(){ if (!loading) storage.closures.save(closures).catch(function(err){ console.error('Save closures failed:', err); }); }, [closures, loading]);
+    useEffect(function(){ if (!loading) storage.wros.save(wros).catch(function(err){ console.error('Save wros failed:', err); }); }, [wros, loading]);
+    useEffect(function(){ if (!loading) storage.referrals.save(referrals).catch(function(err){ console.error('Save referrals failed:', err); }); }, [referrals, loading]);
+    useEffect(function(){ if (!loading) storage.adminItems.save(items).catch(function(err){ console.error('Save items failed:', err); }); }, [items, loading]);
+    useEffect(function(){ if (!loading) storage.leads.save(queue).catch(function(err){ console.error('Save leads failed:', err); }); }, [queue, loading]);
+    useEffect(function(){ if (!loading) storage.contacts.save(contacts).catch(function(err){ console.error('Save contacts failed:', err); }); }, [contacts, loading]);
+    useEffect(function(){ if (!loading) storage.scheduleVersions.save(scheduleVersions).catch(function(err){ console.error('Save scheduleVersions failed:', err); }); }, [scheduleVersions, loading]);
+    useEffect(function(){ if (!loading) storage.adminPin.save(pin).catch(function(err){ console.error('Save pin failed:', err); }); }, [pin, loading]);
 
     /* v2: idempotent sub-status migration. Walks every class once on mount;
        any subAssignment without an explicit status field is upgraded to
@@ -3289,6 +3437,24 @@
       deleteScheduleVersion: deleteScheduleVersion,
       activateScheduleVersion: activateScheduleVersion
     };
+
+    /* Loading screen until the initial Promise.all resolves. Brief in
+       localStorage mode (sync-wrapped), longer in session 2 when Supabase
+       calls are real network round-trips. */
+    if (loading) {
+      return e('div', {
+        style: {
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: 'var(--cream)',
+          color: 'var(--slate)',
+          fontSize: '14px',
+          letterSpacing: '0.04em'
+        }
+      }, 'Loading…');
+    }
 
     var view;
     if (!session) {
