@@ -2872,6 +2872,86 @@
     };
   }
 
+  /* Shared weekly hours dashboard panel. Renders Sun-Sat single-week
+     scheduled vs logged with two progress bars (GX, PT) plus a small
+     supplemental footnote for other-logged. Derives the window from
+     today; recomputes on every render so subscription updates flow
+     through naturally. Used in TrainerToday and TimeCardView. */
+  function WeeklyHoursDashboard(props){
+    var ctx = props.ctx;
+    var trainerName = props.trainerName;
+    var todayDate = parseYMD(todayStr());
+    var weekStartDate = (function(){
+      var d = new Date(todayDate.getTime());
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - d.getDay());
+      return d;
+    })();
+    var weekEndDate = addDays(weekStartDate, 6);
+    var dash = calcWeeklyDashboard(trainerName, weekStartDate, weekEndDate, ctx);
+    var remaining = Math.max(0, dash.scheduled.total - dash.logged.total);
+    var isLastDay = todayDate.getDay() === 6;
+    var remainingColor = remaining <= 0
+      ? 'var(--green)'
+      : (isLastDay ? 'var(--amber)' : 'var(--slate)');
+
+    function bar(label, logged, scheduled){
+      var pct = scheduled > 0 ? Math.min(100, Math.round((logged / scheduled) * 100)) : 0;
+      var atOrAbove = scheduled > 0 && logged >= scheduled;
+      var fillColor = atOrAbove ? 'var(--green)' : 'var(--teal)';
+      return e('div', { style: { marginBottom: '8px' } },
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: '12px', marginBottom: '4px' } },
+          e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, label),
+          e('span', { style: { color: 'var(--slate)' } },
+            logged.toFixed(2) + ' / ' + scheduled.toFixed(2) + ' hr · ' + pct + '%'
+          )
+        ),
+        e('div', { style: { background: 'var(--cream-2)', borderRadius: '999px', height: '8px', overflow: 'hidden' } },
+          e('div', { style: {
+            background: fillColor,
+            height: '100%',
+            width: pct + '%',
+            transition: 'width 0.3s ease'
+          } })
+        )
+      );
+    }
+    var rangeLabel = weekStartDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+      ' - ' + weekEndDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+    return e('div', {
+      style: {
+        background: '#fff',
+        border: '1.5px solid var(--border)',
+        borderRadius: '12px',
+        padding: '14px 16px',
+        marginBottom: '14px'
+      }
+    },
+      e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' } },
+        e('div', null,
+          e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate-soft)', fontWeight: 700 } },
+            'This week'
+          ),
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } }, rangeLabel)
+        ),
+        e('div', { style: { textAlign: 'right' } },
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
+            'Scheduled ' + dash.scheduled.total.toFixed(2) + ' · Logged ' + dash.logged.total.toFixed(2)
+          ),
+          e('div', { style: { fontSize: '14px', color: remainingColor, fontWeight: 700, marginTop: '2px' } },
+            remaining <= 0 ? '✓ Caught up' : (remaining.toFixed(2) + ' hr remaining')
+          )
+        )
+      ),
+      bar('GX', dash.logged.gx, dash.scheduled.gx),
+      bar('PT', dash.logged.pt, dash.scheduled.pt),
+      dash.logged.other > 0 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '6px', fontStyle: 'italic' } },
+        '+ ' + dash.logged.other.toFixed(2) + ' hr admin / recovery / contacts logged'
+      )
+    );
+  }
+
   function calcTrainerHours(trainerName, payPeriodOffset, clients, classes, items, wros, contacts){
     var nowPeriod = payPeriodForDate(new Date());
     var period = payPeriodByIndex(nowPeriod.index + (payPeriodOffset || 0));
@@ -4732,78 +4812,8 @@
         )
       ),
 
-      /* Weekly hours dashboard. Sun-Sat single-week window scoped to this
-         trainer. Recomputes on every render so subscription updates flow
-         through naturally. */
-      (function(){
-        var weekStartDate = (function(){
-          var d = new Date(todayDate.getTime());
-          d.setHours(0,0,0,0);
-          d.setDate(d.getDate() - d.getDay());
-          return d;
-        })();
-        var weekEndDate = addDays(weekStartDate, 6);
-        var dash = calcWeeklyDashboard(trainerName, weekStartDate, weekEndDate, ctx);
-        var remaining = Math.max(0, dash.scheduled.total - dash.logged.total);
-        var isLastDay = todayDate.getDay() === 6;
-        var remainingColor = remaining <= 0
-          ? 'var(--green)'
-          : (isLastDay ? 'var(--amber)' : 'var(--slate)');
-        function bar(label, logged, scheduled){
-          var pct = scheduled > 0 ? Math.min(100, Math.round((logged / scheduled) * 100)) : 0;
-          var atOrAbove = scheduled > 0 && logged >= scheduled;
-          var fillColor = atOrAbove ? 'var(--green)' : 'var(--teal)';
-          return e('div', { style: { marginBottom: '8px' } },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: '12px', marginBottom: '4px' } },
-              e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, label),
-              e('span', { style: { color: 'var(--slate)' } },
-                logged.toFixed(2) + ' / ' + scheduled.toFixed(2) + ' hr · ' + pct + '%'
-              )
-            ),
-            e('div', { style: { background: 'var(--cream-2)', borderRadius: '999px', height: '8px', overflow: 'hidden' } },
-              e('div', { style: {
-                background: fillColor,
-                height: '100%',
-                width: pct + '%',
-                transition: 'width 0.3s ease'
-              } })
-            )
-          );
-        }
-        var rangeLabel = weekStartDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
-          ' - ' + weekEndDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        return e('div', {
-          style: {
-            background: '#fff',
-            border: '1.5px solid var(--border)',
-            borderRadius: '12px',
-            padding: '14px 16px',
-            marginBottom: '14px'
-          }
-        },
-          e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' } },
-            e('div', null,
-              e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate-soft)', fontWeight: 700 } },
-                'This week'
-              ),
-              e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } }, rangeLabel)
-            ),
-            e('div', { style: { textAlign: 'right' } },
-              e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-                'Scheduled ' + dash.scheduled.total.toFixed(2) + ' · Logged ' + dash.logged.total.toFixed(2)
-              ),
-              e('div', { style: { fontSize: '14px', color: remainingColor, fontWeight: 700, marginTop: '2px' } },
-                remaining <= 0 ? '✓ Caught up' : (remaining.toFixed(2) + ' hr remaining')
-              )
-            )
-          ),
-          bar('GX', dash.logged.gx, dash.scheduled.gx),
-          bar('PT', dash.logged.pt, dash.scheduled.pt),
-          dash.logged.other > 0 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '6px', fontStyle: 'italic' } },
-            '+ ' + dash.logged.other.toFixed(2) + ' hr admin / recovery / contacts logged'
-          )
-        );
-      })(),
+      /* Weekly hours dashboard - shared with the Time Card page. */
+      e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
 
       /* Today's classes section */
       myClassesToday.length > 0 && e('div', { style: { marginBottom: '20px' } },
@@ -9668,6 +9678,11 @@
     }
 
     return e('div', null,
+      /* Weekly hours dashboard - same component used on the Today tab.
+         Always anchors to the current Sun-Sat regardless of which pay
+         period is selected below. */
+      e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
+
       /* Pay period selector */
       e('div', {
         style: {
