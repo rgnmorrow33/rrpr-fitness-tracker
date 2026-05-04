@@ -5591,6 +5591,9 @@
               );
             })
       ),
+      /* Add Client is admin-only as of the team-management changes.
+         Trainers see their assigned clients but creation goes through
+         admin > Clients now. */
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'My Clients'),
@@ -5600,14 +5603,13 @@
               : (myClients.length + ' active · ' + myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0) + ' sessions remaining')
             )
           )
-        ),
-        e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New Client')
+        )
       ),
       visibleClients.length === 0
         ? e('div', { className: 'empty' },
             e('div', { className: 'icon' }, '🏋️'),
-            e('h3', null, initialFilter ? 'No clients match this filter' : 'No clients yet'),
-            e('div', null, initialFilter ? 'Switch tabs and back to clear the filter.' : 'Tap "+ New Client" to add your first client.')
+            e('h3', null, initialFilter ? 'No clients match this filter' : 'No clients assigned yet'),
+            e('div', null, initialFilter ? 'Switch tabs and back to clear the filter.' : 'Ask an admin to add new clients and assign them to you.')
           )
         : visibleClients.map(function(c){
             return e(ClientCard, {
@@ -7556,9 +7558,11 @@
     var editOpen = editOpenTuple[0];
     var setEditOpen = editOpenTuple[1];
 
-    var assignSubOpenTuple = useState(false);
-    var assignSubOpen = assignSubOpenTuple[0];
-    var setAssignSubOpen = assignSubOpenTuple[1];
+    /* Sub-request modal (queue or direct assign). Replaces the older
+       AssignSubModal entry point on this view. */
+    var subRequestOpenTuple = useState(false);
+    var subRequestOpen = subRequestOpenTuple[0];
+    var setSubRequestOpen = subRequestOpenTuple[1];
 
     var canManageSubs = (ctx.session && ctx.session.role === 'admin') ||
                         (ctx.session && ctx.session.role === 'trainer' && ctx.session.name === c.instructor);
@@ -7643,7 +7647,7 @@
         ),
         e('div', { className: 'fab-row' },
           e('button', { className: 'btn btn-teal', onClick: function(){ setLogOpen(true); } }, '+ Log Attendance'),
-          canManageSubs && e('button', { className: 'btn btn-amber', onClick: function(){ setAssignSubOpen(true); } }, '+ Assign Sub'),
+          canManageSubs && e('button', { className: 'btn btn-amber', onClick: function(){ setSubRequestOpen(true); } }, 'Request Sub'),
           /* Edit Class is admin-only: changes class structure (name, time,
              instructor, room, capacity, etc.). Trainers retain attendance,
              sub assignment, and per-occurrence cancellation. */
@@ -7660,13 +7664,21 @@
           upcomingSubs.length > 0 && e('div', null,
             e('div', { style: { fontSize: '12px', fontWeight: 700, color: 'var(--slate)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '8px 0 6px' } }, 'Upcoming'),
             upcomingSubs.map(function(s){
-              return e('div', { key: s.id, className: 'list-row', style: { borderLeft: '4px solid var(--amber)' } },
+              var stat = subStatus(s);
+              var isOpen = stat === 'open';
+              var stripeColor = isOpen ? 'var(--gold)' : 'var(--amber)';
+              return e('div', { key: s.id, className: 'list-row', style: { borderLeft: '4px solid ' + stripeColor } },
                 e('div', null,
                   e('div', { style: { fontWeight: 600 } }, formatShort(parseYMD(s.date))),
-                  e('div', { style: { fontSize: '13px', color: 'var(--slate)' } },
-                    s.subInstructor + ' covering for ' + s.originalInstructor +
-                    (s.note ? ' · ' + s.note : '')
-                  )
+                  isOpen
+                    ? e('div', { style: { fontSize: '13px', color: 'var(--slate)' } },
+                        'Sub requested · waiting for claimer (asked by ' + (s.requestedBy || s.originalInstructor) + ')' +
+                        (s.note ? ' · ' + s.note : '')
+                      )
+                    : e('div', { style: { fontSize: '13px', color: 'var(--slate)' } },
+                        s.subInstructor + ' covering for ' + s.originalInstructor +
+                        (s.note ? ' · ' + s.note : '')
+                      )
                 ),
                 canManageSubs && e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ removeSub(s); } }, '✕')
               );
@@ -7790,14 +7802,14 @@
             ctx.toast('Attendance logged ✓');
           }
         }),
-        assignSubOpen && e(AssignSubModal, {
+        subRequestOpen && e(SubRequestModal, {
           ctx: ctx,
           cls: c,
-          onClose: function(){ setAssignSubOpen(false); },
+          onClose: function(){ setSubRequestOpen(false); },
           onSave: function(assignment){
             ctx.addSubAssignment(c.id, assignment);
-            setAssignSubOpen(false);
-            ctx.toast('Sub assigned ✓');
+            setSubRequestOpen(false);
+            ctx.toast(assignment.status === 'open' ? 'Posted to sub queue ✓' : 'Sub assigned ✓');
           }
         }),
         editOpen && e(NewClassModal, {
@@ -8193,6 +8205,187 @@
   }
 
   /* ============ SUB ASSIGNMENT MODAL ============ */
+  /* SubRequestModal: trainer-initiated coverage request. Two flows:
+       (a) Post to sub queue (status: 'open') - any trainer can claim via
+           the existing notification bar / claim flow
+       (b) Direct assign (status: 'claimed') - specific trainer slotted in,
+           still routes through the existing approval pipeline
+     Replaces the older AssignSubModal as the entry point. AssignSubModal
+     is kept defined but no longer rendered (cleanup pile). */
+  function SubRequestModal(props){
+    var ctx = props.ctx;
+    var cls = props.cls;
+    var sessionName = (ctx.session && ctx.session.name) || '';
+
+    var dateTuple = useState(todayStr());
+    var date = dateTuple[0]; var setDate = dateTuple[1];
+
+    /* 'queue' | 'direct' */
+    var modeTuple = useState('queue');
+    var mode = modeTuple[0]; var setMode = modeTuple[1];
+
+    var assigneeTuple = useState(function(){
+      var others = (ctx.trainers || []).filter(function(t){ return t !== cls.instructor; });
+      return others[0] || '';
+    });
+    var assignee = assigneeTuple[0]; var setAssignee = assigneeTuple[1];
+
+    var noteTuple = useState('');
+    var note = noteTuple[0]; var setNote = noteTuple[1];
+
+    var d = parseYMD(date);
+    var dayMatch = d && IDX_TO_DOW[d.getDay()] === normalizeDow(cls.dayOfWeek);
+    var existing = getAssignedSubForDate(cls, date);
+
+    function submit(){
+      if (!d) { ctx.toast('Pick a valid date', 'error'); return; }
+      if (!dayMatch) {
+        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + (normalizeDow(cls.dayOfWeek) || cls.dayOfWeek), 'error');
+        return;
+      }
+      if (mode === 'direct') {
+        if (!assignee) { ctx.toast('Pick a trainer', 'error'); return; }
+        if (assignee === cls.instructor) { ctx.toast('Cover must be different from regular instructor', 'error'); return; }
+      }
+      var nowIso = new Date().toISOString();
+      var assignment;
+      if (mode === 'queue') {
+        assignment = {
+          id: existing ? existing.id : uid(),
+          date: date,
+          status: 'open',
+          originalInstructor: cls.instructor,
+          requestedBy: sessionName || cls.instructor,
+          requestedAt: nowIso,
+          subInstructor: null,
+          claimedBy: null,
+          claimedAt: null,
+          approvedBy: null,
+          approvedAt: null,
+          denyReason: null,
+          note: note,
+          createdAt: nowIso
+        };
+      } else {
+        assignment = {
+          id: existing ? existing.id : uid(),
+          date: date,
+          status: 'claimed',
+          originalInstructor: cls.instructor,
+          requestedBy: sessionName || cls.instructor,
+          requestedAt: nowIso,
+          subInstructor: assignee,
+          claimedBy: assignee,
+          claimedAt: nowIso,
+          approvedBy: null,
+          approvedAt: null,
+          denyReason: null,
+          note: note,
+          createdAt: nowIso
+        };
+      }
+      props.onSave(assignment);
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Request Sub'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
+            e('b', null, cls.name),
+            ' · ' + cls.dayOfWeek + ' ' + formatTime12(cls.startTime) +
+            ' · Regular: ' + cls.instructor
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Date being covered'),
+            e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } }),
+            d && !dayMatch && e('div', { style: { color: 'var(--red)', fontSize: '12px', marginTop: '4px' } },
+              '⚠ ' + IDX_TO_DOW[d.getDay()] + ' - class meets on ' + cls.dayOfWeek
+            ),
+            existing && e('div', { style: { color: 'var(--amber)', fontSize: '12px', marginTop: '4px' } },
+              '⚠ Existing assignment for this date will be replaced.'
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'How should we handle coverage?'),
+            e('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+              e('label', {
+                style: {
+                  display: 'flex', alignItems: 'flex-start', gap: '10px',
+                  padding: '10px 12px', borderRadius: '8px',
+                  border: '1.5px solid ' + (mode === 'queue' ? 'var(--teal)' : 'var(--border)'),
+                  background: mode === 'queue' ? 'var(--teal-bg)' : '#fff',
+                  cursor: 'pointer'
+                }
+              },
+                e('input', {
+                  type: 'radio', name: 'sub-mode', value: 'queue',
+                  checked: mode === 'queue',
+                  onChange: function(){ setMode('queue'); }
+                }),
+                e('div', null,
+                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, 'Post to sub queue'),
+                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+                    'Anyone on the team can claim it. Surfaces in the GX notification bar.'
+                  )
+                )
+              ),
+              e('label', {
+                style: {
+                  display: 'flex', alignItems: 'flex-start', gap: '10px',
+                  padding: '10px 12px', borderRadius: '8px',
+                  border: '1.5px solid ' + (mode === 'direct' ? 'var(--teal)' : 'var(--border)'),
+                  background: mode === 'direct' ? 'var(--teal-bg)' : '#fff',
+                  cursor: 'pointer'
+                }
+              },
+                e('input', {
+                  type: 'radio', name: 'sub-mode', value: 'direct',
+                  checked: mode === 'direct',
+                  onChange: function(){ setMode('direct'); }
+                }),
+                e('div', null,
+                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, 'Directly assign someone'),
+                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+                    'Already coordinated with the cover. Skip the queue.'
+                  )
+                )
+              )
+            )
+          ),
+          mode === 'direct' && e('div', { className: 'field' },
+            e('label', null, 'Cover'),
+            e('select', { value: assignee, onChange: function(ev){ setAssignee(ev.target.value); } },
+              (ctx.trainers || []).map(function(t){
+                return e('option', {
+                  key: t, value: t, disabled: t === cls.instructor
+                }, t + (t === cls.instructor ? ' (regular)' : ''));
+              })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Anything the sub should know? (optional)'),
+            e('input', {
+              value: note, onChange: function(ev){ setNote(ev.target.value); },
+              placeholder: 'E.g. focus on form day, two new members'
+            })
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-amber', onClick: submit, disabled: !dayMatch },
+            existing
+              ? 'Replace assignment'
+              : (mode === 'queue' ? 'Post to queue' : 'Assign')
+          )
+        )
+      )
+    );
+  }
+
   function AssignSubModal(props){
     /* Schedule a future sub assignment for a class on a specific date */
     var ctx = props.ctx;
