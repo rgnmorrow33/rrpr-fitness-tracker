@@ -3007,7 +3007,13 @@
         if (!a.date || a.date < startYMD || a.date > endYMD) return;
         var dur = attendanceDurationHours(c, a);
         var actual = a.actualInstructor || a.instructor || c.instructor;
-        var wasSub = actual && actual !== c.instructor;
+        /* Use trainerNameMatches not raw !== so name-format variation
+           (full vs first-name, case, whitespace) doesn't misclassify a
+           trainer's own attendance as sub coverage. The raw check used to
+           push these into the sub-coverage path where the auto-created
+           'claimed' assignment then got filtered out for not being
+           'approved' - net zero hours for the actual instructor. */
+        var wasSub = actual && !trainerNameMatches(actual, c.instructor);
         if (wasSub) {
           if (!trainerNameMatches(trainerName, actual)) return;
           /* Sub coverage credit only counts if the sub assignment is approved.
@@ -8408,8 +8414,11 @@
       /* v2: if logging attendance with a different instructor than the regular,
          make sure a sub assignment record exists in the claimed state for
          admin review. Pre-assigned subs (already 'claimed' or 'approved') are
-         left alone. Open or missing records are upgraded to claimed. */
-      var isSub = instructor && instructor !== props.cls.instructor;
+         left alone. Open or missing records are upgraded to claimed.
+         Uses trainerNameMatches so name-format variation (full vs first,
+         case, whitespace) on a trainer logging their own class doesn't
+         create a false sub assignment. */
+      var isSub = instructor && !trainerNameMatches(instructor, props.cls.instructor);
       if (isSub) {
         var existing = getAssignedSubForDate(props.cls, date);
         var existingStatus = existing ? subStatus(existing) : null;
