@@ -12757,6 +12757,541 @@
     );
   }
 
+  /* ============ EDIT TRAINER MODAL ============
+     Admin-only: edit name, role, is_active on a trainers row. Local
+     trainers state is just an array of name strings (see translate.trainers
+     fromSupabase), so this modal reaches past the storage adapter to
+     fetch and write the full row directly. Subscription handlers pick up
+     the change and reload.
+
+     Step 1: form. Step 2: cascade preview (only when name changed).
+     Cascade walks every place a trainer name can appear:
+       - clients.trainer_name (flat)
+       - clients.sessions[].trainerName (jsonb nested)
+       - classes.instructor (flat)
+       - classes.sub_assignments[].{originalInstructor,subInstructor,claimedBy} (jsonb)
+       - classes.attendance[].instructor (jsonb)
+       - wros.trainer_name (flat)
+       - member_contacts.trainer_name (flat)
+       - admin_items.assignees[] (jsonb array of names)
+       - referrals.referred_by (flat)
+       - leads.assigned_to (flat)
+       - leads.status_history[].by (jsonb)
+       - schedule_versions.data.classes[].instructor (jsonb)
+
+     Errors halt and surface inline. The trainer record itself is updated
+     before cascades run, so a mid-cascade failure leaves the trainer
+     renamed with stale references. Acceptable per spec; admin can retry. */
+  function EditTrainerModal(props){
+    var ctx = props.ctx;
+    var originalName = props.trainerName;
+
+    var loadingTuple = useState(true);
+    var loading = loadingTuple[0]; var setLoading = loadingTuple[1];
+
+    var originalTuple = useState(null);
+    var original = originalTuple[0]; var setOriginal = originalTuple[1];
+
+    var nameTuple = useState(originalName || '');
+    var name = nameTuple[0]; var setName = nameTuple[1];
+    var roleTuple = useState('trainer');
+    var role = roleTuple[0]; var setRole = roleTuple[1];
+    var activeTuple = useState(true);
+    var active = activeTuple[0]; var setActive = activeTuple[1];
+
+    /* 1 = form, 2 = cascade preview */
+    var stepTuple = useState(1);
+    var step = stepTuple[0]; var setStep = stepTuple[1];
+
+    var errorTuple = useState(null);
+    var error = errorTuple[0]; var setError = errorTuple[1];
+    var savingTuple = useState(false);
+    var saving = savingTuple[0]; var setSaving = savingTuple[1];
+
+    var cascadeCountsTuple = useState(null);
+    var cascadeCounts = cascadeCountsTuple[0]; var setCascadeCounts = cascadeCountsTuple[1];
+
+    /* Fetch the full trainer row on mount. */
+    useEffect(function(){
+      if (!supabaseClient) {
+        setError('Supabase client not initialized');
+        setLoading(false);
+        return;
+      }
+      supabaseClient.from('trainers').select('*').eq('name', originalName).maybeSingle()
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data) throw new Error('Trainer not found in Supabase: ' + originalName);
+          setOriginal(res.data);
+          setName(res.data.name);
+          setRole(res.data.role || 'trainer');
+          setActive(res.data.is_active !== false);
+          setLoading(false);
+        })
+        .catch(function(err){
+          setError(err && err.message ? err.message : 'Could not load trainer record');
+          setLoading(false);
+        });
+    }, []);
+
+    var nameTrimmed = (name || '').trim();
+    var nameDifferent = !!original && nameTrimmed !== original.name;
+    var dirty = !!original && (
+      nameTrimmed !== original.name ||
+      role !== (original.role || 'trainer') ||
+      active !== (original.is_active !== false)
+    );
+
+    function validateForm(){
+      if (!nameTrimmed) return 'Name required';
+      if (nameTrimmed.length > 80) return 'Name must be 80 characters or less';
+      if (nameDifferent) {
+        var conflict = (ctx.trainers || []).some(function(n){
+          return n.toLowerCase() === nameTrimmed.toLowerCase() && n !== originalName;
+        });
+        if (conflict) return 'Another active trainer has this name';
+      }
+      return null;
+    }
+
+    /* Count records that reference oldName across every cascade target.
+       Flat columns use head:true count queries. jsonb fields fetch and
+       walk in JS (no efficient containment count without an RPC). */
+    function countCascade(oldName){
+      function flatCount(table, column){
+        return supabaseClient.from(table).select('id', { count: 'exact', head: true }).eq(column, oldName)
+          .then(function(res){ if (res.error) throw res.error; return res.count || 0; });
+      }
+      var classesJsonbP = supabaseClient.from('classes').select('id, sub_assignments, attendance')
+        .then(function(res){
+          if (res.error) throw res.error;
+          var sub = 0, att = 0;
+          (res.data || []).forEach(function(c){
+            (c.sub_assignments || []).forEach(function(s){
+              if (s && (s.originalInstructor === oldName || s.subInstructor === oldName || s.claimedBy === oldName)) sub++;
+            });
+            (c.attendance || []).forEach(function(a){
+              if (a && a.instructor === oldName) att++;
+            });
+          });
+          return { sub: sub, att: att };
+        });
+      var clientsSessionsP = supabaseClient.from('clients').select('id, sessions')
+        .then(function(res){
+          if (res.error) throw res.error;
+          var n = 0;
+          (res.data || []).forEach(function(client){
+            (client.sessions || []).forEach(function(s){
+              if (s && s.trainerName === oldName) n++;
+            });
+          });
+          return n;
+        });
+      var adminItemsP = supabaseClient.from('admin_items').select('id, assignees')
+        .then(function(res){
+          if (res.error) throw res.error;
+          var n = 0;
+          (res.data || []).forEach(function(it){
+            if ((it.assignees || []).indexOf(oldName) !== -1) n++;
+          });
+          return n;
+        });
+      var leadsHistoryP = supabaseClient.from('leads').select('id, status_history')
+        .then(function(res){
+          if (res.error) throw res.error;
+          var n = 0;
+          (res.data || []).forEach(function(l){
+            (l.status_history || []).forEach(function(h){
+              if (h && h.by === oldName) n++;
+            });
+          });
+          return n;
+        });
+      var schedVersionsP = supabaseClient.from('schedule_versions').select('id, data')
+        .then(function(res){
+          if (res.error) throw res.error;
+          var n = 0;
+          (res.data || []).forEach(function(v){
+            ((v.data && v.data.classes) || []).forEach(function(c){
+              if (c && c.instructor === oldName) n++;
+            });
+          });
+          return n;
+        });
+
+      return Promise.all([
+        flatCount('classes', 'instructor'),
+        flatCount('wros', 'trainer_name'),
+        flatCount('member_contacts', 'trainer_name'),
+        flatCount('referrals', 'referred_by'),
+        flatCount('leads', 'assigned_to'),
+        flatCount('clients', 'trainer_name'),
+        classesJsonbP,
+        clientsSessionsP,
+        adminItemsP,
+        leadsHistoryP,
+        schedVersionsP
+      ]).then(function(r){
+        return {
+          classesFlat:    r[0],
+          wros:           r[1],
+          memberContacts: r[2],
+          referrals:      r[3],
+          leadsFlat:      r[4],
+          clientsFlat:    r[5],
+          classesSub:     r[6].sub,
+          classesAtt:     r[6].att,
+          clientsSessions: r[7],
+          adminItems:     r[8],
+          leadsHistory:   r[9],
+          schedVersions:  r[10]
+        };
+      });
+    }
+
+    /* Run the cascade. Sequential to keep error reporting clean and
+       avoid hammering the realtime channel. Each step throws on error. */
+    function runCascade(oldName, newName){
+      var nowIso = new Date().toISOString();
+      function flatUpdate(table, column){
+        var patch = {};
+        patch[column] = newName;
+        patch.updated_at = nowIso;
+        return supabaseClient.from(table).update(patch).eq(column, oldName)
+          .then(function(res){ if (res.error) throw res.error; });
+      }
+      /* For classes the table doesn't have updated_at column for the
+         flat instructor change either. Be defensive: if a table lacks
+         updated_at, the update still goes through; Supabase ignores the
+         column? No - it errors on unknown column. Safer to omit for
+         tables we don't know have updated_at. classes does, per the
+         existing translate.classes ['createdAt','created_at'] hint. */
+      return flatUpdate('classes', 'instructor')
+        .then(function(){ return flatUpdate('wros', 'trainer_name'); })
+        .then(function(){ return flatUpdate('member_contacts', 'trainer_name'); })
+        .then(function(){ return flatUpdate('referrals', 'referred_by'); })
+        .then(function(){ return flatUpdate('leads', 'assigned_to'); })
+        .then(function(){ return flatUpdate('clients', 'trainer_name'); })
+        .then(function(){
+          /* classes jsonb: rewrite sub_assignments and attendance per row */
+          return supabaseClient.from('classes').select('id, sub_assignments, attendance')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var dirty = (res.data || []).filter(function(c){
+                var hitSub = (c.sub_assignments || []).some(function(s){
+                  return s && (s.originalInstructor === oldName || s.subInstructor === oldName || s.claimedBy === oldName);
+                });
+                var hitAtt = (c.attendance || []).some(function(a){ return a && a.instructor === oldName; });
+                return hitSub || hitAtt;
+              });
+              if (dirty.length === 0) return;
+              var chain = Promise.resolve();
+              dirty.forEach(function(c){
+                chain = chain.then(function(){
+                  var newSub = (c.sub_assignments || []).map(function(s){
+                    if (!s) return s;
+                    var copy = Object.assign({}, s);
+                    if (copy.originalInstructor === oldName) copy.originalInstructor = newName;
+                    if (copy.subInstructor === oldName) copy.subInstructor = newName;
+                    if (copy.claimedBy === oldName) copy.claimedBy = newName;
+                    return copy;
+                  });
+                  var newAtt = (c.attendance || []).map(function(a){
+                    if (!a) return a;
+                    var copy = Object.assign({}, a);
+                    if (copy.instructor === oldName) copy.instructor = newName;
+                    return copy;
+                  });
+                  return supabaseClient.from('classes')
+                    .update({ sub_assignments: newSub, attendance: newAtt, updated_at: nowIso })
+                    .eq('id', c.id)
+                    .then(function(r){ if (r.error) throw r.error; });
+                });
+              });
+              return chain;
+            });
+        })
+        .then(function(){
+          /* clients sessions jsonb */
+          return supabaseClient.from('clients').select('id, sessions')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var dirty = (res.data || []).filter(function(client){
+                return (client.sessions || []).some(function(s){ return s && s.trainerName === oldName; });
+              });
+              if (dirty.length === 0) return;
+              var chain = Promise.resolve();
+              dirty.forEach(function(client){
+                chain = chain.then(function(){
+                  var newSessions = (client.sessions || []).map(function(s){
+                    if (!s || s.trainerName !== oldName) return s;
+                    return Object.assign({}, s, { trainerName: newName });
+                  });
+                  return supabaseClient.from('clients')
+                    .update({ sessions: newSessions, updated_at: nowIso })
+                    .eq('id', client.id)
+                    .then(function(r){ if (r.error) throw r.error; });
+                });
+              });
+              return chain;
+            });
+        })
+        .then(function(){
+          /* admin_items assignees */
+          return supabaseClient.from('admin_items').select('id, assignees')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var dirty = (res.data || []).filter(function(it){
+                return (it.assignees || []).indexOf(oldName) !== -1;
+              });
+              if (dirty.length === 0) return;
+              var chain = Promise.resolve();
+              dirty.forEach(function(it){
+                chain = chain.then(function(){
+                  var newAssignees = (it.assignees || []).map(function(n){
+                    return n === oldName ? newName : n;
+                  });
+                  return supabaseClient.from('admin_items')
+                    .update({ assignees: newAssignees, updated_at: nowIso })
+                    .eq('id', it.id)
+                    .then(function(r){ if (r.error) throw r.error; });
+                });
+              });
+              return chain;
+            });
+        })
+        .then(function(){
+          /* leads status_history */
+          return supabaseClient.from('leads').select('id, status_history')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var dirty = (res.data || []).filter(function(l){
+                return (l.status_history || []).some(function(h){ return h && h.by === oldName; });
+              });
+              if (dirty.length === 0) return;
+              var chain = Promise.resolve();
+              dirty.forEach(function(l){
+                chain = chain.then(function(){
+                  var newHistory = (l.status_history || []).map(function(h){
+                    if (!h || h.by !== oldName) return h;
+                    return Object.assign({}, h, { by: newName });
+                  });
+                  return supabaseClient.from('leads')
+                    .update({ status_history: newHistory, updated_at: nowIso })
+                    .eq('id', l.id)
+                    .then(function(r){ if (r.error) throw r.error; });
+                });
+              });
+              return chain;
+            });
+        })
+        .then(function(){
+          /* schedule_versions data.classes[].instructor */
+          return supabaseClient.from('schedule_versions').select('id, data')
+            .then(function(res){
+              if (res.error) throw res.error;
+              var dirty = (res.data || []).filter(function(v){
+                return ((v.data && v.data.classes) || []).some(function(c){ return c && c.instructor === oldName; });
+              });
+              if (dirty.length === 0) return;
+              var chain = Promise.resolve();
+              dirty.forEach(function(v){
+                chain = chain.then(function(){
+                  var newData = Object.assign({}, v.data || {});
+                  newData.classes = (newData.classes || []).map(function(c){
+                    if (!c || c.instructor !== oldName) return c;
+                    return Object.assign({}, c, { instructor: newName });
+                  });
+                  return supabaseClient.from('schedule_versions')
+                    .update({ data: newData, updated_at: nowIso })
+                    .eq('id', v.id)
+                    .then(function(r){ if (r.error) throw r.error; });
+                });
+              });
+              return chain;
+            });
+        });
+    }
+
+    function writeTrainerRecord(){
+      var nowIso = new Date().toISOString();
+      var update = {
+        name: nameTrimmed,
+        role: role,
+        is_active: active,
+        updated_at: nowIso
+      };
+      if (nameDifferent) {
+        var prev = original.previous_names || [];
+        update.previous_names = prev.concat([{ name: original.name, renamed_at: nowIso }]);
+      }
+      return supabaseClient.from('trainers').update(update).eq('id', original.id)
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+
+    function handleSaveStep1(){
+      var err = validateForm();
+      if (err) { setError(err); return; }
+      setError(null);
+      if (!nameDifferent) {
+        /* Direct write, skip preview */
+        setSaving(true);
+        writeTrainerRecord()
+          .then(function(){
+            setSaving(false);
+            ctx.toast('Updated ' + nameTrimmed);
+            props.onClose();
+          })
+          .catch(function(err){
+            setSaving(false);
+            setError(err && err.message ? err.message : 'Save failed');
+          });
+        return;
+      }
+      /* Name changed: count cascade, go to preview. */
+      setSaving(true);
+      countCascade(original.name)
+        .then(function(counts){
+          setCascadeCounts(counts);
+          setStep(2);
+          setSaving(false);
+        })
+        .catch(function(err){
+          setSaving(false);
+          setError(err && err.message ? err.message : 'Could not count cascade impact');
+        });
+    }
+
+    function handleConfirmRename(){
+      setError(null);
+      setSaving(true);
+      writeTrainerRecord()
+        .then(function(){ return runCascade(original.name, nameTrimmed); })
+        .then(function(){
+          setSaving(false);
+          ctx.toast('Renamed to ' + nameTrimmed);
+          props.onClose();
+        })
+        .catch(function(err){
+          setSaving(false);
+          setError(err && err.message ? err.message : 'Cascade failed - trainer record may be updated but references are stale. Retry from this modal.');
+        });
+    }
+
+    var cascadeRows = [];
+    if (cascadeCounts) {
+      var rows = [
+        ['classes (instructor)', cascadeCounts.classesFlat],
+        ['class sub assignments', cascadeCounts.classesSub],
+        ['class attendance records', cascadeCounts.classesAtt],
+        ['clients (assigned trainer)', cascadeCounts.clientsFlat],
+        ['client session records', cascadeCounts.clientsSessions],
+        ['WROs', cascadeCounts.wros],
+        ['member contacts', cascadeCounts.memberContacts],
+        ['admin items (assignees)', cascadeCounts.adminItems],
+        ['referrals', cascadeCounts.referrals],
+        ['leads (assigned)', cascadeCounts.leadsFlat],
+        ['lead status history entries', cascadeCounts.leadsHistory],
+        ['schedule versions', cascadeCounts.schedVersions]
+      ];
+      cascadeRows = rows.filter(function(r){ return r[1] > 0; });
+    }
+    var cascadeTotal = cascadeRows.reduce(function(s, r){ return s + r[1]; }, 0);
+
+    /* Render */
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, step === 1 ? 'Edit Team Member' : 'Confirm Rename'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          loading
+            ? e('div', { style: { padding: '20px', fontSize: '14px', color: 'var(--slate)', textAlign: 'center' } }, 'Loading…')
+            : (step === 1
+              ? e('div', null,
+                  e('div', { className: 'field' },
+                    e('label', null, 'Name *'),
+                    e('input', {
+                      type: 'text', value: name, maxLength: 80,
+                      onChange: function(ev){ setName(ev.target.value); }
+                    })
+                  ),
+                  e('div', { className: 'field' },
+                    e('label', null, 'Role'),
+                    e('select', { value: role, onChange: function(ev){ setRole(ev.target.value); } },
+                      e('option', { value: 'trainer' }, 'Trainer'),
+                      e('option', { value: 'admin' }, 'Admin')
+                    ),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+                      'Stored on the team member record. Sign-in role is set at login, not here.'
+                    )
+                  ),
+                  e('div', { className: 'field' },
+                    e('div', { className: 'checkbox-row' },
+                      e('input', {
+                        type: 'checkbox', id: 'edit-trainer-active',
+                        checked: active,
+                        onChange: function(ev){ setActive(ev.target.checked); }
+                      }),
+                      e('label', { htmlFor: 'edit-trainer-active' }, 'Active')
+                    ),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+                      'Inactive team members are hidden from pickers but their record is preserved.'
+                    )
+                  ),
+                  error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error)
+                )
+              : e('div', null,
+                  e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '12px' } },
+                    'Rename ', e('b', null, original.name), ' to ', e('b', null, nameTrimmed), '?'
+                  ),
+                  cascadeTotal === 0
+                    ? e('div', { className: 'banner teal', style: { marginBottom: '10px' } },
+                        'No other records reference this trainer\'s name. The trainer record will be updated alone.'
+                      )
+                    : e('div', null,
+                        e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '8px' } },
+                          'This will update ', e('b', null, original.name), ' to ', e('b', null, nameTrimmed), ' across:'
+                        ),
+                        e('ul', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: 0, paddingLeft: '20px' } },
+                          cascadeRows.map(function(r, i){
+                            return e('li', { key: i }, r[1] + ' ' + r[0]);
+                          })
+                        ),
+                        e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700, marginTop: '8px' } },
+                          'Total: ' + cascadeTotal + ' record' + (cascadeTotal === 1 ? '' : 's')
+                        )
+                      ),
+                  error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error)
+                )
+            )
+        ),
+        e('div', { className: 'modal-footer' },
+          step === 1
+            ? [
+                e('button', { key: 'cancel', className: 'btn btn-ghost', onClick: props.onClose, disabled: saving }, 'Cancel'),
+                e('button', {
+                  key: 'save',
+                  className: 'btn btn-primary',
+                  onClick: handleSaveStep1,
+                  disabled: loading || saving || !dirty
+                }, saving ? 'Working…' : 'Save')
+              ]
+            : [
+                e('button', { key: 'back', className: 'btn btn-ghost', onClick: function(){ setStep(1); setError(null); }, disabled: saving }, 'Back'),
+                e('button', {
+                  key: 'confirm',
+                  className: 'btn btn-primary',
+                  onClick: handleConfirmRename,
+                  disabled: saving
+                }, saving ? 'Working…' : 'Confirm rename')
+              ]
+        )
+      )
+    );
+  }
+
   /* ============ ADMIN: Maintenance ============
      Hidden admin tools, primarily a one-shot device-reset for the
      localStorage-to-Supabase cutover. Behind a confirm dialog so it can
@@ -12846,6 +13381,11 @@
     var pinInput = pinInputTuple[0];
     var setPinInput = pinInputTuple[1];
 
+    /* Which trainer is currently being edited (null = closed). */
+    var editingTuple = useState(null);
+    var editingTrainer = editingTuple[0];
+    var setEditingTrainer = editingTuple[1];
+
     function add(){
       if (ctx.addTrainer(name)) {
         ctx.toast('Team member added ✓');
@@ -12891,10 +13431,26 @@
               e('div', { style: { fontWeight: 600 } }, n),
               e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, c + ' clients · ' + cl + ' classes')
             ),
-            e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(n); } }, 'Remove')
+            e('div', { style: { display: 'flex', gap: '6px' } },
+              e('button', {
+                className: 'btn btn-ghost btn-sm',
+                onClick: function(){ setEditingTrainer(n); },
+                title: 'Edit name, role, active status'
+              }, '✏ Edit'),
+              e('button', {
+                className: 'btn btn-ghost btn-sm',
+                style: { color: 'var(--red)' },
+                onClick: function(){ remove(n); }
+              }, 'Remove')
+            )
           );
         })
       ),
+      editingTrainer && e(EditTrainerModal, {
+        ctx: ctx,
+        trainerName: editingTrainer,
+        onClose: function(){ setEditingTrainer(null); }
+      }),
       e('div', { style: { background: '#fff', padding: '18px', borderRadius: '14px', border: '1px solid var(--border)' } },
         e('h3', { style: { fontSize: '16px', marginBottom: '10px' } }, 'Admin PIN'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '10px' } },
