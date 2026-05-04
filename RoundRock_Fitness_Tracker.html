@@ -2746,6 +2746,132 @@
        subLosses (informational, not deducted)
      payPeriodOffset is relative to the current period:
        0 = current, -1 = previous (just closed), +1 = next */
+  /* Single-week (Sun-Sat) scheduled vs logged dashboard for a trainer.
+     Parallel to calcTrainerHours but window-flexible and focused on the
+     forward-facing GX/PT split needed by the dashboard. Recomputed on
+     every render so subscription updates flow through naturally. */
+  function calcWeeklyDashboard(trainerName, weekStart, weekEnd, ctx){
+    var startYMD = toYMD(weekStart);
+    var endYMD = toYMD(weekEnd);
+
+    /* GX scheduled: walk class occurrences. Sub coverage shifts the count
+       to whoever's actually expected (assignedSub if present, else the
+       primary instructor). Cancelled occurrences contribute recovery hours
+       only when recovery is logged. */
+    var occs = occurrencesInWindow(ctx.classes, weekStart, weekEnd, ctx.closures);
+    var gxScheduled = 0;
+    occs.forEach(function(o){
+      if (o.isClosed) return;
+      var expected = (o.assignedSub && (o.assignedSub.subInstructor || o.assignedSub.claimedBy)) || o.cls.instructor;
+      if (!trainerNameMatches(trainerName, expected)) return;
+      if (o.isCancelled) {
+        var rec = o.cancellation && o.cancellation.serviceRecovery;
+        if (rec && typeof rec.durationHours === 'number' && rec.durationHours > 0) {
+          gxScheduled += rec.durationHours;
+        }
+        return;
+      }
+      gxScheduled += gxClassHours(o.cls);
+    });
+
+    /* PT scheduled: every session in the window assigned to this trainer,
+       regardless of status. The slot is committed work even if it ended
+       up no_show / late_cancel / excused. */
+    var ptScheduled = 0;
+    (ctx.clients || []).forEach(function(client){
+      (client.sessions || []).forEach(function(s){
+        if (!s.date || s.date < startYMD || s.date > endYMD) return;
+        var sessTrainer = s.trainerName || client.trainerName;
+        if (!trainerNameMatches(trainerName, sessTrainer)) return;
+        var dur = (typeof s.durationHours === 'number' && s.durationHours > 0) ? s.durationHours : 1;
+        ptScheduled += dur;
+      });
+    });
+
+    /* GX logged: attendance records in window where this trainer was the
+       actual instructor (primary or sub). Mirrors calcTrainerHours rules. */
+    var gxLogged = 0;
+    (ctx.classes || []).forEach(function(c){
+      (c.attendance || []).forEach(function(a){
+        if (a.cancelled) return;
+        if (!a.date || a.date < startYMD || a.date > endYMD) return;
+        var actual = a.actualInstructor || a.instructor || c.instructor;
+        if (!trainerNameMatches(trainerName, actual)) return;
+        gxLogged += attendanceDurationHours(c, a);
+      });
+    });
+
+    /* PT logged: only attended sessions count as logged forward-facing
+       hours (matches calcTrainerHours.ptHours rule). */
+    var ptLogged = 0;
+    (ctx.clients || []).forEach(function(client){
+      (client.sessions || []).forEach(function(s){
+        if (s.status !== 'attended') return;
+        if (!s.date || s.date < startYMD || s.date > endYMD) return;
+        var sessTrainer = s.trainerName || client.trainerName;
+        if (!trainerNameMatches(trainerName, sessTrainer)) return;
+        var dur = (typeof s.durationHours === 'number' && s.durationHours > 0) ? s.durationHours : 1;
+        ptLogged += dur;
+      });
+    });
+
+    /* Other logged (supplemental): auto-admin + manual admin + contacts +
+       service recovery. Computed inline so the dashboard doesn't depend
+       on calcTrainerHours' pay-period semantics. */
+    var autoAdmin = autoAdminHours(gxLogged + ptLogged);
+    var manualAdmin = 0;
+    (ctx.items || []).forEach(function(it){
+      if (!it.date || it.date < startYMD || it.date > endYMD) return;
+      var matches = (it.assignees || []).some(function(n){ return trainerNameMatches(trainerName, n); });
+      if (!matches) return;
+      manualAdmin += (typeof it.hours === 'number' ? it.hours : 0);
+    });
+    var myContacts = [];
+    (ctx.contacts || []).forEach(function(ct){
+      if (!ct.date || ct.date < startYMD || ct.date > endYMD) return;
+      if (!trainerNameMatches(trainerName, ct.trainerName)) return;
+      myContacts.push(ct);
+    });
+    var contactH = contactsAdminHours(myContacts);
+    var recoveryH = 0;
+    (ctx.clients || []).forEach(function(client){
+      (client.sessions || []).forEach(function(s){
+        var r = s.serviceRecovery;
+        if (!r || typeof r.durationHours !== 'number' || r.durationHours <= 0) return;
+        if (!s.date || s.date < startYMD || s.date > endYMD) return;
+        var loggedBy = r.loggedBy || client.trainerName;
+        if (!trainerNameMatches(trainerName, loggedBy)) return;
+        recoveryH += r.durationHours;
+      });
+    });
+    (ctx.classes || []).forEach(function(cls){
+      (cls.cancellations || []).forEach(function(x){
+        var r = x.serviceRecovery;
+        if (!r || typeof r.durationHours !== 'number' || r.durationHours <= 0) return;
+        if (!x.date || x.date < startYMD || x.date > endYMD) return;
+        var loggedBy = r.loggedBy || cls.instructor;
+        if (!trainerNameMatches(trainerName, loggedBy)) return;
+        recoveryH += r.durationHours;
+      });
+    });
+    var otherLogged = autoAdmin + manualAdmin + contactH + recoveryH;
+
+    function r2(n){ return Math.round(n * 100) / 100; }
+    return {
+      scheduled: {
+        gx: r2(gxScheduled),
+        pt: r2(ptScheduled),
+        total: r2(gxScheduled + ptScheduled)
+      },
+      logged: {
+        gx: r2(gxLogged),
+        pt: r2(ptLogged),
+        other: r2(otherLogged),
+        total: r2(gxLogged + ptLogged)
+      }
+    };
+  }
+
   function calcTrainerHours(trainerName, payPeriodOffset, clients, classes, items, wros, contacts){
     var nowPeriod = payPeriodForDate(new Date());
     var period = payPeriodByIndex(nowPeriod.index + (payPeriodOffset || 0));
@@ -4605,6 +4731,79 @@
           summary.grandTotal.toFixed(2) + ' hr'
         )
       ),
+
+      /* Weekly hours dashboard. Sun-Sat single-week window scoped to this
+         trainer. Recomputes on every render so subscription updates flow
+         through naturally. */
+      (function(){
+        var weekStartDate = (function(){
+          var d = new Date(todayDate.getTime());
+          d.setHours(0,0,0,0);
+          d.setDate(d.getDate() - d.getDay());
+          return d;
+        })();
+        var weekEndDate = addDays(weekStartDate, 6);
+        var dash = calcWeeklyDashboard(trainerName, weekStartDate, weekEndDate, ctx);
+        var remaining = Math.max(0, dash.scheduled.total - dash.logged.total);
+        var isLastDay = todayDate.getDay() === 6;
+        var remainingColor = remaining <= 0
+          ? 'var(--green)'
+          : (isLastDay ? 'var(--amber)' : 'var(--slate)');
+        function bar(label, logged, scheduled){
+          var pct = scheduled > 0 ? Math.min(100, Math.round((logged / scheduled) * 100)) : 0;
+          var atOrAbove = scheduled > 0 && logged >= scheduled;
+          var fillColor = atOrAbove ? 'var(--green)' : 'var(--teal)';
+          return e('div', { style: { marginBottom: '8px' } },
+            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: '12px', marginBottom: '4px' } },
+              e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, label),
+              e('span', { style: { color: 'var(--slate)' } },
+                logged.toFixed(2) + ' / ' + scheduled.toFixed(2) + ' hr · ' + pct + '%'
+              )
+            ),
+            e('div', { style: { background: 'var(--cream-2)', borderRadius: '999px', height: '8px', overflow: 'hidden' } },
+              e('div', { style: {
+                background: fillColor,
+                height: '100%',
+                width: pct + '%',
+                transition: 'width 0.3s ease'
+              } })
+            )
+          );
+        }
+        var rangeLabel = weekStartDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+          ' - ' + weekEndDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return e('div', {
+          style: {
+            background: '#fff',
+            border: '1.5px solid var(--border)',
+            borderRadius: '12px',
+            padding: '14px 16px',
+            marginBottom: '14px'
+          }
+        },
+          e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' } },
+            e('div', null,
+              e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate-soft)', fontWeight: 700 } },
+                'This week'
+              ),
+              e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } }, rangeLabel)
+            ),
+            e('div', { style: { textAlign: 'right' } },
+              e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
+                'Scheduled ' + dash.scheduled.total.toFixed(2) + ' · Logged ' + dash.logged.total.toFixed(2)
+              ),
+              e('div', { style: { fontSize: '14px', color: remainingColor, fontWeight: 700, marginTop: '2px' } },
+                remaining <= 0 ? '✓ Caught up' : (remaining.toFixed(2) + ' hr remaining')
+              )
+            )
+          ),
+          bar('GX', dash.logged.gx, dash.scheduled.gx),
+          bar('PT', dash.logged.pt, dash.scheduled.pt),
+          dash.logged.other > 0 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '6px', fontStyle: 'italic' } },
+            '+ ' + dash.logged.other.toFixed(2) + ' hr admin / recovery / contacts logged'
+          )
+        );
+      })(),
 
       /* Today's classes section */
       myClassesToday.length > 0 && e('div', { style: { marginBottom: '20px' } },
