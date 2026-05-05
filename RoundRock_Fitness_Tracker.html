@@ -3161,6 +3161,14 @@
        subLosses (informational, not deducted)
      payPeriodOffset is relative to the current period:
        0 = current, -1 = previous (just closed), +1 = next */
+  /* Display-only rounding for hour totals. Snaps to nearest 0.25 so
+     trainers see clean quarter-hour totals on chips, summaries, and the
+     time card. Underlying stored hours stay precise. */
+  function displayHrs(n){
+    var v = (typeof n === 'number' && isFinite(n)) ? n : 0;
+    return (Math.round(v * 4) / 4).toFixed(2);
+  }
+
   /* Single-week (Sun-Sat) scheduled vs logged dashboard for a trainer.
      Parallel to calcTrainerHours but window-flexible and focused on the
      forward-facing GX/PT split needed by the dashboard. Recomputed on
@@ -3269,7 +3277,10 @@
         recoveryH += r.durationHours;
       });
     });
-    var otherLogged = autoAdmin + manualAdmin + contactH + recoveryH;
+    /* Contacts not included in otherLogged - shown only as a hint count
+       below the bars, not summed into the on-the-floor footnote. */
+    var otherLogged = autoAdmin + manualAdmin + recoveryH;
+    var contactsCount = myContacts.length;
 
     function r2(n){ return Math.round(n * 100) / 100; }
     return {
@@ -3282,6 +3293,7 @@
         gx: r2(gxLogged),
         pt: r2(ptLogged),
         other: r2(otherLogged),
+        contactsCount: contactsCount,
         total: r2(gxLogged + ptLogged)
       }
     };
@@ -3318,7 +3330,7 @@
         e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: '12px', marginBottom: '4px' } },
           e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, label),
           e('span', { style: { color: 'var(--slate)' } },
-            logged.toFixed(2) + ' / ' + scheduled.toFixed(2) + ' hr · ' + pct + '%'
+            displayHrs(logged) + ' / ' + displayHrs(scheduled) + ' hr · ' + pct + '%'
           )
         ),
         e('div', { style: { background: 'var(--cream-2)', borderRadius: '999px', height: '8px', overflow: 'hidden' } },
@@ -3352,17 +3364,20 @@
         ),
         e('div', { style: { textAlign: 'right' } },
           e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-            'Scheduled ' + dash.scheduled.total.toFixed(2) + ' · Logged ' + dash.logged.total.toFixed(2)
+            'Scheduled ' + displayHrs(dash.scheduled.total) + ' · Logged ' + displayHrs(dash.logged.total)
           ),
           e('div', { style: { fontSize: '14px', color: remainingColor, fontWeight: 700, marginTop: '2px' } },
-            remaining <= 0 ? '✓ Caught up' : (remaining.toFixed(2) + ' hr remaining')
+            remaining <= 0 ? '✓ Caught up' : (displayHrs(remaining) + ' hr remaining')
           )
         )
       ),
       bar('GX', dash.logged.gx, dash.scheduled.gx),
       bar('PT', dash.logged.pt, dash.scheduled.pt),
       dash.logged.other > 0 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '6px', fontStyle: 'italic' } },
-        '+ ' + dash.logged.other.toFixed(2) + ' hr admin / recovery / contacts logged'
+        '+ ' + displayHrs(dash.logged.other) + ' hr admin / recovery logged'
+      ),
+      dash.logged.contactsCount > 0 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px', fontStyle: 'italic' } },
+        dash.logged.contactsCount + ' member contact' + (dash.logged.contactsCount === 1 ? '' : 's') + ' logged'
       )
     );
   }
@@ -3597,7 +3612,10 @@
         entries: recoveryEntries,
         hours: Math.round(recoveryHours * 100) / 100
       },
-      grandTotal: Math.round((forwardTotal + autoAdmin + manualAdminH + contactAdminH + recoveryHours) * 100) / 100,
+      /* Contacts roll up as a separate paid-but-not-on-the-floor bucket; not
+         summed into the time-on-the-floor grand total. card.contacts.hours
+         is still surfaced in the contacts section for visibility. */
+      grandTotal: Math.round((forwardTotal + autoAdmin + manualAdminH + recoveryHours) * 100) / 100,
       subLosses: subLosses
     };
   }
@@ -6016,15 +6034,14 @@
             'Pay period \u00b7 ' + summary.payPeriod.label
           ),
           e('div', { style: { color: 'var(--navy)', fontWeight: 500 } },
-            summary.forwardFacing.total.toFixed(2) + ' fwd + ' +
-            summary.autoAdmin.hours.toFixed(2) + ' auto + ' +
-            summary.manualAdmin.hours.toFixed(2) + ' manual + ' +
-            summary.contacts.hours.toFixed(2) + ' contacts + ' +
-            (summary.serviceRecovery && summary.serviceRecovery.hours || 0).toFixed(2) + ' recovery'
+            displayHrs(summary.forwardFacing.total) + ' fwd + ' +
+            displayHrs(summary.autoAdmin.hours) + ' auto + ' +
+            displayHrs(summary.manualAdmin.hours) + ' manual + ' +
+            displayHrs((summary.serviceRecovery && summary.serviceRecovery.hours) || 0) + ' recovery'
           )
         ),
         e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '22px', color: 'var(--teal)' } },
-          summary.grandTotal.toFixed(2) + ' hr'
+          displayHrs(summary.grandTotal) + ' hr'
         )
       ),
 
@@ -6085,7 +6102,12 @@
           var sess = item.session;
           var isScheduled = sess.status === 'scheduled';
           var isOverdue = isScheduled && sess.date < todayYMD;
-          var stripeColor = isOverdue ? 'var(--red)' : (isScheduled ? 'var(--gold)' : 'var(--teal)');
+          /* Mirrors the attended-class card treatment: green stripe + green-bg
+             + checkmark when the session has been signed off as attended. */
+          var isSignedAttended = sess.status === 'attended';
+          var stripeColor = isSignedAttended
+            ? 'var(--green)'
+            : (isOverdue ? 'var(--red)' : (isScheduled ? 'var(--gold)' : 'var(--teal)'));
           var daysOverdue = isOverdue
             ? Math.floor((parseYMD(todayYMD).getTime() - parseYMD(sess.date).getTime()) / 86400000)
             : 0;
@@ -6107,7 +6129,7 @@
               }
             },
             style: {
-              background: '#fff',
+              background: isSignedAttended ? 'var(--green-bg)' : '#fff',
               border: '1.5px solid var(--border)',
               borderRadius: '12px',
               padding: '12px 14px',
@@ -6120,6 +6142,7 @@
               e('div', { style: { flex: 1, minWidth: '160px' } },
                 e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
                   e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, item.client.name),
+                  isSignedAttended && e('span', { style: { color: 'var(--green)', fontSize: '14px', fontWeight: 700 } }, '\u2713'),
                   pillText && e('span', {
                     style: {
                       fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
@@ -6133,6 +6156,9 @@
                     ? (formatShort(parseYMD(sess.date)) + (sess.time ? (' \u00b7 ' + formatTime12(sess.time)) : ''))
                     : (sess.time ? formatTime12(sess.time) : '')
                   )
+                ),
+                isSignedAttended && e('div', { style: { fontSize: '12px', color: 'var(--green)', marginTop: '4px', fontWeight: 600 } },
+                  'Signed off'
                 )
               )
             )
@@ -6425,6 +6451,10 @@
       var isScheduled = status === 'scheduled';
       var isOverdueScheduled = isScheduled && sess.date < todayYMD;
       var stripeColor = isOverdueScheduled ? 'var(--red)' : (isScheduled ? 'var(--gold)' : stColor);
+      /* Mirrors the attended-class card treatment: green-bg + checkmark
+         when the session has been signed off as attended. Stripe is
+         already green for 'attended' via SESSION_STATUS_COLOR. */
+      var isSignedAttended = status === 'attended';
       return e('div', {
         key: 'pt-' + sess.id,
         onClick: function(){
@@ -6443,7 +6473,7 @@
           });
         },
         style: {
-          background: '#fff',
+          background: isSignedAttended ? 'var(--green-bg)' : '#fff',
           border: '1.5px solid var(--border)',
           borderLeft: '4px solid ' + stripeColor,
           borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
@@ -6452,7 +6482,10 @@
       },
         e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
           e('div', { style: { flex: 1, minWidth: 0 } },
-            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, client.name),
+            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } },
+              client.name,
+              isSignedAttended && e('span', { style: { color: 'var(--green)', marginLeft: '6px', fontWeight: 700 } }, '✓')
+            ),
             e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
               (sess.time ? formatTime12(sess.time) : '—') + ' · ' + stLabel
             )
@@ -6780,18 +6813,17 @@
               'Current pay period \u00b7 ' + summary.payPeriod.label
             ),
             e('div', { style: { color: 'var(--navy)', fontWeight: 500 } },
-              summary.forwardFacing.total.toFixed(2) + ' fwd + ' +
-              summary.autoAdmin.hours.toFixed(2) + ' auto + ' +
-              summary.manualAdmin.hours.toFixed(2) + ' manual + ' +
-              summary.contacts.hours.toFixed(2) + ' contacts + ' +
-            (summary.serviceRecovery && summary.serviceRecovery.hours || 0).toFixed(2) + ' recovery'
+              displayHrs(summary.forwardFacing.total) + ' fwd + ' +
+              displayHrs(summary.autoAdmin.hours) + ' auto + ' +
+              displayHrs(summary.manualAdmin.hours) + ' manual + ' +
+              displayHrs((summary.serviceRecovery && summary.serviceRecovery.hours) || 0) + ' recovery'
             ),
             todayContactCount > 0 && e('div', { style: { fontSize: '11px', color: 'var(--teal)', marginTop: '3px', fontWeight: 600 } },
               todayContactCount + ' contact' + (todayContactCount === 1 ? '' : 's') + ' logged today'
             )
           ),
           e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '22px', color: 'var(--teal)' } },
-            summary.grandTotal.toFixed(2) + ' hr'
+            displayHrs(summary.grandTotal) + ' hr'
           )
         ),
         content
@@ -11291,7 +11323,7 @@
           }
         },
           e('h3', { style: { fontSize: '14px', margin: 0, color: headingColor, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, heading),
-          e('div', { style: { fontSize: '13px', color: headingColor, fontWeight: 700 } }, totalLabel + ': ' + totalValue.toFixed(2) + ' hr')
+          e('div', { style: { fontSize: '13px', color: headingColor, fontWeight: 700 } }, totalLabel + ': ' + displayHrs(totalValue) + ' hr')
         ),
         rolling.length === 0
           ? e('div', { style: { padding: '14px', fontStyle: 'italic', color: 'var(--slate-soft)', fontSize: '13px' } }, emptyMsg)
@@ -11437,7 +11469,7 @@
           e('div', { style: { fontSize: '11px', color: 'var(--slate)', marginTop: '2px' } }, 'PT + GX + approved subs')
         ),
         e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '28px', color: 'var(--teal)' } },
-          card.forwardFacing.total.toFixed(2)
+          displayHrs(card.forwardFacing.total)
         )
       ),
 
@@ -11454,19 +11486,19 @@
       },
         e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
           e('h3', { style: { fontSize: '14px', margin: 0, color: 'var(--navy)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, '\ud83d\udcca Auto Admin (0.25\u00d7 forward)'),
-          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + card.autoAdmin.hours.toFixed(2) + ' hr')
+          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + displayHrs(card.autoAdmin.hours) + ' hr')
         ),
         e('div', { style: { padding: '10px 14px', display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderBottom: '1px solid var(--border)' } },
-          e('span', { style: { color: 'var(--slate)' } }, 'PT admin (0.25\u00d7 ' + card.forwardFacing.ptCategoryHours.toFixed(2) + ')'),
-          e('span', { style: { fontWeight: 600 } }, '+' + card.autoAdmin.breakdown.ptAdmin.toFixed(2))
+          e('span', { style: { color: 'var(--slate)' } }, 'PT admin (0.25\u00d7 ' + displayHrs(card.forwardFacing.ptCategoryHours) + ')'),
+          e('span', { style: { fontWeight: 600 } }, '+' + displayHrs(card.autoAdmin.breakdown.ptAdmin))
         ),
         e('div', { style: { padding: '10px 14px', display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderBottom: '1px solid var(--border)' } },
-          e('span', { style: { color: 'var(--slate)' } }, 'GX admin (0.25\u00d7 ' + card.forwardFacing.gxHours.toFixed(2) + ')'),
-          e('span', { style: { fontWeight: 600 } }, '+' + card.autoAdmin.breakdown.gxAdmin.toFixed(2))
+          e('span', { style: { color: 'var(--slate)' } }, 'GX admin (0.25\u00d7 ' + displayHrs(card.forwardFacing.gxHours) + ')'),
+          e('span', { style: { fontWeight: 600 } }, '+' + displayHrs(card.autoAdmin.breakdown.gxAdmin))
         ),
         card.forwardFacing.subHours > 0 && e('div', { style: { padding: '10px 14px', display: 'flex', justifyContent: 'space-between', fontSize: '13px' } },
-          e('span', { style: { color: 'var(--slate)' } }, 'Sub admin (0.25\u00d7 ' + card.forwardFacing.subHours.toFixed(2) + ')'),
-          e('span', { style: { fontWeight: 600 } }, '+' + card.autoAdmin.breakdown.subAdmin.toFixed(2))
+          e('span', { style: { color: 'var(--slate)' } }, 'Sub admin (0.25\u00d7 ' + displayHrs(card.forwardFacing.subHours) + ')'),
+          e('span', { style: { fontWeight: 600 } }, '+' + displayHrs(card.autoAdmin.breakdown.subAdmin))
         )
       ),
 
@@ -11482,7 +11514,7 @@
       },
         e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
           e('h3', { style: { fontSize: '14px', margin: 0, color: 'var(--navy)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, '\ud83d\udcdd Manual Admin'),
-          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + card.manualAdmin.hours.toFixed(2) + ' hr')
+          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + displayHrs(card.manualAdmin.hours) + ' hr')
         ),
         manualRolling.length === 0
           ? e('div', { style: { padding: '14px', fontStyle: 'italic', color: 'var(--slate-soft)', fontSize: '13px' } },
@@ -11540,7 +11572,7 @@
             '\ud83e\udd1d Member Contacts (' + card.contacts.count + ')'
           ),
           e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } },
-            'Subtotal: ' + card.contacts.hours.toFixed(2) + ' hr' +
+            'Subtotal: ' + displayHrs(card.contacts.hours) + ' hr' +
             (card.contacts.capped ? ' (capped)' : '')
           )
         ),
@@ -11603,7 +11635,7 @@
               e('div', { style: { padding: '10px 14px', fontSize: '12px', color: 'var(--slate)', lineHeight: 1.5 } },
                 card.contacts.count + ' contact' + (card.contacts.count === 1 ? '' : 's') + ' \u00b7 ' +
                 card.contacts.rawMinutes + ' minutes \u00b7 credited as ' +
-                card.contacts.hours.toFixed(2) + ' admin hours' +
+                displayHrs(card.contacts.hours) + ' hr (tracked separately, not in grand total)' +
                 (card.contacts.capped ? ' (capped at ' + card.contacts.cap.toFixed(0) + ')' : '')
               )
             )
@@ -11629,7 +11661,7 @@
             '📞 Service Recovery (' + (card.serviceRecovery && card.serviceRecovery.entries.length || 0) + ')'
           ),
           e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } },
-            'Subtotal: ' + (card.serviceRecovery && card.serviceRecovery.hours || 0).toFixed(2) + ' hr'
+            'Subtotal: ' + displayHrs((card.serviceRecovery && card.serviceRecovery.hours) || 0) + ' hr'
           )
         ),
         (card.serviceRecovery && card.serviceRecovery.entries.length === 0)
@@ -11679,18 +11711,18 @@
         ),
         e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '12px' } },
           e('div', { style: { fontSize: '12px', opacity: 0.9 } },
-            'Forward + auto admin + manual admin + contacts + recovery'
+            'Forward + auto admin + manual admin + recovery'
           ),
           e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '40px', lineHeight: 1 } },
-            card.grandTotal.toFixed(2)
+            displayHrs(card.grandTotal)
           )
         ),
         e('div', { style: { fontSize: '11px', opacity: 0.7, lineHeight: 1.5 } },
-          card.forwardFacing.total.toFixed(2) + ' fwd + ' +
-          card.autoAdmin.hours.toFixed(2) + ' auto + ' +
-          card.manualAdmin.hours.toFixed(2) + ' manual + ' +
-          card.contacts.hours.toFixed(2) + ' contacts = ' +
-          card.grandTotal.toFixed(2) + ' hr'
+          displayHrs(card.forwardFacing.total) + ' fwd + ' +
+          displayHrs(card.autoAdmin.hours) + ' auto + ' +
+          displayHrs(card.manualAdmin.hours) + ' manual + ' +
+          displayHrs((card.serviceRecovery && card.serviceRecovery.hours) || 0) + ' recovery = ' +
+          displayHrs(card.grandTotal) + ' hr'
         )
       ),
 
@@ -18127,13 +18159,13 @@
                 rows.map(function(r){
                   return e('tr', { key: r.trainer },
                     e('td', { style: { fontWeight: 600 } }, r.trainer),
-                    e('td', { style: { textAlign: 'right' } }, r.forwardFacing.ptHours.toFixed(2)),
-                    e('td', { style: { textAlign: 'right' } }, r.forwardFacing.gxHours.toFixed(2)),
-                    e('td', { style: { textAlign: 'right' } }, r.forwardFacing.subHours.toFixed(2)),
-                    e('td', { style: { textAlign: 'right', borderLeft: '1px solid var(--border)', fontWeight: 600 } }, r.forwardFacing.total.toFixed(2)),
-                    e('td', { style: { textAlign: 'right', color: 'var(--teal)' } }, r.autoAdmin.hours.toFixed(2)),
-                    e('td', { style: { textAlign: 'right', color: 'var(--teal)' } }, r.manualAdmin.hours.toFixed(2)),
-                    e('td', { style: { textAlign: 'right', fontWeight: 700, color: 'var(--teal)' } }, r.grandTotal.toFixed(2))
+                    e('td', { style: { textAlign: 'right' } }, displayHrs(r.forwardFacing.ptHours)),
+                    e('td', { style: { textAlign: 'right' } }, displayHrs(r.forwardFacing.gxHours)),
+                    e('td', { style: { textAlign: 'right' } }, displayHrs(r.forwardFacing.subHours)),
+                    e('td', { style: { textAlign: 'right', borderLeft: '1px solid var(--border)', fontWeight: 600 } }, displayHrs(r.forwardFacing.total)),
+                    e('td', { style: { textAlign: 'right', color: 'var(--teal)' } }, displayHrs(r.autoAdmin.hours)),
+                    e('td', { style: { textAlign: 'right', color: 'var(--teal)' } }, displayHrs(r.manualAdmin.hours)),
+                    e('td', { style: { textAlign: 'right', fontWeight: 700, color: 'var(--teal)' } }, displayHrs(r.grandTotal))
                   );
                 })
               )
