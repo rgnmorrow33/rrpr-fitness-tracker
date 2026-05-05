@@ -1212,20 +1212,34 @@
       'followUpBy', 'rectracMemberId', 'packageInfo', 'lostAt'
     ]}),
 
-    /* Trainers: real table in Supabase (id, name, role, is_active). Local
-       in-memory shape is still an array of name strings - components
-       throughout the app expect ctx.trainers to be ['Alejandra', ...].
-       Translation happens at the storage boundary only. */
+    /* Trainers: real table in Supabase (id, name, role, role_tier, pin,
+       is_active). The in-memory shape is now a profile object array
+       (id, name, role, role_tier, pin, is_active). ctx.trainers stays a
+       string[] of names for backward compat - it's derived from profiles
+       at the App level. ctx.trainerProfiles exposes the full shape. */
     trainers: {
-      toSupabase: function(name){
-        return {
-          name: name,
-          role: 'trainer',
-          is_active: true,
+      toSupabase: function(profile){
+        var row = {
+          name: profile.name,
+          role: profile.role || 'trainer',
+          role_tier: profile.role_tier || 'trainer',
+          pin: profile.pin || null,
+          is_active: profile.is_active !== false,
           updated_at: new Date().toISOString()
         };
+        if (profile.id) row.id = profile.id;
+        return row;
       },
-      fromSupabase: function(row){ return row.name; }
+      fromSupabase: function(row){
+        return {
+          id: row.id || null,
+          name: row.name,
+          role: row.role || 'trainer',
+          role_tier: row.role_tier || 'trainer',
+          pin: row.pin || null,
+          is_active: row.is_active !== false
+        };
+      }
     },
 
     /* AdminPin: same settings-row pattern. */
@@ -1420,28 +1434,38 @@
       }
       try {
         var raw = localStorage.getItem('pt_trainers_v4');
-        return Promise.resolve(raw ? JSON.parse(raw) : null);
+        if (!raw) return Promise.resolve(null);
+        var parsed = JSON.parse(raw);
+        /* Legacy localStorage may hold a string[] of names. Normalize to
+           profile objects with safe defaults. */
+        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
+          parsed = parsed.map(function(name){
+            return { id: null, name: name, role: 'trainer', role_tier: 'trainer', pin: null, is_active: true };
+          });
+        }
+        return Promise.resolve(parsed);
       } catch (err) {
         return Promise.resolve(null);
       }
     },
     save: function(arr){
       if (STORAGE_MODE === 'supabase') {
-        var localNames = (arr || []).slice();
-        /* Step 1: upsert local trainers by name. New names get inserted
-           (DB generates id), existing names get is_active=true and
-           updated_at refreshed. */
+        var profiles = (arr || []).slice();
+        /* Step 1: upsert local profiles by name. Includes pin and
+           role_tier per the v3 schema. New rows get inserted (DB generates
+           id); existing rows get is_active=true and pin/role_tier refreshed. */
         var step1;
-        if (localNames.length > 0) {
-          var rows = localNames.map(translate.trainers.toSupabase);
+        if (profiles.length > 0) {
+          var rows = profiles.map(translate.trainers.toSupabase);
           step1 = supabaseClient.from('trainers').upsert(rows, { onConflict: 'name' })
             .then(function(res){ if (res.error) throw res.error; });
         } else {
           step1 = Promise.resolve();
         }
         /* Step 2: soft-delete any server rows whose name is not in the
-           local list. Two-step (select then update by id) keeps the
-           query simple and avoids fragile NOT IN list-encoding. */
+           local list. Two-step (select then update by id) avoids fragile
+           NOT IN list-encoding. */
+        var localNames = profiles.map(function(p){ return p.name; });
         return step1.then(function(){
           return supabaseClient.from('trainers').select('id, name')
             .then(function(res){
@@ -1481,15 +1505,30 @@
     scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
     adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
     /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
-       'supabase'. Sign-in is per-device by design. The current implementation
-       is a non-persistent stub (sign-in resets on reload), kept that way to
-       avoid behavior changes. Session 2b can wire real localStorage persistence
-       if Selisa wants sign-in to survive reloads. Future Claude: do NOT move
-       this to Supabase. */
+       'supabase'. Sign-in is per-device by design. Future Claude: do NOT
+       move this to Supabase. */
     session: {
-      load:  function(){ return Promise.resolve(null); },
-      save:  function(_v){ return Promise.resolve(); },
-      clear: function(){ return Promise.resolve(); }
+      load: function(){
+        try {
+          var raw = localStorage.getItem('rrpr_session_v1');
+          return Promise.resolve(raw ? JSON.parse(raw) : null);
+        } catch (err) {
+          return Promise.resolve(null);
+        }
+      },
+      save: function(s){
+        try {
+          if (s == null) localStorage.removeItem('rrpr_session_v1');
+          else localStorage.setItem('rrpr_session_v1', JSON.stringify(s));
+          return Promise.resolve();
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      },
+      clear: function(){
+        try { localStorage.removeItem('rrpr_session_v1'); } catch(_){}
+        return Promise.resolve();
+      }
     }
   };
   /* Expose for debugging and the admin Maintenance "Clear local data" tool. */
@@ -1521,6 +1560,87 @@
   var LOCATIONS = ['CMRC', 'Baca'];
   var DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   var DEFAULT_PIN = '1234';
+
+  /* ============ ROLE TIERS + PERMISSIONS ============
+     trainer  - executes (logs sessions, claims subs, etc.)
+     lead     - trainer plus expanded edit scope across team members
+     admin    - everything
+
+     Lead's "own team" scoping is intentionally unscoped this cycle.
+     TODO: scope lead perms to a reporting tree once we have one. */
+  var ROLE_TIERS = ['trainer', 'lead', 'admin'];
+
+  var PERMISSIONS = {
+    trainer: {
+      canEditOwnAttendance: true,
+      canLogSession: true,
+      canRequestSub: true,
+      canClaimSub: true,
+      canAddClient: false,
+      canAddPackage: false,
+      canEditClient: false,
+      canEditPackage: false,
+      canDeletePackage: false,
+      canEditTrainer: false,
+      canSetPINs: false,
+      canBulkImport: false,
+      canViewAllTimeCards: false,
+      canDeleteSession: false,
+      canEditAnyAttendance: false,
+      canEditAnySession: false,
+      canEditClassStructure: false,
+      canManageClosures: false
+    },
+    lead: {
+      canEditOwnAttendance: true,
+      canLogSession: true,
+      canRequestSub: true,
+      canClaimSub: true,
+      canAddClient: false,
+      canAddPackage: false,
+      canEditClient: false,
+      canEditPackage: false,
+      canDeletePackage: false,
+      canEditTrainer: false,
+      canSetPINs: false,
+      canBulkImport: false,
+      canViewAllTimeCards: false,
+      canDeleteSession: false,
+      /* Lead expansions (unscoped this cycle) */
+      canEditAnyAttendance: true,
+      canEditAnySession: true,
+      canEditClassStructure: false,
+      canManageClosures: false
+    },
+    admin: {
+      canEditOwnAttendance: true,
+      canLogSession: true,
+      canRequestSub: true,
+      canClaimSub: true,
+      canAddClient: true,
+      canAddPackage: true,
+      canEditClient: true,
+      canEditPackage: true,
+      canDeletePackage: true,
+      canEditTrainer: true,
+      canSetPINs: true,
+      canBulkImport: true,
+      canViewAllTimeCards: true,
+      canDeleteSession: true,
+      canEditAnyAttendance: true,
+      canEditAnySession: true,
+      canEditClassStructure: true,
+      canManageClosures: true
+    }
+  };
+
+  function hasPermission(session, action){
+    if (!session) return false;
+    var tier = session.role_tier || session.role;
+    var table = PERMISSIONS[tier];
+    if (!table) return false;
+    return !!table[action];
+  }
 
   var SEED_TRAINERS = [
     'Alejandra Vargas Guzman',
@@ -3208,9 +3328,17 @@
          initial load window.
        - In session 2 the localStorage branch swaps for Supabase calls; this
          component shape doesn't change. */
-    var trainersTuple = useState(SEED_TRAINERS.slice());
-    var trainers = trainersTuple[0];
-    var setTrainers = trainersTuple[1];
+    /* Profiles array (id, name, role, role_tier, pin, is_active). The
+       string-array form ctx.trainers expects gets derived from this just
+       below the ctx assembly. Seeded from SEED_TRAINERS as bare names with
+       trainer-tier defaults; Supabase load replaces these on mount. */
+    var trainerProfilesTuple = useState(function(){
+      return SEED_TRAINERS.map(function(name){
+        return { id: null, name: name, role: 'trainer', role_tier: 'trainer', pin: null, is_active: true };
+      });
+    });
+    var trainerProfiles = trainerProfilesTuple[0];
+    var setTrainerProfiles = trainerProfilesTuple[1];
 
     var clientsTuple = useState(buildSeedClients());
     var clients = clientsTuple[0];
@@ -3281,7 +3409,7 @@
        last-persisted value. Refs are populated synchronously inside the
        load .then so the initial save effect (fired by loading→false) sees
        state===ref via reference equality and skips. */
-    var trainersRef = useRef(null);
+    var trainerProfilesRef = useRef(null);
     var clientsRef = useRef(null);
     var classesRef = useRef(null);
     var closuresRef = useRef(null);
@@ -3332,7 +3460,7 @@
         /* Hydrate refs synchronously BEFORE the setX calls so the save
            useEffects see state === ref on the loading→false transition
            and skip the redundant initial save. */
-        var t  = r[0] != null ? r[0] : trainers;
+        var t  = r[0] != null ? r[0] : trainerProfiles;
         var c  = r[1] != null ? r[1] : clients;
         var cl = r[2] != null ? r[2] : classes;
         var co = r[3] != null ? r[3] : closures;
@@ -3343,7 +3471,7 @@
         var ct = r[8] != null ? r[8] : contacts;
         var sv = r[9] != null ? r[9] : scheduleVersions;
         var pn = r[10] != null ? r[10] : pin;
-        trainersRef.current = t;
+        trainerProfilesRef.current = t;
         clientsRef.current = c;
         classesRef.current = cl;
         closuresRef.current = co;
@@ -3354,7 +3482,7 @@
         contactsRef.current = ct;
         schedVersionsRef.current = sv;
         pinRef.current = pn;
-        setTrainers(t);
+        setTrainerProfiles(t);
         setClients(c);
         setClasses(cl);
         setClosures(co);
@@ -3392,7 +3520,7 @@
         ['admin_items',       setItems,             'adminItems'],
         ['referrals',         setReferrals,         'referrals'],
         ['closures',          setClosures,          'closures'],
-        ['trainers',          setTrainers,          'trainers'],
+        ['trainers',          setTrainerProfiles,   'trainers'],
         ['schedule_versions', setScheduleVersions,  'scheduleVersions']
       ];
       subs.forEach(function(sub){
@@ -3430,7 +3558,7 @@
       ref.current = current;
       saver(current).catch(function(err){ console.error('Save ' + label + ' failed:', err); });
     }
-    useEffect(function(){ _saveIfDirty(trainersRef,     trainers,         storage.trainers.save,         'trainers'); },         [trainers, loading]);
+    useEffect(function(){ _saveIfDirty(trainerProfilesRef, trainerProfiles, storage.trainers.save,         'trainers'); },         [trainerProfiles, loading]);
     useEffect(function(){ _saveIfDirty(clientsRef,      clients,          storage.clients.save,          'clients'); },          [clients, loading]);
     useEffect(function(){ _saveIfDirty(classesRef,      classes,          storage.classes.save,          'classes'); },          [classes, loading]);
     useEffect(function(){ _saveIfDirty(closuresRef,     closures,         storage.closures.save,         'closures'); },         [closures, loading]);
@@ -3502,15 +3630,35 @@
       });
     }, []);
 
-    var sessionTuple = useState(null); // { role:'trainer'|'admin', name? }
+    /* Session shape (per-user PIN auth, v3):
+       Real user:  { trainer_id, trainer_name, role, role_tier, name, signed_in_at }
+       Front Desk: { trainer_id:null, trainer_name:'Front Desk', role:'admin',
+                     role_tier:'admin', name:'Front Desk', signed_in_at }
+       Kiosk:      { role:'kiosk_wro' }
+       `name` is a mirror of trainer_name kept for backward compat with
+       call sites that still read ctx.session.name. Hydrated synchronously
+       from localStorage so a reload doesn't kick the user back to login. */
+    var sessionTuple = useState(function(){
+      try {
+        var raw = localStorage.getItem('rrpr_session_v1');
+        return raw ? JSON.parse(raw) : null;
+      } catch(_){ return null; }
+    });
     var session = sessionTuple[0];
-    var setSession = sessionTuple[1];
+    var _setSessionRaw = sessionTuple[1];
+    function setSession(next){
+      _setSessionRaw(next);
+      try {
+        if (next == null) localStorage.removeItem('rrpr_session_v1');
+        else localStorage.setItem('rrpr_session_v1', JSON.stringify(next));
+      } catch(_){}
+    }
 
     /* Sync session name into the module-level accessor used by translators
        (e.g., schedule_versions.created_by) when no local equivalent exists
        on the record being saved. */
     useEffect(function(){
-      setAppSessionName(session && session.name);
+      setAppSessionName(session && (session.trainer_name || session.name));
     }, [session]);
 
     var toastTuple = useState([]);
@@ -3800,12 +3948,29 @@
     function addTrainer(name){
       name = (name || '').trim();
       if (!name) return false;
-      if (trainers.indexOf(name) !== -1) { toast('Team member already exists', 'error'); return false; }
-      setTrainers(function(list){ return list.concat([name]).sort(); });
+      var exists = trainerProfiles.some(function(p){ return p.name === name; });
+      if (exists) { toast('Team member already exists', 'error'); return false; }
+      var fresh = { id: null, name: name, role: 'trainer', role_tier: 'trainer', pin: null, is_active: true };
+      setTrainerProfiles(function(list){
+        return list.concat([fresh]).sort(function(a,b){ return a.name < b.name ? -1 : 1; });
+      });
       return true;
     }
     function removeTrainer(name){
-      setTrainers(function(list){ return list.filter(function(x){ return x !== name; }); });
+      setTrainerProfiles(function(list){ return list.filter(function(p){ return p.name !== name; }); });
+    }
+    /* Merge a profile update (e.g., from EditTrainerModal). Matches by id
+       when present, falls back to name match. */
+    function upsertTrainerProfile(profile){
+      setTrainerProfiles(function(list){
+        var idx = -1;
+        if (profile.id) idx = list.findIndex(function(p){ return p.id === profile.id; });
+        if (idx === -1) idx = list.findIndex(function(p){ return p.name === profile.name; });
+        if (idx === -1) return list.concat([profile]).sort(function(a,b){ return a.name < b.name ? -1 : 1; });
+        var copy = list.slice();
+        copy[idx] = Object.assign({}, copy[idx], profile);
+        return copy.sort(function(a,b){ return a.name < b.name ? -1 : 1; });
+      });
     }
 
     /* ---- v2: Manual admin time items CRUD ---- */
@@ -4096,8 +4261,25 @@
       pending.forEach(function(v){ activateScheduleVersion(v.id); });
     }, [scheduleVersions]);
 
+    /* Derive the legacy string[] of trainer names from profile state. Most
+       call sites still expect ctx.trainers to be a name list. */
+    var trainers = trainerProfiles
+      .filter(function(p){ return p.is_active !== false; })
+      .map(function(p){ return p.name; });
+
+    function ctxCan(action){ return hasPermission(session, action); }
+    function ctxCurrentUserName(){
+      if (!session) return null;
+      if (session.role === 'kiosk_wro') return null;
+      return session.trainer_name || session.name || null;
+    }
+
     var ctx = {
       trainers: trainers,
+      trainerProfiles: trainerProfiles,
+      can: ctxCan,
+      currentUserName: ctxCurrentUserName,
+      upsertTrainerProfile: upsertTrainerProfile,
       clients: clients,
       classes: classes,
       closures: closures,
@@ -4240,14 +4422,33 @@
   /* ============ LOGIN ============ */
   function Login(props){
     var ctx = props.ctx;
-    var pinOpenTuple = useState(false);
-    var pinOpen = pinOpenTuple[0];
-    var setPinOpen = pinOpenTuple[1];
+
+    /* Trainer being signed in (profile object), or null. Drives the
+       per-user PinModal. */
+    var pinTargetTuple = useState(null);
+    var pinTarget = pinTargetTuple[0];
+    var setPinTarget = pinTargetTuple[1];
+
+    /* Front Desk legacy fallback. TODO: remove next sprint once per-user
+       PINs are set for everyone. */
+    var frontDeskOpenTuple = useState(false);
+    var frontDeskOpen = frontDeskOpenTuple[0];
+    var setFrontDeskOpen = frontDeskOpenTuple[1];
+
+    var profiles = (ctx.trainerProfiles || []).filter(function(p){ return p.is_active !== false; });
+
+    function startSignIn(profile){
+      if (!profile.pin) {
+        ctx.toast('PIN not yet set. Ask an admin to set your PIN.', 'error');
+        return;
+      }
+      setPinTarget(profile);
+    }
 
     return e('div', { className: 'login-wrap' },
       e('div', { className: 'login-head' },
         e('div', { className: 'brand' }, 'Round Rock Parks and Recreation'),
-        e('div', { className: 'tag' }, 'Clay Madsen Recreation Center · Round Rock')
+        e('div', { className: 'tag' }, 'Clay Madsen Recreation Center')
       ),
 
       /* Public kiosk tile - members fill out a WRO request without logging in */
@@ -4273,27 +4474,59 @@
         }, '🏋  Weight Room Orientation Sign-Up')
       ),
 
-      e('h2', { style: { margin: '0 0 14px', fontSize: '18px', color: 'var(--slate)' } }, 'Trainer Login'),
+      e('h2', { style: { margin: '0 0 6px', fontSize: '18px', color: 'var(--slate)' } }, 'Trainer / Admin Login'),
+      e('div', { style: { fontSize: '13px', color: 'var(--slate-soft)', marginBottom: '14px' } },
+        'Tap your name, then enter your 4-digit PIN.'
+      ),
       e('div', { className: 'trainer-grid' },
-        ctx.trainers.map(function(name){
+        profiles.map(function(p){
           return e('button', {
-            key: name,
+            key: p.id || p.name,
             className: 'trainer-tile',
-            onClick: function(){ ctx.setSession({ role: 'trainer', name: name }); }
-          }, name);
+            onClick: function(){ startSignIn(p); }
+          }, p.name);
         })
       ),
       e('div', { className: 'login-admin' },
-        e('button', { onClick: function(){ setPinOpen(true); } }, 'Admin / Front Desk →')
+        e('button', { onClick: function(){ setFrontDeskOpen(true); } }, 'Front desk?')
       ),
-      pinOpen && e(PinModal, {
-        onClose: function(){ setPinOpen(false); },
+
+      pinTarget && e(PinModal, {
+        title: pinTarget.name + ' - Enter PIN',
+        onClose: function(){ setPinTarget(null); },
+        expected: pinTarget.pin,
+        onSuccess: function(){
+          var p = pinTarget;
+          setPinTarget(null);
+          ctx.setSession({
+            trainer_id: p.id || null,
+            trainer_name: p.name,
+            name: p.name,
+            role: p.role_tier || 'trainer',
+            role_tier: p.role_tier || 'trainer',
+            signed_in_at: new Date().toISOString()
+          });
+        },
+        onFail: function(){ ctx.toast('Wrong PIN', 'error'); }
+      }),
+
+      /* TODO: remove next sprint once per-user PINs are set for everyone. */
+      frontDeskOpen && e(PinModal, {
+        title: 'Front Desk PIN',
+        onClose: function(){ setFrontDeskOpen(false); },
         expected: ctx.pin,
         onSuccess: function(){
-          setPinOpen(false);
-          ctx.setSession({ role: 'admin' });
+          setFrontDeskOpen(false);
+          ctx.setSession({
+            trainer_id: null,
+            trainer_name: 'Front Desk',
+            name: 'Front Desk',
+            role: 'admin',
+            role_tier: 'admin',
+            signed_in_at: new Date().toISOString()
+          });
         },
-        onFail: function(){ ctx.toast('Incorrect PIN', 'error'); }
+        onFail: function(){ ctx.toast('Wrong PIN', 'error'); }
       })
     );
   }
@@ -4392,7 +4625,7 @@
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '360px' } },
         e('div', { className: 'modal-header' },
-          e('h2', null, 'Admin PIN'),
+          e('h2', null, props.title || 'Admin PIN'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' },
@@ -5960,12 +6193,17 @@
     var setDetailSession = detailSessionTuple[1];
 
     var isAdmin = ctx.session && ctx.session.role === 'admin';
+    var canAddPackage = ctx.can('canAddPackage');
+    var canEditClient = ctx.can('canEditClient');
+    var canEditPackage = ctx.can('canEditPackage');
+    var canDeletePackage = ctx.can('canDeletePackage');
+    var canDeleteSession = ctx.can('canDeleteSession');
 
-    /* Lazy id-stamping: legacy packages may not have ids. Admin viewing the
-       client triggers a one-time backfill so edit/delete can identify rows
+    /* Lazy id-stamping: legacy packages may not have ids. Anyone with edit
+       perm triggers a one-time backfill so edit/delete can identify rows
        deterministically. */
     useEffect(function(){
-      if (!isAdmin) return;
+      if (!canEditPackage) return;
       if (!c.packages || c.packages.length === 0) return;
       var needsIds = c.packages.some(function(p){ return !p.id; });
       if (!needsIds) return;
@@ -5974,7 +6212,7 @@
           return p.id ? p : Object.assign({}, p, { id: uid() });
         })
       }));
-    }, [c.id, isAdmin]);
+    }, [c.id, canEditPackage]);
 
     var strikes = clientStrikeCount(c);
     var strikeStatus = clientStrikeStatus(c);
@@ -6063,9 +6301,9 @@
             disabled: remaining === 0,
             onClick: function(){ setScheduleOpen(true); }
           }, '📅 Schedule Session'),
-          /* Add Package is admin-only as of the package edit/delete commit.
-             Trainers see only Log Session, Schedule Session, Refer to PT. */
-          isAdmin && e('button', {
+          /* Add Package is admin-only. Trainers see only Log Session,
+             Schedule Session, Refer to PT. */
+          canAddPackage && e('button', {
             className: 'btn btn-gold',
             onClick: function(){ setAddPkgOpen(true); }
           }, '+ Add Package (Re-up)'),
@@ -6073,14 +6311,14 @@
             className: 'btn btn-teal',
             onClick: function(){ setReferOpen(true); }
           }, '🩺 Refer to PT'),
-          /* Edit button gated to admin: opens NewClientModal in edit mode.
-             Per-package edit/delete lives on the Package History rows below. */
-          props.canEdit && isAdmin && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
+          /* Edit opens NewClientModal in edit mode. Per-package edit/delete
+             lives on the Package History rows below. */
+          props.canEdit && canEditClient && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
         ),
         /* Package History - shown when more than one package exists, or
-           always for admins (so per-row edit/delete is reachable even on
-           single-package clients). */
-        (getPackages(c).length > 1 || isAdmin) && getPackages(c).length > 0 && e('div', { style: { marginTop: '16px' } },
+           when the user can manage packages (so per-row edit/delete is
+           reachable even on single-package clients). */
+        (getPackages(c).length > 1 || canEditPackage) && getPackages(c).length > 0 && e('div', { style: { marginTop: '16px' } },
           e('h3', { style: { fontSize: '20px', marginBottom: '4px' } }, 'Package History'),
           e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
             getPackages(c).length + ' packages \u00b7 ' + totalSessionsPurchased(c) + ' total sessions \u00b7 ' + formatMoney(totalPaid(c)) + ' lifetime'
@@ -6091,7 +6329,7 @@
               e('div', null, 'Package'),
               e('div', null, 'Paid'),
               e('div', null, 'Source'),
-              isAdmin && e('div', null, '')
+              canEditPackage && e('div', null, '')
             ),
             getPackages(c).slice().sort(function(a,b){ return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1; }).map(function(p, i){
               return e('div', { key: p.id || i, className: 'log-row' },
@@ -6104,7 +6342,7 @@
                   p.source === 'rectrac_reup' ? 'Re-up (RecTrac)' :
                   'Initial'
                 ),
-                isAdmin && e('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
+                canEditPackage && e('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
                   e('button', {
                     className: 'btn btn-ghost',
                     style: { padding: '4px 8px', fontSize: '13px' },
@@ -6120,7 +6358,7 @@
                       setEditPkgTarget(target);
                     }
                   }, '\u270e'),
-                  e('button', {
+                  canDeletePackage && e('button', {
                     className: 'btn btn-ghost',
                     style: { padding: '4px 8px', fontSize: '13px', color: 'var(--red)' },
                     title: 'Delete package',
@@ -6211,7 +6449,7 @@
                      a record of what happened; only admin can delete. */
                   (function(){
                     var bothSigned = !!(s.trainerSig && s.clientSig);
-                    var locked = bothSigned && !isAdmin;
+                    var locked = bothSigned && !canDeleteSession;
                     var hasRecovery = !!(s.serviceRecovery && (s.serviceRecovery.actions || []).length > 0);
                     return e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'flex-end' } },
                       hasRecovery && e('span', {
@@ -6234,7 +6472,7 @@
                 );
               })
             ),
-        props.canEdit && isAdmin && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+        props.canEdit && canEditClient && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Client')
         ),
         (logOpen || signOff) && e(LogSessionModal, {
@@ -6650,8 +6888,8 @@
 
     var referredByTuple = useState(function(){
       if (existing) return existing.referredBy;
-      if (ctx.session && ctx.session.role === 'trainer') return ctx.session.name;
-      return ctx.trainers[0] || '';
+      var me = ctx.currentUserName && ctx.currentUserName();
+      return me || ctx.trainers[0] || '';
     });
     var referredBy = referredByTuple[0];
     var setReferredBy = referredByTuple[1];
@@ -7271,7 +7509,9 @@
     var stLabel = (SESSION_STATUS_LABEL[status] || status).toUpperCase();
     var bothSigned = !!(s.trainerSig && s.clientSig);
     var isAdmin = ctx.session && ctx.session.role === 'admin';
-    var canDelete = isAdmin && !bothSigned;
+    var canEditAnySession = ctx.can('canEditAnySession');
+    var canDeleteSession = ctx.can('canDeleteSession');
+    var canDelete = canDeleteSession && !bothSigned;
     var recovery = s.serviceRecovery || null;
     var hasRecoveryDescription = !!(recovery && (recovery.description || recovery.note));
     var hasRecoveryActions = !!(recovery && recovery.actions && recovery.actions.length > 0);
@@ -7336,8 +7576,8 @@
         ),
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
-          isAdmin && props.onEdit && e('button', { className: 'btn btn-outline', onClick: function(){ props.onEdit(s); } }, 'Edit'),
-          isAdmin && e('button', {
+          canEditAnySession && props.onEdit && e('button', { className: 'btn btn-outline', onClick: function(){ props.onEdit(s); } }, 'Edit'),
+          canDeleteSession && e('button', {
             className: 'btn btn-ghost btn-sm',
             style: { color: 'var(--red)', opacity: canDelete ? 1 : 0.4, cursor: canDelete ? 'pointer' : 'not-allowed' },
             disabled: !canDelete,
@@ -8061,8 +8301,8 @@
     var subRequestOpen = subRequestOpenTuple[0];
     var setSubRequestOpen = subRequestOpenTuple[1];
 
-    var canManageSubs = (ctx.session && ctx.session.role === 'admin') ||
-                        (ctx.session && ctx.session.role === 'trainer' && ctx.session.name === c.instructor);
+    var canManageSubs = ctx.can('canEditClassStructure') ||
+                        (ctx.currentUserName && ctx.currentUserName() === c.instructor);
 
     function doDelete(){
       if (!window.confirm('Delete this class and all attendance records?')) return;
@@ -8081,6 +8321,7 @@
     var pastSubs = subs.filter(function(s){ return s.date < todayYMD; });
 
     var isAdmin = ctx.session && ctx.session.role === 'admin';
+    var canEditClassStructure = ctx.can('canEditClassStructure');
 
     /* Service-recovery target for one of this class's cancellations. */
     var classRecoveryTuple = useState(null);
@@ -8148,7 +8389,7 @@
           /* Edit Class is admin-only: changes class structure (name, time,
              instructor, room, capacity, etc.). Trainers retain attendance,
              sub assignment, and per-occurrence cancellation. */
-          props.canEdit && isAdmin && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
+          props.canEdit && canEditClassStructure && e('button', { className: 'btn btn-outline', onClick: function(){ setEditOpen(true); } }, 'Edit')
         ),
 
         /* Sub assignments section */
@@ -8271,7 +8512,7 @@
             );
           })
         ),
-        props.canEdit && isAdmin && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+        props.canEdit && canEditClassStructure && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
           e('button', { className: 'btn btn-ghost', style: { color: 'var(--red)' }, onClick: doDelete }, 'Delete Class')
         ),
         classRecoveryTarget && e(ServiceRecoveryModal, {
@@ -8588,7 +8829,8 @@
       if (props.forceInstructor) return props.forceInstructor;
       var sub = getAssignedSubForDate(props.cls, initialDate);
       if (sub) return sub.subInstructor;
-      if (ctx.session && ctx.session.role === 'trainer') return ctx.session.name;
+      var me = ctx.currentUserName && ctx.currentUserName();
+      if (me) return me;
       return props.cls.instructor;
     });
     var instructor = instructorTuple[0];
@@ -13501,6 +13743,12 @@
     var name = nameTuple[0]; var setName = nameTuple[1];
     var roleTuple = useState('trainer');
     var role = roleTuple[0]; var setRole = roleTuple[1];
+    var roleTierTuple = useState('trainer');
+    var roleTier = roleTierTuple[0]; var setRoleTier = roleTierTuple[1];
+    var pinTuple = useState('');
+    var pin = pinTuple[0]; var setPin = pinTuple[1];
+    var pinSetTuple = useState(false); /* whether the row already has a pin */
+    var pinAlreadySet = pinSetTuple[0]; var setPinAlreadySet = pinSetTuple[1];
     var activeTuple = useState(true);
     var active = activeTuple[0]; var setActive = activeTuple[1];
 
@@ -13530,6 +13778,8 @@
           setOriginal(res.data);
           setName(res.data.name);
           setRole(res.data.role || 'trainer');
+          setRoleTier(res.data.role_tier || 'trainer');
+          setPinAlreadySet(!!res.data.pin);
           setActive(res.data.is_active !== false);
           setLoading(false);
         })
@@ -13541,10 +13791,13 @@
 
     var nameTrimmed = (name || '').trim();
     var nameDifferent = !!original && nameTrimmed !== original.name;
+    var pinTrimmed = (pin || '').trim();
+    var pinDirty = !!original && pinTrimmed.length > 0;
     var dirty = !!original && (
       nameTrimmed !== original.name ||
-      role !== (original.role || 'trainer') ||
-      active !== (original.is_active !== false)
+      roleTier !== (original.role_tier || 'trainer') ||
+      active !== (original.is_active !== false) ||
+      pinDirty
     );
 
     function validateForm(){
@@ -13556,6 +13809,7 @@
         });
         if (conflict) return 'Another active trainer has this name';
       }
+      if (pinTrimmed && !/^\d{4}$/.test(pinTrimmed)) return 'PIN must be 4 digits';
       return null;
     }
 
@@ -13820,12 +14074,18 @@
 
     function writeTrainerRecord(){
       var nowIso = new Date().toISOString();
+      /* Legacy `role` column kept in sync with `role_tier` so older code
+         paths reading the old column don't drift. */
       var update = {
         name: nameTrimmed,
-        role: role,
+        role: roleTier,
+        role_tier: roleTier,
         is_active: active,
         updated_at: nowIso
       };
+      /* Only write pin when admin entered a new one. Otherwise leave the
+         existing value untouched. Plaintext for now per the project posture. */
+      if (pinTrimmed) update.pin = pinTrimmed;
       if (nameDifferent) {
         var prev = original.previous_names || [];
         update.previous_names = prev.concat([{ name: original.name, renamed_at: nowIso }]);
@@ -13923,13 +14183,30 @@
                     })
                   ),
                   e('div', { className: 'field' },
-                    e('label', null, 'Role'),
-                    e('select', { value: role, onChange: function(ev){ setRole(ev.target.value); } },
-                      e('option', { value: 'trainer' }, 'Trainer'),
-                      e('option', { value: 'admin' }, 'Admin')
+                    e('label', null, 'Role tier'),
+                    e('select', { value: roleTier, onChange: function(ev){ setRoleTier(ev.target.value); } },
+                      e('option', { value: 'trainer' }, 'Trainer (executes)'),
+                      e('option', { value: 'lead' }, 'Lead (trainer plus team edits)'),
+                      e('option', { value: 'admin' }, 'Admin (full access)')
                     ),
                     e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
-                      'Stored on the team member record. Sign-in role is set at login, not here.'
+                      'Controls what this person can do at sign-in. Defaults to trainer.'
+                    )
+                  ),
+                  e('div', { className: 'field' },
+                    e('label', null, 'Sign-in PIN'),
+                    e('input', {
+                      type: 'password',
+                      inputMode: 'numeric',
+                      value: pin,
+                      maxLength: 4,
+                      placeholder: pinAlreadySet ? 'Leave blank to keep existing' : 'Set 4-digit PIN',
+                      onChange: function(ev){ setPin(ev.target.value.replace(/\D/g,'').slice(0,4)); }
+                    }),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+                      pinAlreadySet
+                        ? 'A PIN is set. Type a new 4-digit PIN to replace it, or leave blank.'
+                        : 'No PIN yet. Without one, this person cannot sign in.'
                     )
                   ),
                   e('div', { className: 'field' },
@@ -14111,7 +14388,7 @@
     function updatePin(){
       if (!/^\d{4}$/.test(pinInput)) { ctx.toast('PIN must be 4 digits', 'error'); return; }
       ctx.setPin(pinInput);
-      ctx.toast('Admin PIN updated ✓');
+      ctx.toast('Front Desk PIN updated ✓');
       setPinInput('');
     }
 
@@ -14156,10 +14433,11 @@
         trainerName: editingTrainer,
         onClose: function(){ setEditingTrainer(null); }
       }),
+      /* TODO: remove next sprint once per-user PINs are set for everyone. */
       e('div', { style: { background: '#fff', padding: '18px', borderRadius: '14px', border: '1px solid var(--border)' } },
-        e('h3', { style: { fontSize: '16px', marginBottom: '10px' } }, 'Admin PIN'),
+        e('h3', { style: { fontSize: '16px', marginBottom: '10px' } }, 'Front Desk PIN (legacy)'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '10px' } },
-          'Current PIN is saved on this device. Default is 1234 when the app is first installed.'
+          'Single shared PIN for the "Front desk?" link on the sign-in screen. Per-user PINs live in each team member\'s Edit modal. This shared PIN goes away once everyone has their own.'
         ),
         e('div', { className: 'field' },
           e('label', null, 'Set new 4-digit PIN'),
@@ -14545,15 +14823,16 @@
        working on it even if the trainer leaves the form mid-flow. */
     useEffect(function(){
       if (w.postCompleted) return;
-      var claimer = (ctx.session && ctx.session.role === 'trainer') ? ctx.session.name : null;
+      var claimer = ctx.currentUserName && ctx.currentUserName();
       if (!claimer) return;
       if (w.claimedBy && trainerNameMatches(claimer, w.claimedBy)) return;
       ctx.claimWRO && ctx.claimWRO(w.id, claimer);
     }, [w.id]);
 
     var formTuple = useState(function(){
+      var me = ctx.currentUserName && ctx.currentUserName();
       return {
-        specialistName: existing.specialistName || ((ctx.session && ctx.session.role === 'trainer') ? ctx.session.name : ctx.trainers[0] || ''),
+        specialistName: existing.specialistName || me || ctx.trainers[0] || '',
         orientationDate: existing.orientationDate || todayStr(),
         /* v2.2: time-in / time-out for trainer hour credit. Defaults to a
            1-hour orientation block. Trainer can override with shorter or
@@ -14799,7 +15078,7 @@
         /* Actions */
         e('div', { className: 'fab-row' },
           /* v2.5: when WRO is in_progress and current user is admin, allow override release */
-          !w.postCompleted && wroState(w) === 'in_progress' && ctx.session && ctx.session.role !== 'trainer' && e('button', {
+          !w.postCompleted && wroState(w) === 'in_progress' && ctx.session && ctx.session.role === 'admin' && e('button', {
             className: 'btn btn-outline btn-sm',
             onClick: function(){
               if (window.confirm('Release this WRO from ' + w.claimedBy + '? It will return to the available pool.')) {
