@@ -1150,6 +1150,9 @@
       ['parQ', 'par_q'],
       ['fromQueueId', 'from_queue_id'],
       ['lastPackageAddedAt', 'last_package_added_at'],
+      ['auditLog', 'audit_log'],
+      ['deletedAt', 'deleted_at'],
+      ['deletedBy', 'deleted_by'],
       ['createdAt', 'created_at']
     ]),
 
@@ -1164,6 +1167,9 @@
       ['seasonEnd', 'season_end'],
       ['scheduleVersionId', 'schedule_version_id'],
       ['duration', 'duration_minutes'],
+      ['auditLog', 'audit_log'],
+      ['deletedAt', 'deleted_at'],
+      ['deletedBy', 'deleted_by'],
       ['createdAt', 'created_at']
     ]),
 
@@ -1205,6 +1211,7 @@
       ['assignedBy', 'assigned_by'],
       ['lostReason', 'lost_reason'],
       ['fromWroId', 'from_wro_id'],
+      ['auditLog', 'audit_log'],
       ['createdAt', 'created_at']
     ], { drop: [
       /* Local-only fields (no Supabase column). Round-trip via localStorage
@@ -1225,9 +1232,12 @@
           role_tier: profile.role_tier || 'trainer',
           pin: profile.pin || null,
           is_active: profile.is_active !== false,
+          deleted_at: profile.deleted_at || null,
+          deleted_by: profile.deleted_by || null,
           updated_at: new Date().toISOString()
         };
         if (profile.id) row.id = profile.id;
+        if (profile.audit_log !== undefined) row.audit_log = profile.audit_log || [];
         return row;
       },
       fromSupabase: function(row){
@@ -1237,7 +1247,10 @@
           role: row.role || 'trainer',
           role_tier: row.role_tier || 'trainer',
           pin: row.pin || null,
-          is_active: row.is_active !== false
+          is_active: row.is_active !== false,
+          deleted_at: row.deleted_at || null,
+          deleted_by: row.deleted_by || null,
+          audit_log: row.audit_log || []
         };
       }
     },
@@ -1639,7 +1652,10 @@
       canEditAnyAttendance: false,
       canEditAnySession: false,
       canEditClassStructure: false,
-      canManageClosures: false
+      canManageClosures: false,
+      canViewAuditHistory: false,
+      canRestoreDeleted: false,
+      canHardDelete: false
     },
     lead: {
       canEditOwnAttendance: true,
@@ -1660,7 +1676,10 @@
       canEditAnyAttendance: true,
       canEditAnySession: true,
       canEditClassStructure: false,
-      canManageClosures: false
+      canManageClosures: false,
+      canViewAuditHistory: false,
+      canRestoreDeleted: false,
+      canHardDelete: false
     },
     admin: {
       canEditOwnAttendance: true,
@@ -1680,7 +1699,10 @@
       canEditAnyAttendance: true,
       canEditAnySession: true,
       canEditClassStructure: true,
-      canManageClosures: true
+      canManageClosures: true,
+      canViewAuditHistory: true,
+      canRestoreDeleted: true,
+      canHardDelete: true
     }
   };
 
@@ -2058,9 +2080,16 @@
   }
   /* Returns the array of packages a client has purchased.
      Backward compatible with old single-pkg shape. */
-  function getPackages(client){
+  /* Default-exclude soft-deleted packages. Pass { includeDeleted: true } to
+     surface them (used by the admin Package History "Show deleted" toggle). */
+  function getPackages(client, opts){
     if (!client) return [];
-    if (Array.isArray(client.packages) && client.packages.length > 0) return client.packages;
+    var includeDeleted = !!(opts && opts.includeDeleted);
+    if (Array.isArray(client.packages) && client.packages.length > 0) {
+      return includeDeleted
+        ? client.packages
+        : client.packages.filter(function(p){ return !p.deleted_at; });
+    }
     if (client.pkg) {
       /* Wrap legacy single-package shape into the new array form */
       return [{
@@ -2104,6 +2133,58 @@
     if (pkgs.length === 0) return '\u2014';
     if (pkgs.length === 1) return pkgs[0].sessions + '-sess';
     return pkgs.map(function(p){ return p.sessions; }).join('+') + ' = ' + totalSessionsPurchased(client) + ' sess';
+  }
+
+  /* ============ AUDIT LOG HELPERS ============
+     appendAuditEntry stamps an audit entry on a record and returns a copy.
+     Capped at 100 entries; oldest are pruned when the cap is exceeded.
+     Noise-field filter prevents transient operational data from polluting
+     the diff: signatures, attendance arrays, and timestamps are excluded
+     so the audit log reads as a clear "structural mutation" history. */
+  var AUDIT_NOISE_KEYS = [
+    'audit_log', 'updated_at', 'created_at', 'createdAt', 'updatedAt',
+    'previous_names', 'sessions', 'attendance', 'sub_assignments', 'subAssignments',
+    'cancellations'
+  ];
+
+  function diffRecords(before, after){
+    if (!before || !after) return null;
+    var seen = {};
+    var changes = {};
+    Object.keys(before).forEach(function(k){ seen[k] = true; });
+    Object.keys(after).forEach(function(k){ seen[k] = true; });
+    Object.keys(seen).forEach(function(k){
+      if (AUDIT_NOISE_KEYS.indexOf(k) !== -1) return;
+      var b = before[k];
+      var a = after[k];
+      var bs, as;
+      try { bs = JSON.stringify(b); } catch(_){ bs = String(b); }
+      try { as = JSON.stringify(a); } catch(_){ as = String(a); }
+      if (bs !== as) changes[k] = { from: b, to: a };
+    });
+    return Object.keys(changes).length > 0 ? changes : null;
+  }
+
+  function appendAuditEntry(record, session, action, opts){
+    opts = opts || {};
+    var changes = (opts.changes !== undefined)
+      ? opts.changes
+      : ((action === 'update' || action === 'package_edited') ? diffRecords(opts.before, opts.after) : null);
+    var entry = {
+      id: uid(),
+      ts: new Date().toISOString(),
+      actor: (session && (session.trainer_name || session.name)) || 'unknown',
+      actor_id: (session && session.trainer_id) || null,
+      action: action,
+      entity_type: opts.entity_type || null,
+      target_id: opts.target_id || null,
+      before: opts.before == null ? null : opts.before,
+      after: opts.after == null ? null : opts.after,
+      changes: changes
+    };
+    var log = (record.audit_log || []).concat([entry]);
+    if (log.length > 100) log = log.slice(log.length - 100);
+    return Object.assign({}, record, { audit_log: log });
   }
   /* Match logic: prefer email (unique), then name+DOB, then name only */
   function findMatchingClient(clients, candidate){
@@ -3606,7 +3687,15 @@
       if (ref.current === current) return;
       if (_eq(ref.current, current)) { ref.current = current; return; }
       ref.current = current;
-      saver(current).catch(function(err){ console.error('Save ' + label + ' failed:', err); });
+      saver(current).catch(function(err){
+        console.error('Save ' + label + ' failed:', err);
+        /* Surface failures via toast so silent regressions can't hide. The
+           dirty-check ref was already updated above, so the next save attempt
+           on the same state would skip. To keep the data eventually consistent,
+           push the ref back to a sentinel that won't match any real state. */
+        ref.current = null;
+        toast('Save ' + label + ' failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
     }
     useEffect(function(){ _saveIfDirty(trainerProfilesRef, trainerProfiles, storage.trainers.save,         'trainers'); },         [trainerProfiles, loading]);
     useEffect(function(){ _saveIfDirty(clientsRef,      clients,          storage.clients.save,          'clients'); },          [clients, loading]);
@@ -3998,9 +4087,23 @@
     function addTrainer(name){
       name = (name || '').trim();
       if (!name) return false;
-      var exists = trainerProfiles.some(function(p){ return p.name === name; });
-      if (exists) { toast('Team member already exists', 'error'); return false; }
-      var fresh = { id: null, name: name, role: 'trainer', role_tier: 'trainer', pin: null, is_active: true };
+      var existing = trainerProfiles.find(function(p){ return p.name === name; });
+      if (existing) {
+        if (!existing.id) {
+          /* Already in local state but never persisted to Supabase. Point
+             the admin at the reconcile banner. */
+          toast('Already in local list - use Reconcile to save them', 'error');
+        } else {
+          toast('Team member already exists', 'error');
+        }
+        return false;
+      }
+      var fresh = appendAuditEntry(
+        { id: null, name: name, role: 'trainer', role_tier: 'trainer', pin: null, is_active: true, audit_log: [] },
+        session,
+        'create',
+        { entity_type: 'trainer', target_id: null, before: null, after: { name: name, role_tier: 'trainer' } }
+      );
       setTrainerProfiles(function(list){
         return list.concat([fresh]).sort(function(a,b){ return a.name < b.name ? -1 : 1; });
       });
@@ -4052,10 +4155,15 @@
           if (q.id !== id) return q;
           /* v2.3: route through applyQueueStatusChange so the timeline records it */
           var updated = applyQueueStatusChange(q, 'assigned', { by: claimerName });
-          return Object.assign(updated, {
+          var assigned = Object.assign(updated, {
             assignedTo: claimerName,
             assignedAt: new Date().toISOString(),
             assignedBy: claimedByRole === 'admin' ? 'admin' : claimerName
+          });
+          return appendAuditEntry(assigned, session, 'lead_status_change', {
+            entity_type: 'lead', target_id: id,
+            before: { status: q.status || 'waiting', assignedTo: q.assignedTo || null },
+            after:  { status: 'assigned', assignedTo: claimerName }
           });
         });
       });
@@ -4070,7 +4178,12 @@
           if (q.id !== id) return q;
           var valid = queueValidNextStatuses(q.status || 'waiting');
           if (valid.indexOf(newStatus) === -1) return q;
-          return applyQueueStatusChange(q, newStatus, opts);
+          var updated = applyQueueStatusChange(q, newStatus, opts);
+          return appendAuditEntry(updated, session, 'lead_status_change', {
+            entity_type: 'lead', target_id: id,
+            before: { status: q.status || 'waiting' },
+            after:  { status: newStatus, note: opts.note || null }
+          });
         });
       });
     }
@@ -4087,11 +4200,16 @@
             by: byName || 'admin',
             note: 'Reassigned from ' + (q.assignedTo || 'unassigned') + ' to ' + newTrainer
           });
-          return Object.assign({}, q, {
+          var updated = Object.assign({}, q, {
             assignedTo: newTrainer,
             assignedAt: new Date().toISOString(),
             assignedBy: byName || 'admin',
             statusHistory: history
+          });
+          return appendAuditEntry(updated, session, 'lead_reassigned', {
+            entity_type: 'lead', target_id: id,
+            before: { assignedTo: q.assignedTo || null },
+            after:  { assignedTo: newTrainer }
           });
         });
       });
@@ -4314,7 +4432,7 @@
     /* Derive the legacy string[] of trainer names from profile state. Most
        call sites still expect ctx.trainers to be a name list. */
     var trainers = trainerProfiles
-      .filter(function(p){ return p.is_active !== false; })
+      .filter(function(p){ return p.is_active !== false && !p.deleted_at; })
       .map(function(p){ return p.name; });
 
     function ctxCan(action){ return hasPermission(session, action); }
@@ -4324,25 +4442,180 @@
       return session.trainer_name || session.name || null;
     }
 
+    /* Active (non-soft-deleted) views. Most consumers want these. Admin
+       "Show deleted" UIs read the underscore-prefixed full lists. */
+    var activeClients = clients.filter(function(c){ return !c.deleted_at; });
+    var activeClasses = classes.filter(function(cl){ return !cl.deleted_at; });
+    var activeQueue = queue.filter(function(q){ return !q.deleted_at; });
+
+    /* ---- Audited write handlers ----
+       Each looks up the prior record for diffing, stamps an audit entry,
+       and routes through the existing setter so subscriptions/saves Just
+       Work. Action labels match the Audit History viewer's expectations. */
+    function auditedUpsertClient(c, action, opts){
+      opts = opts || {};
+      var before = clients.find(function(x){ return x.id === c.id; }) || null;
+      var stamped = appendAuditEntry(c, session, action, Object.assign({
+        entity_type: 'client',
+        target_id: opts.target_id || c.id,
+        before: opts.before !== undefined ? opts.before : before,
+        after: opts.after !== undefined ? opts.after : c
+      }, opts.changes !== undefined ? { changes: opts.changes } : {}));
+      upsertClient(stamped);
+    }
+    function softDeleteClient(id){
+      var before = clients.find(function(x){ return x.id === id; });
+      if (!before) return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var deleted = Object.assign({}, before, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: actor
+      });
+      var stamped = appendAuditEntry(deleted, session, 'soft_delete', {
+        entity_type: 'client', target_id: id, before: before, after: deleted
+      });
+      upsertClient(stamped);
+    }
+    function restoreClient(id){
+      var before = clients.find(function(x){ return x.id === id; });
+      if (!before) return;
+      var restored = Object.assign({}, before, { deleted_at: null, deleted_by: null });
+      var stamped = appendAuditEntry(restored, session, 'restore', {
+        entity_type: 'client', target_id: id, before: before, after: restored
+      });
+      upsertClient(stamped);
+    }
+    /* Soft-delete a single package on a client. */
+    function softDeletePackage(clientId, packageId){
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      var pkgBefore = (before.packages || []).find(function(p){ return p.id === packageId; });
+      if (!pkgBefore) return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var pkgAfter = Object.assign({}, pkgBefore, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: actor
+      });
+      var updated = Object.assign({}, before, {
+        packages: before.packages.map(function(p){ return p.id === packageId ? pkgAfter : p; })
+      });
+      var stamped = appendAuditEntry(updated, session, 'package_deleted', {
+        entity_type: 'client', target_id: packageId, before: pkgBefore, after: pkgAfter
+      });
+      upsertClient(stamped);
+    }
+    function restorePackage(clientId, packageId){
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      var pkgBefore = (before.packages || []).find(function(p){ return p.id === packageId; });
+      if (!pkgBefore) return;
+      var pkgAfter = Object.assign({}, pkgBefore, { deleted_at: null, deleted_by: null });
+      var updated = Object.assign({}, before, {
+        packages: before.packages.map(function(p){ return p.id === packageId ? pkgAfter : p; })
+      });
+      var stamped = appendAuditEntry(updated, session, 'package_restored', {
+        entity_type: 'client', target_id: packageId, before: pkgBefore, after: pkgAfter
+      });
+      upsertClient(stamped);
+    }
+    /* Hard-delete a single package on a client. Reachable only from the
+       deleted-records filter view via the "Delete forever" link. */
+    function hardDeletePackage(clientId, packageId){
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      var pkgBefore = (before.packages || []).find(function(p){ return p.id === packageId; });
+      if (!pkgBefore) return;
+      var updated = Object.assign({}, before, {
+        packages: before.packages.filter(function(p){ return p.id !== packageId; })
+      });
+      var stamped = appendAuditEntry(updated, session, 'package_hard_deleted', {
+        entity_type: 'client', target_id: packageId, before: pkgBefore, after: null
+      });
+      upsertClient(stamped);
+    }
+
+    function auditedUpsertClass(cl, action, opts){
+      opts = opts || {};
+      var before = classes.find(function(x){ return x.id === cl.id; }) || null;
+      var stamped = appendAuditEntry(cl, session, action, Object.assign({
+        entity_type: 'class',
+        target_id: opts.target_id || cl.id,
+        before: opts.before !== undefined ? opts.before : before,
+        after: opts.after !== undefined ? opts.after : cl
+      }, opts.changes !== undefined ? { changes: opts.changes } : {}));
+      upsertClass(stamped);
+    }
+    function softDeleteClass(id){
+      var before = classes.find(function(x){ return x.id === id; });
+      if (!before) return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var deleted = Object.assign({}, before, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: actor
+      });
+      var stamped = appendAuditEntry(deleted, session, 'soft_delete', {
+        entity_type: 'class', target_id: id, before: before, after: deleted
+      });
+      upsertClass(stamped);
+    }
+    function restoreClass(id){
+      var before = classes.find(function(x){ return x.id === id; });
+      if (!before) return;
+      var restored = Object.assign({}, before, { deleted_at: null, deleted_by: null });
+      var stamped = appendAuditEntry(restored, session, 'restore', {
+        entity_type: 'class', target_id: id, before: before, after: restored
+      });
+      upsertClass(stamped);
+    }
+
+    /* Audit lead transitions. transitionQueueEntry already maintains the
+       statusHistory timeline; this hook also writes to audit_log so the
+       Audit History viewer surfaces lead changes. */
+    function auditQueueChange(leadId, action, opts){
+      opts = opts || {};
+      setQueue(function(list){
+        return list.map(function(q){
+          if (q.id !== leadId) return q;
+          return appendAuditEntry(q, session, action, Object.assign({
+            entity_type: 'lead', target_id: leadId
+          }, opts));
+        });
+      });
+    }
+
     var ctx = {
       trainers: trainers,
       trainerProfiles: trainerProfiles,
       can: ctxCan,
       currentUserName: ctxCurrentUserName,
       upsertTrainerProfile: upsertTrainerProfile,
-      clients: clients,
-      classes: classes,
+      /* Active-only by default; full lists exposed as allClients/allClasses/allQueue */
+      clients: activeClients,
+      classes: activeClasses,
+      allClients: clients,
+      allClasses: classes,
+      allQueue: queue,
       closures: closures,
       wros: wros,
       session: session,
       setSession: setSession,
       upsertClient: upsertClient,
+      auditedUpsertClient: auditedUpsertClient,
+      softDeleteClient: softDeleteClient,
+      restoreClient: restoreClient,
+      softDeletePackage: softDeletePackage,
+      restorePackage: restorePackage,
+      hardDeletePackage: hardDeletePackage,
       deleteClient: deleteClient,
       addSession: addSession,
       updateSession: updateSession,
       deleteSession: deleteSession,
       upsertClass: upsertClass,
+      auditedUpsertClass: auditedUpsertClass,
+      softDeleteClass: softDeleteClass,
+      restoreClass: restoreClass,
       deleteClass: deleteClass,
+      auditQueueChange: auditQueueChange,
       addAttendance: addAttendance,
       deleteAttendance: deleteAttendance,
       addSubAssignment: addSubAssignment,
@@ -6136,7 +6409,7 @@
         lockTrainer: trainerName,
         onClose: function(){ setNewOpen(false); },
         onCreate: function(c){
-          ctx.upsertClient(c);
+          ctx.auditedUpsertClient(c, 'create');
           setNewOpen(false);
           ctx.toast('Client created ✓');
         }
@@ -6242,12 +6515,23 @@
     var detailSession = detailSessionTuple[0];
     var setDetailSession = detailSessionTuple[1];
 
+    /* Audit history viewer + Show-deleted-packages toggle. Both admin-only. */
+    var auditOpenTuple = useState(false);
+    var auditOpen = auditOpenTuple[0];
+    var setAuditOpen = auditOpenTuple[1];
+    var showDeletedPkgsTuple = useState(false);
+    var showDeletedPkgs = showDeletedPkgsTuple[0];
+    var setShowDeletedPkgs = showDeletedPkgsTuple[1];
+
     var isAdmin = ctx.session && ctx.session.role === 'admin';
     var canAddPackage = ctx.can('canAddPackage');
     var canEditClient = ctx.can('canEditClient');
     var canEditPackage = ctx.can('canEditPackage');
     var canDeletePackage = ctx.can('canDeletePackage');
     var canDeleteSession = ctx.can('canDeleteSession');
+    var canViewAuditHistory = ctx.can('canViewAuditHistory');
+    var canRestoreDeleted = ctx.can('canRestoreDeleted');
+    var canHardDelete = ctx.can('canHardDelete');
 
     /* Lazy id-stamping: legacy packages may not have ids. Anyone with edit
        perm triggers a one-time backfill so edit/delete can identify rows
@@ -6270,9 +6554,21 @@
     var openReferrals = clientReferrals.filter(function(r){ return r.status === 'pending' || r.status === 'contacted'; });
 
     function doDelete(){
-      if (!window.confirm('Delete this client and all sessions? This cannot be undone.')) return;
-      ctx.deleteClient(c.id);
+      if (!window.confirm('Delete this client? They will be hidden from active lists. Sessions stay on file. Restore from the deleted clients view if needed.')) return;
+      ctx.softDeleteClient(c.id);
       ctx.toast('Client deleted ✓', 'error');
+      props.onBack();
+    }
+    function doRestore(){
+      ctx.restoreClient(c.id);
+      ctx.toast('Client restored ✓');
+    }
+    function doHardDelete(){
+      var msg = 'This permanently removes the record. Cannot be undone. Use soft delete unless you specifically need to remove this from the database entirely.\n\nType the client name to confirm: ' + c.name;
+      var input = window.prompt(msg);
+      if (input !== c.name) return;
+      ctx.deleteClient(c.id);
+      ctx.toast('Client hard-deleted', 'error');
       props.onBack();
     }
 
@@ -6316,6 +6612,16 @@
       ),
       e('div', { className: 'content' },
         e('button', { className: 'detail-back', onClick: props.onBack }, '← Back'),
+        c.deleted_at && e('div', { className: 'banner amber', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          e('span', null,
+            '🗑 Deleted ' + (c.deleted_at ? formatDate(c.deleted_at.slice(0, 10)) : '') +
+            (c.deleted_by ? ' by ' + c.deleted_by : '') + '. Hidden from active lists.'
+          ),
+          canRestoreDeleted && e('button', { className: 'btn btn-ghost btn-sm', onClick: doRestore }, 'Restore')
+        ),
+        canViewAuditHistory && e('div', { style: { display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' } },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setAuditOpen(true); } }, '📜 Audit history')
+        ),
         banner,
         openReferralBanner,
         e('div', { className: 'stats-grid' },
@@ -6368,70 +6674,107 @@
         /* Package History - shown when more than one package exists, or
            when the user can manage packages (so per-row edit/delete is
            reachable even on single-package clients). */
-        (getPackages(c).length > 1 || canEditPackage) && getPackages(c).length > 0 && e('div', { style: { marginTop: '16px' } },
-          e('h3', { style: { fontSize: '20px', marginBottom: '4px' } }, 'Package History'),
-          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
-            getPackages(c).length + ' packages \u00b7 ' + totalSessionsPurchased(c) + ' total sessions \u00b7 ' + formatMoney(totalPaid(c)) + ' lifetime'
-          ),
-          e('div', { className: 'log-table' },
-            e('div', { className: 'log-row header' },
-              e('div', null, 'Date'),
-              e('div', null, 'Package'),
-              e('div', null, 'Paid'),
-              e('div', null, 'Source'),
-              canEditPackage && e('div', null, '')
+        (function(){
+          var visiblePackages = getPackages(c, { includeDeleted: showDeletedPkgs });
+          var deletedCount = ((c.packages || []).filter(function(p){ return !!p.deleted_at; })).length;
+          if (!(visiblePackages.length > 1 || canEditPackage)) return null;
+          if (visiblePackages.length === 0 && deletedCount === 0) return null;
+          return e('div', { style: { marginTop: '16px' } },
+            e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' } },
+              e('h3', { style: { fontSize: '20px', margin: 0 } }, 'Package History'),
+              canEditPackage && deletedCount > 0 && e('label', { style: { fontSize: '12px', color: 'var(--slate)', display: 'flex', alignItems: 'center', gap: '6px' } },
+                e('input', { type: 'checkbox', checked: showDeletedPkgs, onChange: function(ev){ setShowDeletedPkgs(ev.target.checked); } }),
+                'Show deleted (' + deletedCount + ')'
+              )
             ),
-            getPackages(c).slice().sort(function(a,b){ return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1; }).map(function(p, i){
-              return e('div', { key: p.id || i, className: 'log-row' },
-                e('div', null, p.purchaseDate ? formatDate(p.purchaseDate) : '\u2014'),
-                e('div', null, p.sessions + '-sess'),
-                e('div', null, formatMoney(p.amountPaid != null ? p.amountPaid : p.price)),
-                e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
-                  p.source === 'rectrac_import' ? 'RecTrac' :
-                  p.source === 'manual_reup' ? 'Re-up (manual)' :
-                  p.source === 'rectrac_reup' ? 'Re-up (RecTrac)' :
-                  'Initial'
-                ),
-                canEditPackage && e('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
-                  e('button', {
-                    className: 'btn btn-ghost',
-                    style: { padding: '4px 8px', fontSize: '13px' },
-                    title: 'Edit package',
-                    onClick: function(){
-                      var target = p;
-                      if (!target.id) {
-                        target = Object.assign({}, p, { id: uid() });
-                        ctx.upsertClient(Object.assign({}, c, {
-                          packages: (c.packages || []).map(function(q){ return q === p ? target : q; })
-                        }));
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
+              getPackages(c).length + ' active \u00b7 ' + totalSessionsPurchased(c) + ' total sessions \u00b7 ' + formatMoney(totalPaid(c)) + ' lifetime'
+            ),
+            e('div', { className: 'log-table' },
+              e('div', { className: 'log-row header' },
+                e('div', null, 'Date'),
+                e('div', null, 'Package'),
+                e('div', null, 'Paid'),
+                e('div', null, 'Source'),
+                canEditPackage && e('div', null, '')
+              ),
+              visiblePackages.slice().sort(function(a,b){ return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1; }).map(function(p, i){
+                var isDeleted = !!p.deleted_at;
+                var rowStyle = isDeleted ? { opacity: 0.55, fontStyle: 'italic' } : null;
+                return e('div', { key: p.id || i, className: 'log-row', style: rowStyle },
+                  e('div', null,
+                    p.purchaseDate ? formatDate(p.purchaseDate) : '\u2014',
+                    isDeleted && e('div', { style: { fontSize: '10px', color: 'var(--red)' } },
+                      'Deleted ' + formatDate(p.deleted_at.slice(0, 10)) + (p.deleted_by ? ' by ' + p.deleted_by : '')
+                    )
+                  ),
+                  e('div', null, p.sessions + '-sess'),
+                  e('div', null, formatMoney(p.amountPaid != null ? p.amountPaid : p.price)),
+                  e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                    p.source === 'rectrac_import' ? 'RecTrac' :
+                    p.source === 'manual_reup' ? 'Re-up (manual)' :
+                    p.source === 'rectrac_reup' ? 'Re-up (RecTrac)' :
+                    'Initial'
+                  ),
+                  canEditPackage && e('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
+                    !isDeleted && e('button', {
+                      className: 'btn btn-ghost',
+                      style: { padding: '4px 8px', fontSize: '13px' },
+                      title: 'Edit package',
+                      onClick: function(){
+                        var target = p;
+                        if (!target.id) {
+                          target = Object.assign({}, p, { id: uid() });
+                          ctx.upsertClient(Object.assign({}, c, {
+                            packages: (c.packages || []).map(function(q){ return q === p ? target : q; })
+                          }));
+                        }
+                        setEditPkgTarget(target);
                       }
-                      setEditPkgTarget(target);
-                    }
-                  }, '\u270e'),
-                  canDeletePackage && e('button', {
-                    className: 'btn btn-ghost',
-                    style: { padding: '4px 8px', fontSize: '13px', color: 'var(--red)' },
-                    title: 'Delete package',
-                    onClick: function(){
-                      if (!window.confirm('This will permanently remove this package from ' + c.name + '\'s history. Sessions logged against it will become orphaned. This cannot be undone.')) return;
-                      var target = p;
-                      if (!target.id) {
-                        target = Object.assign({}, p, { id: uid() });
+                    }, '\u270e'),
+                    !isDeleted && canDeletePackage && e('button', {
+                      className: 'btn btn-ghost',
+                      style: { padding: '4px 8px', fontSize: '13px', color: 'var(--red)' },
+                      title: 'Soft-delete package (keeps record, hides from active list)',
+                      onClick: function(){
+                        if (!window.confirm('Delete this package? It will be hidden from the active list. Sessions logged against it stay on the client. Restore from "Show deleted" if needed.')) return;
+                        var target = p;
+                        if (!target.id) {
+                          /* Stamp an id first so we can find this row deterministically */
+                          target = Object.assign({}, p, { id: uid() });
+                          ctx.upsertClient(Object.assign({}, c, {
+                            packages: (c.packages || []).map(function(q){ return q === p ? target : q; })
+                          }));
+                        }
+                        ctx.softDeletePackage(c.id, target.id);
+                        ctx.toast('Package deleted \u2713', 'error');
                       }
-                      var updated = Object.assign({}, c, {
-                        packages: (c.packages || []).filter(function(q){
-                          return q !== p && q.id !== target.id;
-                        })
-                      });
-                      ctx.upsertClient(updated);
-                      ctx.toast('Package deleted \u2713', 'error');
-                    }
-                  }, '\u00d7')
-                )
-              );
-            })
-          )
-        ),
+                    }, '\u00d7'),
+                    isDeleted && canRestoreDeleted && e('button', {
+                      className: 'btn btn-ghost',
+                      style: { padding: '4px 8px', fontSize: '13px', color: 'var(--teal)' },
+                      title: 'Restore package',
+                      onClick: function(){
+                        ctx.restorePackage(c.id, p.id);
+                        ctx.toast('Package restored \u2713');
+                      }
+                    }, '\u21ba'),
+                    isDeleted && canHardDelete && e('button', {
+                      className: 'btn btn-ghost',
+                      style: { padding: '4px 8px', fontSize: '11px', color: 'var(--red)' },
+                      title: 'Delete forever (hard delete - cannot be undone)',
+                      onClick: function(){
+                        if (!window.confirm('This permanently removes the record. Cannot be undone. Use soft delete unless you specifically need to remove this from the database entirely.')) return;
+                        ctx.hardDeletePackage(c.id, p.id);
+                        ctx.toast('Package hard-deleted', 'error');
+                      }
+                    }, 'Delete forever')
+                  )
+                );
+              })
+            )
+          );
+        })(),
         e('h3', { style: { fontSize: '20px', marginTop: '18px', marginBottom: '4px' } }, 'Session Log'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
           (c.sessions || []).length + ' logged'),
@@ -6608,7 +6951,7 @@
           lockTrainer: c.trainerName,
           onClose: function(){ setEditOpen(false); },
           onCreate: function(updated){
-            ctx.upsertClient(updated);
+            ctx.auditedUpsertClient(updated, 'update');
             setEditOpen(false);
             ctx.toast('Client updated ✓');
           }
@@ -6669,7 +7012,14 @@
           client: c,
           onClose: function(){ setAddPkgOpen(false); },
           onSave: function(updated){
-            ctx.upsertClient(updated);
+            /* Identify the package that was just appended so the audit
+               entry has a target_id and a clear before/after for the new row. */
+            var newPkg = (updated.packages || [])[((updated.packages || []).length - 1)];
+            ctx.auditedUpsertClient(updated, 'package_added', {
+              target_id: newPkg && newPkg.id,
+              before: null,
+              after: newPkg
+            });
             setAddPkgOpen(false);
             ctx.toast('Package added \u2713');
           }
@@ -6679,7 +7029,20 @@
           client: c,
           pkg: editPkgTarget,
           onClose: function(){ setEditPkgTarget(null); }
-        })
+        }),
+        canViewAuditHistory && auditOpen && e(AuditHistoryModal, {
+          entries: c.audit_log || [],
+          label: c.name,
+          onClose: function(){ setAuditOpen(false); }
+        }),
+        c.deleted_at && canHardDelete && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+          e('button', {
+            className: 'btn btn-ghost btn-sm',
+            style: { color: 'var(--red)' },
+            onClick: doHardDelete,
+            title: 'Delete forever - irreversible'
+          }, 'Delete forever')
+        )
       )
     );
   }
@@ -6887,7 +7250,11 @@
           return p.id === original.id ? updatedPkg : p;
         })
       });
-      ctx.upsertClient(updatedClient);
+      ctx.auditedUpsertClient(updatedClient, 'package_edited', {
+        target_id: original.id,
+        before: original,
+        after: updatedPkg
+      });
       ctx.toast('Package updated ✓');
       props.onClose();
     }
@@ -8250,7 +8617,7 @@
         lockInstructor: trainerName,
         onClose: function(){ setNewOpen(false); },
         onCreate: function(cl){
-          ctx.upsertClass(cl);
+          ctx.auditedUpsertClass(cl, 'create');
           setNewOpen(false);
           ctx.toast('Class created ✓');
         }
@@ -8444,11 +8811,30 @@
 
     var canManageSubs = ctx.can('canEditClassStructure') ||
                         (ctx.currentUserName && ctx.currentUserName() === c.instructor);
+    var canViewAuditHistory = ctx.can('canViewAuditHistory');
+    var canRestoreDeleted = ctx.can('canRestoreDeleted');
+    var canHardDelete = ctx.can('canHardDelete');
+
+    var auditOpenTuple = useState(false);
+    var auditOpen = auditOpenTuple[0];
+    var setAuditOpen = auditOpenTuple[1];
 
     function doDelete(){
-      if (!window.confirm('Delete this class and all attendance records?')) return;
-      ctx.deleteClass(c.id);
+      if (!window.confirm('Delete this class? It will be hidden from active lists. Attendance records stay on file. Restore from the deleted classes view if needed.')) return;
+      ctx.softDeleteClass(c.id);
       ctx.toast('Class deleted ✓', 'error');
+      props.onBack();
+    }
+    function doRestore(){
+      ctx.restoreClass(c.id);
+      ctx.toast('Class restored ✓');
+    }
+    function doHardDelete(){
+      var msg = 'This permanently removes the record. Cannot be undone. Use soft delete unless you specifically need to remove this from the database entirely.\n\nType the class name to confirm: ' + c.name;
+      var input = window.prompt(msg);
+      if (input !== c.name) return;
+      ctx.deleteClass(c.id);
+      ctx.toast('Class hard-deleted', 'error');
       props.onBack();
     }
     function removeSub(s){
@@ -8490,6 +8876,16 @@
       ),
       e('div', { className: 'content' },
         e('button', { className: 'detail-back', onClick: props.onBack }, '← Back'),
+        c.deleted_at && e('div', { className: 'banner amber', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          e('span', null,
+            '🗑 Deleted ' + (c.deleted_at ? formatDate(c.deleted_at.slice(0, 10)) : '') +
+            (c.deleted_by ? ' by ' + c.deleted_by : '') + '. Hidden from active class lists.'
+          ),
+          canRestoreDeleted && e('button', { className: 'btn btn-ghost btn-sm', onClick: doRestore }, 'Restore')
+        ),
+        canViewAuditHistory && e('div', { style: { display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' } },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setAuditOpen(true); } }, '📜 Audit history')
+        ),
         /* v2.2: season status banner. Shows when a class has a defined window. */
         (function(){
           var status = classSeasonStatus(c);
@@ -8697,11 +9093,24 @@
           lockInstructor: ctx.session && ctx.session.role === 'trainer' ? ctx.session.name : null,
           onClose: function(){ setEditOpen(false); },
           onCreate: function(updated){
-            ctx.upsertClass(updated);
+            ctx.auditedUpsertClass(updated, 'update');
             setEditOpen(false);
             ctx.toast('Class updated ✓');
           }
-        })
+        }),
+        canViewAuditHistory && auditOpen && e(AuditHistoryModal, {
+          entries: c.audit_log || [],
+          label: c.name,
+          onClose: function(){ setAuditOpen(false); }
+        }),
+        c.deleted_at && canHardDelete && e('div', { style: { marginTop: '24px', textAlign: 'right' } },
+          e('button', {
+            className: 'btn btn-ghost btn-sm',
+            style: { color: 'var(--red)' },
+            onClick: doHardDelete,
+            title: 'Delete forever - irreversible'
+          }, 'Delete forever')
+        )
       )
     );
   }
@@ -9894,6 +10303,10 @@
     var aged = isQueueLeadAged(lead);
     var ageDays = queueLeadAgeDays(lead);
     var isAdmin = ctx.session && ctx.session.role === 'admin';
+    var canViewAuditHistory = ctx.can('canViewAuditHistory');
+
+    var auditOpenTuple = useState(false);
+    var auditOpen = auditOpenTuple[0]; var setAuditOpen = auditOpenTuple[1];
 
     function actionLabel(s){
       if (s === 'assigned') return 'Assign / Claim';
@@ -10054,6 +10467,11 @@
               })
         ),
         e('div', { className: 'modal-footer' },
+          canViewAuditHistory && e('button', {
+            className: 'btn btn-ghost btn-sm',
+            onClick: function(){ setAuditOpen(true); },
+            style: { marginRight: 'auto' }
+          }, '📜 Audit history'),
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
           isAdmin && lead.status !== 'converted' && e('button', {
             className: 'btn btn-outline',
@@ -10072,6 +10490,11 @@
           lead: lead,
           newStatus: pendingStatus,
           onClose: function(){ setPendingStatus(null); }
+        }),
+        canViewAuditHistory && auditOpen && e(AuditHistoryModal, {
+          entries: lead.audit_log || [],
+          label: lead.name,
+          onClose: function(){ setAuditOpen(false); }
         })
       )
     );
@@ -12778,6 +13201,10 @@
     var alertFilter = alertFilterTuple[0];
     var setAlertFilter = alertFilterTuple[1];
 
+    var showDeletedTuple = useState(false);
+    var showDeleted = showDeletedTuple[0];
+    var setShowDeleted = showDeletedTuple[1];
+
     var newOpenTuple = useState(false);
     var newOpen = newOpenTuple[0];
     var setNewOpen = newOpenTuple[1];
@@ -12785,6 +13212,8 @@
     var importOpenTuple = useState(false);
     var importOpen = importOpenTuple[0];
     var setImportOpen = importOpenTuple[1];
+
+    var canRestoreDeleted = ctx.can('canRestoreDeleted');
 
     /* Counts for the alert chips (computed against full client set) */
     var alertCounts = (function(){
@@ -12796,8 +13225,11 @@
       });
       return { last_session: ls, stale: st };
     })();
+    var deletedCount = (ctx.allClients || []).filter(function(c){ return !!c.deleted_at; }).length;
 
-    var filtered = ctx.clients.filter(function(c){
+    var sourceList = showDeleted ? (ctx.allClients || []) : ctx.clients;
+    var filtered = sourceList.filter(function(c){
+      if (showDeleted && !c.deleted_at) return false;
       if (filterLoc && c.location !== filterLoc) return false;
       if (search && c.name.toLowerCase().indexOf(search.toLowerCase()) === -1 &&
           (c.trainerName || '').toLowerCase().indexOf(search.toLowerCase()) === -1) return false;
@@ -12925,7 +13357,7 @@
         )
       ),
       /* Package-alert filter chips */
-      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' } },
+      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' } },
         [
           { id: '', label: 'All clients', count: ctx.clients.length },
           { id: 'last_session', label: 'On last session', count: alertCounts.last_session, color: 'var(--amber)' },
@@ -12945,7 +13377,19 @@
               cursor: 'pointer'
             }
           }, opt.label + ' (' + opt.count + ')');
-        })
+        }),
+        canRestoreDeleted && deletedCount > 0 && e('button', {
+          onClick: function(){ setShowDeleted(!showDeleted); },
+          style: {
+            padding: '6px 12px', borderRadius: '999px',
+            border: '1.5px solid ' + (showDeleted ? 'var(--red)' : 'var(--border)'),
+            background: showDeleted ? 'var(--red)' : '#fff',
+            color: showDeleted ? '#fff' : 'var(--slate)',
+            fontWeight: 600, fontSize: '12px',
+            cursor: 'pointer',
+            marginLeft: 'auto'
+          }
+        }, (showDeleted ? '✓ ' : '') + 'Show deleted (' + deletedCount + ')')
       ),
       filtered.length === 0
         ? e('div', { className: 'empty' },
@@ -12959,7 +13403,7 @@
         ctx: ctx,
         onClose: function(){ setNewOpen(false); },
         onCreate: function(c){
-          ctx.upsertClient(c);
+          ctx.auditedUpsertClient(c, 'create');
           setNewOpen(false);
           ctx.toast('Client created ✓');
         }
@@ -13209,7 +13653,12 @@
           if (classified.candidate.rectracMemberId && !updated.rectracMemberId) {
             updated.rectracMemberId = classified.candidate.rectracMemberId;
           }
-          ctx.upsertClient(updated);
+          var added = (updated.packages || [])[((updated.packages || []).length - 1)];
+          ctx.auditedUpsertClient(updated, 'package_added', {
+            target_id: added && added.id,
+            before: null,
+            after: added
+          });
           reups++;
         } else if (classified.kind === 'new_to_queue') {
           /* v2: route new purchases into the consult queue */
@@ -13241,7 +13690,7 @@
           ctx.upsertQueueEntry(queueEntry);
           queued++;
         } else {
-          ctx.upsertClient(classified.candidate);
+          ctx.auditedUpsertClient(classified.candidate, 'create');
           created++;
         }
       });
@@ -13485,13 +13934,24 @@
     var filter = filterTuple[0];
     var setFilter = filterTuple[1];
 
+    var showDeletedTuple = useState(false);
+    var showDeleted = showDeletedTuple[0];
+    var setShowDeleted = showDeletedTuple[1];
+
+    var canRestoreDeleted = ctx.can('canRestoreDeleted');
+
     var counts = { active: 0, upcoming: 0, ended: 0, all: ctx.classes.length };
     ctx.classes.forEach(function(c){
       counts[classSeasonStatus(c)]++;
     });
+    var deletedClassesCount = (ctx.allClasses || []).filter(function(c){ return !!c.deleted_at; }).length;
 
-    var visible = ctx.classes
-      .filter(function(c){ return filter === 'all' || classSeasonStatus(c) === filter; })
+    var sourceList = showDeleted ? (ctx.allClasses || []) : ctx.classes;
+    var visible = sourceList
+      .filter(function(c){
+        if (showDeleted && !c.deleted_at) return false;
+        return filter === 'all' || classSeasonStatus(c) === filter;
+      })
       .slice()
       .sort(function(a,b){ return a.name.localeCompare(b.name); });
 
@@ -13561,7 +14021,7 @@
           e('button', { className: 'btn btn-teal', onClick: function(){ setNewOpen(true); } }, '+ New Class')
         )
       ),
-      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap' } },
+      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' } },
         ['active', 'upcoming', 'ended', 'all'].map(function(s){
           var active = filter === s;
           var ct = counts[s];
@@ -13577,7 +14037,18 @@
               textTransform: 'capitalize'
             }
           }, s + ' (' + ct + ')');
-        })
+        }),
+        canRestoreDeleted && deletedClassesCount > 0 && e('button', {
+          onClick: function(){ setShowDeleted(!showDeleted); },
+          style: {
+            padding: '8px 14px', borderRadius: '999px',
+            border: '1.5px solid ' + (showDeleted ? 'var(--red)' : 'var(--border)'),
+            background: showDeleted ? 'var(--red)' : '#fff',
+            color: showDeleted ? '#fff' : 'var(--slate)',
+            fontWeight: 600, fontSize: '13px',
+            marginLeft: 'auto'
+          }
+        }, (showDeleted ? '✓ ' : '') + 'Show deleted (' + deletedClassesCount + ')')
       ),
       visible.length === 0
         ? e('div', { className: 'empty' },
@@ -13592,7 +14063,7 @@
         ctx: ctx,
         onClose: function(){ setNewOpen(false); },
         onCreate: function(cl){
-          ctx.upsertClass(cl);
+          ctx.auditedUpsertClass(cl, 'create');
           setNewOpen(false);
           ctx.toast('Class created \u2713');
         }
@@ -13845,6 +14316,103 @@
     );
   }
 
+  /* ============ AUDIT HISTORY MODAL ============
+     Admin-only viewer for the audit_log array on a record. Reverse
+     chronological. No filtering or pagination yet (cap at 100 entries
+     prunes oldest, so the list always fits). */
+  function AuditHistoryModal(props){
+    var entries = (props.entries || []).slice().sort(function(a, b){
+      return (a.ts || '') < (b.ts || '') ? 1 : -1;
+    });
+    var labelFor = props.label || 'Record';
+
+    function formatChangeValue(v){
+      if (v == null) return '∅';
+      if (typeof v === 'string') return '"' + v + '"';
+      if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+      try { return JSON.stringify(v); } catch(_){ return String(v); }
+    }
+    function actionLabel(action){
+      var map = {
+        create: 'Created',
+        update: 'Updated',
+        soft_delete: 'Soft-deleted',
+        restore: 'Restored',
+        hard_delete: 'Hard-deleted',
+        package_added: 'Added package',
+        package_edited: 'Edited package',
+        package_deleted: 'Soft-deleted package',
+        package_restored: 'Restored package',
+        package_hard_deleted: 'Hard-deleted package',
+        lead_status_change: 'Lead status changed',
+        lead_reassigned: 'Lead reassigned'
+      };
+      return map[action] || action;
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '640px' } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Audit History'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
+            labelFor, ' · ', entries.length, ' ', entries.length === 1 ? 'entry' : 'entries',
+            entries.length >= 100 ? ' (capped at 100, oldest pruned)' : ''
+          ),
+          entries.length === 0
+            ? e('div', { className: 'empty' }, e('div', null, 'No audit entries yet.'))
+            : entries.map(function(en){
+                var ts = en.ts ? new Date(en.ts) : null;
+                var dateStr = ts ? formatDate(ts.toISOString().slice(0, 10)) : '—';
+                var timeStr = ts ? ts.toTimeString().slice(0, 5) : '';
+                return e('div', {
+                  key: en.id,
+                  style: {
+                    padding: '10px 12px',
+                    marginBottom: '8px',
+                    background: 'var(--cream-2)',
+                    borderRadius: '8px',
+                    borderLeft: '3px solid var(--teal)'
+                  }
+                },
+                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '4px' } },
+                    dateStr + ' · ' + timeStr + ' · ' + (en.actor || 'unknown')
+                  ),
+                  e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } },
+                    actionLabel(en.action)
+                  ),
+                  en.changes && Object.keys(en.changes).length > 0 && e('ul', {
+                    style: { fontSize: '12px', color: 'var(--slate)', margin: '6px 0 0 0', paddingLeft: '18px' }
+                  },
+                    Object.keys(en.changes).map(function(k){
+                      var ch = en.changes[k];
+                      return e('li', { key: k },
+                        k + ': ', formatChangeValue(ch.from), ' → ', formatChangeValue(ch.to)
+                      );
+                    })
+                  ),
+                  /* For specialized package actions, show the full before or
+                     after snapshot since changes is null. */
+                  !en.changes && en.after && (en.action === 'package_added' || en.action === 'create') && e('ul', {
+                    style: { fontSize: '12px', color: 'var(--slate)', margin: '6px 0 0 0', paddingLeft: '18px' }
+                  },
+                    Object.keys(en.after).slice(0, 8).map(function(k){
+                      if (AUDIT_NOISE_KEYS.indexOf(k) !== -1) return null;
+                      return e('li', { key: k }, k + ': ', formatChangeValue(en.after[k]));
+                    })
+                  )
+                );
+              })
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-primary', onClick: props.onClose }, 'Close')
+        )
+      )
+    );
+  }
+
   /* ============ EDIT TRAINER MODAL ============
      Admin-only: edit name, role, is_active on a trainers row. Local
      trainers state is just an array of name strings (see translate.trainers
@@ -13904,6 +14472,11 @@
 
     var cascadeCountsTuple = useState(null);
     var cascadeCounts = cascadeCountsTuple[0]; var setCascadeCounts = cascadeCountsTuple[1];
+
+    var auditOpenTuple = useState(false);
+    var auditOpen = auditOpenTuple[0]; var setAuditOpen = auditOpenTuple[1];
+
+    var canViewAuditHistory = ctx.can('canViewAuditHistory');
 
     /* Fetch the full trainer row on mount. */
     useEffect(function(){
@@ -14231,8 +14804,46 @@
         var prev = original.previous_names || [];
         update.previous_names = prev.concat([{ name: original.name, renamed_at: nowIso }]);
       }
+      /* Append an audit_log entry alongside the update. The diff is computed
+         over the original Supabase row (loaded into `original`) and the
+         in-flight `update` patch projected onto it. */
+      var afterShape = Object.assign({}, original, update);
+      var stamped = appendAuditEntry(
+        { audit_log: original.audit_log || [] },
+        ctx.session,
+        'update',
+        {
+          entity_type: 'trainer',
+          target_id: original.id,
+          before: { name: original.name, role_tier: original.role_tier, is_active: original.is_active, pin: original.pin ? '••••' : null },
+          after:  { name: afterShape.name, role_tier: afterShape.role_tier, is_active: afterShape.is_active, pin: pinTrimmed ? '••••' : (original.pin ? '••••' : null) }
+        }
+      );
+      update.audit_log = stamped.audit_log;
       return supabaseClient.from('trainers').update(update).eq('id', original.id)
         .then(function(res){ if (res.error) throw res.error; });
+    }
+
+    function softDeleteTrainerRecord(){
+      var nowIso = new Date().toISOString();
+      var actor = (ctx.currentUserName && ctx.currentUserName()) || 'unknown';
+      var stamped = appendAuditEntry(
+        { audit_log: original.audit_log || [] },
+        ctx.session,
+        'soft_delete',
+        {
+          entity_type: 'trainer',
+          target_id: original.id,
+          before: { name: original.name, is_active: original.is_active, deleted_at: original.deleted_at || null },
+          after:  { name: original.name, is_active: original.is_active, deleted_at: nowIso }
+        }
+      );
+      return supabaseClient.from('trainers').update({
+        deleted_at: nowIso,
+        deleted_by: actor,
+        audit_log: stamped.audit_log,
+        updated_at: nowIso
+      }).eq('id', original.id).then(function(res){ if (res.error) throw res.error; });
     }
 
     function handleSaveStep1(){
@@ -14393,6 +15004,12 @@
         e('div', { className: 'modal-footer' },
           step === 1
             ? [
+                canViewAuditHistory && original && e('button', {
+                  key: 'audit',
+                  className: 'btn btn-ghost btn-sm',
+                  onClick: function(){ setAuditOpen(true); },
+                  style: { marginRight: 'auto' }
+                }, '📜 Audit history'),
                 e('button', { key: 'cancel', className: 'btn btn-ghost', onClick: props.onClose, disabled: saving }, 'Cancel'),
                 e('button', {
                   key: 'save',
@@ -14410,7 +15027,12 @@
                   disabled: saving
                 }, saving ? 'Working…' : 'Confirm rename')
               ]
-        )
+        ),
+        canViewAuditHistory && auditOpen && original && e(AuditHistoryModal, {
+          entries: original.audit_log || [],
+          label: original.name,
+          onClose: function(){ setAuditOpen(false); }
+        })
       )
     );
   }
@@ -14509,6 +15131,16 @@
     var editingTrainer = editingTuple[0];
     var setEditingTrainer = editingTuple[1];
 
+    var reconcilingTuple = useState(false);
+    var reconciling = reconcilingTuple[0];
+    var setReconciling = reconcilingTuple[1];
+
+    /* Profiles in local state without an id are unsaved (loadAll always
+       hydrates id from Supabase). This banner surfaces them so admin can
+       trigger a save retry instead of being blocked by the existing-name
+       check on Add. */
+    var unsavedProfiles = (ctx.trainerProfiles || []).filter(function(p){ return !p.id; });
+
     function add(){
       if (ctx.addTrainer(name)) {
         ctx.toast('Team member added ✓');
@@ -14526,6 +15158,26 @@
       ctx.removeTrainer(n);
       ctx.toast('Team member removed', 'error');
     }
+    function reconcileNow(){
+      if (reconciling) return;
+      setReconciling(true);
+      /* Re-run storage.trainers.save with the full local profile list. The
+         dirty-check ref was nulled by the previous save error, so this
+         attempt is guaranteed to fire. */
+      window.storage.trainers.save(ctx.trainerProfiles)
+        .then(function(){
+          setReconciling(false);
+          ctx.toast('Reconciled ✓ - reloading from Supabase');
+          /* Trigger a reload to bring back ids on the new rows */
+          if (typeof window !== 'undefined' && window.location && window.location.reload) {
+            setTimeout(function(){ window.location.reload(); }, 500);
+          }
+        })
+        .catch(function(err){
+          setReconciling(false);
+          ctx.toast('Reconcile failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+        });
+    }
     function updatePin(){
       if (!/^\d{4}$/.test(pinInput)) { ctx.toast('PIN must be 4 digits', 'error'); return; }
       ctx.setPin(pinInput);
@@ -14535,12 +15187,30 @@
 
     return e('div', null,
       e('h2', { style: { fontSize: '26px', marginBottom: '14px' } }, 'Manage Team'),
+      unsavedProfiles.length > 0 && e('div', { className: 'banner amber', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' } },
+        e('div', null,
+          e('div', { style: { fontWeight: 600 } },
+            unsavedProfiles.length + ' team member' + (unsavedProfiles.length === 1 ? '' : 's') + ' in local view but not saved to Supabase'
+          ),
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+            unsavedProfiles.map(function(p){ return p.name; }).join(', ')
+          )
+        ),
+        e('button', {
+          className: 'btn btn-primary btn-sm',
+          onClick: reconcileNow,
+          disabled: reconciling
+        }, reconciling ? 'Reconciling…' : 'Reconcile to Supabase')
+      ),
       e('div', { style: { background: '#fff', padding: '18px', borderRadius: '14px', border: '1px solid var(--border)', marginBottom: '18px' } },
         e('div', { className: 'field' },
           e('label', null, 'Add team member'),
           e('div', { style: { display: 'flex', gap: '10px' } },
             e('input', { value: name, onChange: function(ev){ setName(ev.target.value); }, placeholder: 'Full name', onKeyDown: function(ev){ if (ev.key === 'Enter') add(); } }),
             e('button', { className: 'btn btn-primary', onClick: add }, 'Add')
+          ),
+          e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+            'Defaults to trainer tier with no PIN. Use Edit on the row to set a PIN and role tier.'
           )
         )
       ),
@@ -15582,7 +16252,7 @@
         },
         onClose: function(){ setConvertWRO(null); },
         onCreate: function(c){
-          ctx.upsertClient(c);
+          ctx.auditedUpsertClient(c, 'create');
           ctx.upsertWRO(Object.assign({}, convertWRO, { convertedToClientId: c.id }));
           setConvertWRO(null);
           ctx.toast('WRO converted to PT client \u2713');
