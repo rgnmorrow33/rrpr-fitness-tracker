@@ -1540,6 +1540,9 @@
   }
 
   /* ============ CONSTANTS ============ */
+  /* Legacy flat CMRC-priced list. Still consumed by ImportClientsModal as
+     the bulk-import default-package fallback. New code paths use
+     PT_PACKAGES_BY_FACILITY below. Tracked on the deferred cleanup pile. */
   var PACKAGES = [
     { sessions: 1,  price: 38,  type: 'Personal-1'  },
     { sessions: 3,  price: 105, type: 'Personal-3'  },
@@ -1548,6 +1551,53 @@
     { sessions: 15, price: 495, type: 'Personal-15' },
     { sessions: 20, price: 630, type: 'Personal-20' }
   ];
+
+  /* Facility-aware PT package lists. Used by AddPackageModal,
+     EditPackageModal, NewClientModal. Selecting a template stamps
+     template_id on the package; the synthesized `type` value (e.g.
+     'CMRC-10', 'Baca-3-Intro') is what existing code groups by. */
+  var PT_PACKAGES_BY_FACILITY = {
+    CMRC: [
+      { id: 'cmrc-consult', label: 'Consultation (45 min)', sessions: 0,  price: 0,   type: 'CMRC-Consult' },
+      { id: 'cmrc-1',       label: '1 session',             sessions: 1,  price: 38,  type: 'CMRC-1' },
+      { id: 'cmrc-3',       label: '3 sessions',            sessions: 3,  price: 105, type: 'CMRC-3' },
+      { id: 'cmrc-5',       label: '5 sessions',            sessions: 5,  price: 175, type: 'CMRC-5' },
+      { id: 'cmrc-10',      label: '10 sessions',           sessions: 10, price: 330, type: 'CMRC-10' },
+      { id: 'cmrc-15',      label: '15 sessions',           sessions: 15, price: 495, type: 'CMRC-15' },
+      { id: 'cmrc-20',      label: '20 sessions',           sessions: 20, price: 630, type: 'CMRC-20' }
+    ],
+    Baca: [
+      { id: 'baca-consult',  label: 'Consultation (45 min)',     sessions: 0,  price: 0,   type: 'Baca-Consult' },
+      { id: 'baca-3-intro',  label: '3 sessions (Introductory)', sessions: 3,  price: 40,  type: 'Baca-3-Intro' },
+      { id: 'baca-3',        label: '3 sessions',                sessions: 3,  price: 75,  type: 'Baca-3' },
+      { id: 'baca-5',        label: '5 sessions',                sessions: 5,  price: 115, type: 'Baca-5' },
+      { id: 'baca-10',       label: '10 sessions',               sessions: 10, price: 225, type: 'Baca-10' },
+      { id: 'baca-15',       label: '15 sessions',               sessions: 15, price: 315, type: 'Baca-15' },
+      { id: 'baca-20',       label: '20 sessions',               sessions: 20, price: 400, type: 'Baca-20' }
+    ]
+  };
+
+  /* Returns { list, fallback } where fallback is true when the requested
+     location was missing or unrecognized and we fell back to CMRC. UI
+     uses fallback to show a "set client location" hint. */
+  function getPackagesForFacility(location){
+    if (location && PT_PACKAGES_BY_FACILITY[location]) {
+      return { list: PT_PACKAGES_BY_FACILITY[location], fallback: false };
+    }
+    return { list: PT_PACKAGES_BY_FACILITY.CMRC, fallback: true };
+  }
+
+  /* Find the closest equivalent template in a different facility's list,
+     matching by sessions count. Falls back to the 10-session default,
+     then the first non-consult template. */
+  function reSelectTemplate(prevTemplate, newList){
+    if (!prevTemplate) return newList[Math.min(4, newList.length - 1)];
+    var bySessions = newList.find(function(t){ return t.sessions === prevTemplate.sessions; });
+    if (bySessions) return bySessions;
+    var ten = newList.find(function(t){ return t.sessions === 10; });
+    if (ten) return ten;
+    return newList.find(function(t){ return t.sessions > 0; }) || newList[0];
+  }
   var MEMBERSHIPS = [
     'Senior Couple Annual',
     'Senior Individual Annual',
@@ -5282,7 +5332,7 @@
 
   /* ============ WEEK VIEW (trainer + admin) ============
      7-day stacked schedule for a single trainer. Reused by the trainer
-     Schedule tab and the admin Cross-Cutting Schedule tab (with a trainer
+     Schedule tab and the admin Operations Schedule tab (with a trainer
      picker on top). Forward navigation is unlimited (long-range planning);
      back is capped at 4 weeks. Each day collects:
        - GX classes the trainer is scheduled to teach
@@ -6640,13 +6690,16 @@
     var c = props.client;
     var existingPkgs = getPackages(c);
 
-    var pkgTypeTuple = useState(PACKAGES[3].type); /* 10-session default */
-    var pkgType = pkgTypeTuple[0];
-    var setPkgType = pkgTypeTuple[1];
+    var pkgList = getPackagesForFacility(c.location);
+    var packagesAvailable = pkgList.list;
+    var locationFallback = pkgList.fallback;
+    var defaultTpl = packagesAvailable.find(function(t){ return t.sessions === 10; }) || packagesAvailable[Math.min(4, packagesAvailable.length - 1)];
 
-    var amountTuple = useState(function(){
-      return PACKAGES.find(function(p){ return p.type === PACKAGES[3].type; }).price;
-    });
+    var pkgIdTuple = useState(defaultTpl.id);
+    var pkgId = pkgIdTuple[0];
+    var setPkgId = pkgIdTuple[1];
+
+    var amountTuple = useState(String(defaultTpl.price));
     var amount = amountTuple[0];
     var setAmount = amountTuple[1];
 
@@ -6658,19 +6711,20 @@
     var purchaseDate = purchaseDateTuple[0];
     var setPurchaseDate = purchaseDateTuple[1];
 
-    function onPkgChange(newType){
-      setPkgType(newType);
-      var p = PACKAGES.find(function(pp){ return pp.type === newType; });
-      if (p) setAmount(p.price);
+    function onPkgChange(newId){
+      setPkgId(newId);
+      var p = packagesAvailable.find(function(pp){ return pp.id === newId; });
+      if (p) setAmount(String(p.price));
     }
 
     function submit(){
-      var pkg = PACKAGES.find(function(p){ return p.type === pkgType; });
+      var pkg = packagesAvailable.find(function(p){ return p.id === pkgId; });
       if (!pkg) { ctx.toast('Pick a package', 'error'); return; }
       var newPkg = {
         sessions: pkg.sessions,
         price: pkg.price,
         type: pkg.type,
+        template_id: pkg.id,
         amountPaid: parseFloat(amount) || pkg.price,
         purchaseDate: purchaseDate,
         paymentType: paymentType,
@@ -6703,8 +6757,13 @@
           ),
           e('div', { className: 'field' },
             e('label', null, 'Package'),
-            e('select', { value: pkgType, onChange: function(ev){ onPkgChange(ev.target.value); } },
-              PACKAGES.map(function(p){ return e('option', { key: p.type, value: p.type }, p.sessions + '-session ($' + p.price + ')'); })
+            e('select', { value: pkgId, onChange: function(ev){ onPkgChange(ev.target.value); } },
+              packagesAvailable.map(function(p){
+                return e('option', { key: p.id, value: p.id }, p.label + (p.price ? ' ($' + p.price + ')' : ''));
+              })
+            ),
+            locationFallback && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' } },
+              'Set client location to filter packages.'
             )
           ),
           e('div', { className: 'row2' },
@@ -6742,6 +6801,10 @@
     var client = props.client;
     var original = props.pkg;
 
+    var pkgList = getPackagesForFacility(client.location);
+    var packagesAvailable = pkgList.list;
+    var locationFallback = pkgList.fallback;
+
     var typeTuple = useState(original.type || '');
     var type = typeTuple[0]; var setType = typeTuple[1];
     var sessionsTuple = useState(String(original.sessions != null ? original.sessions : ''));
@@ -6754,9 +6817,32 @@
     var paymentType = paymentTypeTuple[0]; var setPaymentType = paymentTypeTuple[1];
     var totalPaidTuple = useState(String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : '')));
     var totalPaid = totalPaidTuple[0]; var setTotalPaid = totalPaidTuple[1];
+    /* template_id stamped when admin picks from the Apply template
+       dropdown. Cleared when admin manually edits the type to something
+       off-list. */
+    var templateIdTuple = useState(original.template_id || '');
+    var templateId = templateIdTuple[0]; var setTemplateId = templateIdTuple[1];
 
     var errorTuple = useState(null);
     var error = errorTuple[0]; var setError = errorTuple[1];
+
+    function applyTemplate(newId){
+      if (!newId) { setTemplateId(''); return; }
+      var t = packagesAvailable.find(function(p){ return p.id === newId; });
+      if (!t) return;
+      setTemplateId(t.id);
+      setType(t.type);
+      setSessions(String(t.sessions));
+      setTotalPaid(String(t.price));
+    }
+    function onTypeChange(newType){
+      setType(newType);
+      /* Manual edit drops the template stamp - admin moved off-list. */
+      if (templateId) {
+        var t = packagesAvailable.find(function(p){ return p.id === templateId; });
+        if (!t || t.type !== newType) setTemplateId('');
+      }
+    }
 
     var sessionsInt = parseInt(sessions, 10);
     var sessionsUsedInt = parseInt(sessionsUsed, 10);
@@ -6767,7 +6853,8 @@
       (isNaN(sessionsUsedInt) ? '' : String(sessionsUsedInt)) !== String(original.sessionsUsed != null ? original.sessionsUsed : 0) ||
       purchaseDate !== (original.purchaseDate || '') ||
       paymentType !== (original.paymentType || '') ||
-      totalPaid !== String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : ''))
+      totalPaid !== String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : '')) ||
+      templateId !== (original.template_id || '')
     );
 
     function validate(){
@@ -6792,7 +6879,8 @@
         is_active: sessionsRemaining > 0,
         purchaseDate: purchaseDate || null,
         paymentType: paymentType || null,
-        amountPaid: (paid == null || isNaN(paid)) ? null : paid
+        amountPaid: (paid == null || isNaN(paid)) ? null : paid,
+        template_id: templateId || null
       });
       var updatedClient = Object.assign({}, client, {
         packages: (client.packages || []).map(function(p){
@@ -6815,11 +6903,28 @@
             'Editing a package on ', e('b', null, client.name), '. Use this to fix accidental purchase entries.'
           ),
           e('div', { className: 'field' },
+            e('label', null, 'Apply template'),
+            e('select', {
+              value: templateId,
+              onChange: function(ev){ applyTemplate(ev.target.value); }
+            },
+              e('option', { value: '' }, '(custom - keep current values)'),
+              packagesAvailable.map(function(p){
+                return e('option', { key: p.id, value: p.id }, p.label + (p.price ? ' ($' + p.price + ')' : ''));
+              })
+            ),
+            e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' } },
+              locationFallback
+                ? 'Set client location to filter by facility. Picking a template overwrites type, sessions, and total paid.'
+                : 'Picking a template overwrites type, sessions, and total paid. You can still adjust the fields below afterwards.'
+            )
+          ),
+          e('div', { className: 'field' },
             e('label', null, 'Package type *'),
             e('input', {
               type: 'text', value: type,
-              onChange: function(ev){ setType(ev.target.value); },
-              placeholder: 'E.g. Personal-10'
+              onChange: function(ev){ onTypeChange(ev.target.value); },
+              placeholder: 'E.g. CMRC-10'
             })
           ),
           e('div', { className: 'row2' },
@@ -6983,18 +7088,28 @@
 
     var formTuple = useState(function(){
       if (existing) {
+        var existingLoc = existing.location;
+        var existingList = getPackagesForFacility(existingLoc).list;
         return {
           name: existing.name,
           phone: existing.phone || '',
           email: existing.email || '',
-          location: existing.location,
+          location: existingLoc,
           datePurchased: existing.datePurchased,
-          pkgIdx: (function(){
+          pkgId: (function(){
             var existingPkgs = getPackages(existing);
             var firstPkg = existingPkgs[0];
-            if (!firstPkg) return 2;
-            var idx = PACKAGES.findIndex(function(p){ return p.sessions === firstPkg.sessions; });
-            return idx === -1 ? 2 : idx;
+            if (!firstPkg) {
+              var fallback = existingList.find(function(t){ return t.sessions === 5; }) || existingList[Math.min(3, existingList.length - 1)];
+              return fallback.id;
+            }
+            if (firstPkg.template_id) {
+              var match = existingList.find(function(t){ return t.id === firstPkg.template_id; });
+              if (match) return match.id;
+            }
+            var bySessions = existingList.find(function(t){ return t.sessions === firstPkg.sessions; });
+            if (bySessions) return bySessions.id;
+            return existingList[0].id;
           })(),
           paymentType: existing.paymentType || 'Card',
           teamMember: existing.teamMember || '',
@@ -7006,13 +7121,16 @@
         };
       }
       var prefill = props.prefill || {};
+      var initialLoc = prefill.location || 'CMRC';
+      var initialList = getPackagesForFacility(initialLoc).list;
+      var initialDefault = initialList.find(function(t){ return t.sessions === 5; }) || initialList[Math.min(3, initialList.length - 1)];
       return {
         name: prefill.name || '',
         phone: prefill.phone || '',
         email: prefill.email || '',
-        location: prefill.location || 'CMRC',
+        location: initialLoc,
         datePurchased: todayStr(),
-        pkgIdx: 2,
+        pkgId: initialDefault.id,
         paymentType: 'Card',
         teamMember: '',
         membershipVerified: false,
@@ -7056,16 +7174,35 @@
 
     function update(k, v){ setForm(function(f){ var n = Object.assign({}, f); n[k] = v; return n; }); }
 
+    /* When location changes, re-map the selected package template to the
+       new facility's list so we don't end up referencing a CMRC id while
+       location is Baca (or vice versa). */
+    function onLocationChange(newLoc){
+      setForm(function(f){
+        var prevList = getPackagesForFacility(f.location).list;
+        var prevTpl = prevList.find(function(t){ return t.id === f.pkgId; });
+        var newList = getPackagesForFacility(newLoc).list;
+        var nextTpl = reSelectTemplate(prevTpl, newList);
+        return Object.assign({}, f, { location: newLoc, pkgId: nextTpl.id });
+      });
+    }
+
+    var pkgList = getPackagesForFacility(form.location);
+    var packagesAvailable = pkgList.list;
+    var locationFallback = pkgList.fallback;
+    var selectedPkg = packagesAvailable.find(function(p){ return p.id === form.pkgId; }) || packagesAvailable[0];
+
     function submit(){
       var errs = intakeFieldErrors(form);
       setErrors(errs);
       if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
       if (!form.trainerName) { ctx.toast('Trainer is required', 'error'); return; }
-      var pkg = PACKAGES[form.pkgIdx];
+      var pkg = selectedPkg;
       var pkgRecord = {
         sessions: pkg.sessions,
         price: pkg.price,
         type: pkg.type,
+        template_id: pkg.id,
         amountPaid: pkg.price,
         purchaseDate: form.datePurchased,
         paymentType: form.paymentType,
@@ -7158,7 +7295,7 @@
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Location'),
-              e('select', { value: form.location, onChange: function(ev){ update('location', ev.target.value); } },
+              e('select', { value: form.location, onChange: function(ev){ onLocationChange(ev.target.value); } },
                 LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
               )
             ),
@@ -7170,17 +7307,21 @@
           e('div', { className: 'field' },
             e('label', null, 'Package'),
             e('div', { className: 'package-grid' },
-              PACKAGES.map(function(p, i){
+              packagesAvailable.map(function(p){
+                var sessionsLabel = p.sessions === 0 ? 'Consult' : (p.sessions === 1 ? 'session' : 'sessions');
                 return e('button', {
-                  key: i,
-                  className: 'pkg-tile' + (form.pkgIdx === i ? ' selected' : ''),
-                  onClick: function(){ update('pkgIdx', i); }
+                  key: p.id,
+                  className: 'pkg-tile' + (form.pkgId === p.id ? ' selected' : ''),
+                  onClick: function(){ update('pkgId', p.id); }
                 },
-                  e('div', { className: 'sessions' }, p.sessions),
-                  e('div', { className: 'label' }, p.sessions === 1 ? 'session' : 'sessions'),
+                  e('div', { className: 'sessions' }, p.sessions === 0 ? '·' : p.sessions),
+                  e('div', { className: 'label' }, p.sessions === 0 ? sessionsLabel : sessionsLabel),
                   e('div', { className: 'price' }, formatMoney(p.price))
                 );
               })
+            ),
+            locationFallback && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' } },
+              'Set client location to filter packages.'
             )
           ),
           e('div', { className: 'field' },
@@ -7222,7 +7363,7 @@
             e('div', { className: 'field' },
               e('label', null, 'Amount Paid'),
               e('input', {
-                value: formatMoney(PACKAGES[form.pkgIdx].price),
+                value: formatMoney(selectedPkg.price),
                 readOnly: true,
                 style: { background: 'var(--cream-2)' }
               })
@@ -12494,7 +12635,7 @@
           [
             { id: 'pt',   label: '\ud83c\udfcb\ufe0f Personal Training', sub: 'PT clients, queue, referrals' },
             { id: 'gx',   label: '\ud83c\udfc3 Group Exercise',       sub: 'classes, sub approvals' },
-            { id: 'both', label: '\u2696\ufe0f Cross-Cutting',         sub: 'audit, admin time, WROs, team' }
+            { id: 'both', label: '\u2696\ufe0f Operations',           sub: 'audit, admin time, WROs, team' }
           ].map(function(d){
             var active = domain === d.id;
             /* Aggregate badges for the domain */
