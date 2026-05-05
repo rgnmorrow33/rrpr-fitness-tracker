@@ -3954,6 +3954,88 @@
       });
     }, []);
 
+    /* One-time class dedup cleanup. Imports prior to the tightened
+       classMatchKey could create duplicate class records that shared the
+       natural key (name + dayOfWeek + startTime + location + instructor).
+       After load, group active classes by that key, keep the most recent
+       by createdAt (tiebreak by id), soft-delete the rest with
+       deleted_by='import-dedup-cleanup', and stamp an audit entry on the
+       survivor noting the deleted ids. Idempotent - subsequent loads
+       find no duplicate groups and bail out. The ref guard prevents
+       re-running within a single session even if classes changes again. */
+    var dedupCleanupRanRef = useRef(false);
+    useEffect(function(){
+      if (loading) return;
+      if (dedupCleanupRanRef.current) return;
+      var current = classesTuple[0] || [];
+      if (current.length === 0) return;
+
+      function keyOf(c){
+        return [
+          (c.name || '').toLowerCase().trim(),
+          (c.dayOfWeek || '').toUpperCase().trim(),
+          (c.startTime || c.time || '').trim(),
+          (c.location || '').toLowerCase().trim(),
+          (c.instructor || '').toLowerCase().trim()
+        ].join('|');
+      }
+
+      var groups = {};
+      current.forEach(function(c){
+        if (c.deleted_at) return;
+        var k = keyOf(c);
+        if (!groups[k]) groups[k] = [];
+        groups[k].push(c);
+      });
+
+      var dupGroups = [];
+      Object.keys(groups).forEach(function(k){
+        var g = groups[k];
+        if (g.length < 2) return;
+        var sorted = g.slice().sort(function(a, b){
+          var aT = a.createdAt || '';
+          var bT = b.createdAt || '';
+          if (aT !== bT) return aT > bT ? -1 : 1;
+          return (a.id || '') < (b.id || '') ? -1 : 1;
+        });
+        dupGroups.push({ winnerId: sorted[0].id, loserIds: sorted.slice(1).map(function(x){ return x.id; }) });
+      });
+
+      dedupCleanupRanRef.current = true;
+      if (dupGroups.length === 0) return;
+
+      var totalLosers = 0;
+      dupGroups.forEach(function(g){ totalLosers += g.loserIds.length; });
+      console.info('Dedup cleanup: ' + dupGroups.length + ' group(s), ' + totalLosers + ' duplicate(s) soft-deleted');
+
+      var winnerMap = {};
+      var loserMap = {};
+      dupGroups.forEach(function(g){
+        winnerMap[g.winnerId] = g.loserIds;
+        g.loserIds.forEach(function(id){ loserMap[id] = true; });
+      });
+      var nowIso = new Date().toISOString();
+
+      setClasses(function(list){
+        return list.map(function(c){
+          if (winnerMap[c.id]) {
+            return appendAuditEntry(c, session, 'dedup_cleanup', {
+              entity_type: 'class',
+              target_id: c.id,
+              changes: { soft_deleted_duplicate_ids: winnerMap[c.id] }
+            });
+          }
+          if (loserMap[c.id]) {
+            return Object.assign({}, c, {
+              deleted_at: nowIso,
+              deleted_by: 'import-dedup-cleanup'
+            });
+          }
+          return c;
+        });
+      });
+    }, [loading]);
+
     /* v2.3: queue entries from earlier versions need source/followUpBy/
        statusHistory backfilled. Idempotent: only fixes records missing fields. */
     useEffect(function(){
@@ -4691,11 +4773,17 @@
 
       var dayBeforeStart = toYMD(addDays(parseYMD(startYMD), -1));
 
+      /* Natural key for matching a CSV row to an existing class. Includes
+         startTime and instructor so re-imports are idempotent and rows
+         that differ in time or instructor are treated as separate classes
+         (old one ends via Pass 3 if it was tied to a prior version). */
       function classMatchKey(c){
         return [
           (c.name || '').toLowerCase().trim(),
           (c.location || '').toLowerCase().trim(),
-          (c.dayOfWeek || '').toUpperCase().trim()
+          (c.dayOfWeek || '').toUpperCase().trim(),
+          (c.startTime || c.time || '').trim(),
+          (c.instructor || '').toLowerCase().trim()
         ].join('|');
       }
 
