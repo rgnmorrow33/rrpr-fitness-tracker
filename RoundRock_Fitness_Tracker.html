@@ -1604,6 +1604,40 @@
       return function(){
         try { supabaseClient.removeChannel(channel); } catch(_){}
       };
+    },
+    /* Phase 3: emit helpers used by trigger hooks. Fire-and-forget; never
+       throw, never block the caller's primary action. Failures log to
+       console - the bell can miss a row without the underlying class /
+       sub state being wrong. localStorage mode is a no-op (matches the
+       rest of this storage). */
+    emit: function(targetTrainerId, type, payload){
+      if (!targetTrainerId) return Promise.resolve();
+      if (STORAGE_MODE !== 'supabase') return Promise.resolve();
+      return supabaseClient.from('notifications').insert({
+        target_trainer_id: targetTrainerId,
+        type: type,
+        payload: payload || {}
+      }).then(function(res){
+        if (res.error) console.error('Notification emit failed:', res.error);
+      }).catch(function(err){
+        console.error('Notification emit threw:', err);
+      });
+    },
+    emitMany: function(rows){
+      var clean = (rows || []).filter(function(r){ return r && r.target_trainer_id; });
+      if (clean.length === 0) return Promise.resolve();
+      if (STORAGE_MODE !== 'supabase') return Promise.resolve();
+      return supabaseClient.from('notifications').insert(clean.map(function(r){
+        return {
+          target_trainer_id: r.target_trainer_id,
+          type: r.type,
+          payload: r.payload || {}
+        };
+      })).then(function(res){
+        if (res.error) console.error('Notification emitMany failed:', res.error);
+      }).catch(function(err){
+        console.error('Notification emitMany threw:', err);
+      });
     }
   };
 
@@ -4116,6 +4150,13 @@
       });
     }
     function addSubAssignment(classId, assignment){
+      /* Snapshot prev-state BEFORE setClasses so the emit's open-vs-open
+         dedupe is correct even under StrictMode double-invoke of the
+         updater fn. */
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      var prevForDate = prevClass && (prevClass.subAssignments || [])
+        .find(function(s){ return s.date === assignment.date; });
+
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
@@ -4125,6 +4166,30 @@
           return copy;
         });
       });
+
+      /* sub_posted: fan out to all active trainers minus requester. Only
+         fires on a genuinely new open post (skip if prev was already open -
+         re-saves of the same date shouldn't re-spam). */
+      if (assignment.status === 'open' && (!prevForDate || prevForDate.status !== 'open')) {
+        var className = prevClass ? prevClass.name : null;
+        var requesterId = session && session.trainer_id;
+        var rows = (trainerProfiles || [])
+          .filter(function(p){ return p.is_active !== false && p.id && p.id !== requesterId; })
+          .map(function(p){
+            return {
+              target_trainer_id: p.id,
+              type: 'sub_posted',
+              payload: {
+                className: className,
+                date: assignment.date,
+                time: prevClass ? prevClass.startTime : null,
+                classId: classId,
+                subAssignmentId: assignment.id
+              }
+            };
+          });
+        storage.notifications.emitMany(rows);
+      }
     }
     function deleteSubAssignment(classId, assignmentId){
       setClasses(function(list){
@@ -4137,6 +4202,10 @@
       });
     }
     function addCancellation(classId, cancellation){
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      var prevForDate = prevClass && (prevClass.cancellations || [])
+        .find(function(x){ return x.date === cancellation.date; });
+
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
@@ -4146,6 +4215,21 @@
           return copy;
         });
       });
+
+      /* class_canceled: target the regular instructor. V1 simple rule -
+         ignores any active sub for that date (a sub claimer would also
+         want to know but that's a Phase 4 enrichment). Only fires on a
+         genuinely new cancellation, not re-saves of the same date. */
+      if (!prevForDate && prevClass) {
+        var instructorId = trainerIdByName(prevClass.instructor);
+        if (!_selfSuppress(instructorId)) {
+          storage.notifications.emit(instructorId, 'class_canceled', {
+            className: prevClass.name,
+            date: cancellation.date,
+            classId: classId
+          });
+        }
+      }
     }
     function deleteCancellation(classId, cancellationId){
       setClasses(function(list){
@@ -4490,6 +4574,10 @@
       });
     }
     function claimSub(classId, subId, claimerName){
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      var prevSub = prevClass && (prevClass.subAssignments || [])
+        .find(function(s){ return s.id === subId; });
+
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
@@ -4506,6 +4594,21 @@
           return copy;
         });
       });
+
+      /* sub_claimed: notify the original requester. Only on the open ->
+         claimed transition (skip re-claims of an already-claimed row). */
+      if (prevSub && prevSub.status === 'open') {
+        var requesterId = trainerIdByName(prevSub.requestedBy || prevSub.originalInstructor);
+        if (!_selfSuppress(requesterId)) {
+          storage.notifications.emit(requesterId, 'sub_claimed', {
+            trainerName: claimerName,
+            className: prevClass ? prevClass.name : null,
+            date: prevSub.date,
+            classId: classId,
+            subAssignmentId: subId
+          });
+        }
+      }
     }
 
     /* v2.6: schedule version functions ===============================
@@ -4776,6 +4879,43 @@
         after: opts.after !== undefined ? opts.after : cl
       }, opts.changes !== undefined ? { changes: opts.changes } : {}));
       upsertClass(stamped);
+
+      /* class_assigned + class_rescheduled. Both target after.instructor
+         (newly-scheduled trainer). On combined edits both fire per spec.
+         Schedule version activations bypass auditedUpsertClass and write
+         directly via upsertClass + setClasses, so they don't fan out
+         here - intentionally excluded for V1. */
+      var newInstructorId = trainerIdByName(cl.instructor);
+      if (action === 'create' && cl.instructor && !_selfSuppress(newInstructorId)) {
+        storage.notifications.emit(newInstructorId, 'class_assigned', {
+          className: cl.name,
+          date: cl.dayOfWeek,
+          classId: cl.id
+        });
+      } else if (action === 'update' && before) {
+        var rescheduled =
+          before.dayOfWeek !== cl.dayOfWeek ||
+          before.startTime !== cl.startTime ||
+          before.endTime !== cl.endTime;
+        if (rescheduled && cl.instructor && !_selfSuppress(newInstructorId)) {
+          storage.notifications.emit(newInstructorId, 'class_rescheduled', {
+            className: cl.name,
+            oldDate: before.dayOfWeek,
+            newDate: cl.dayOfWeek,
+            oldTime: before.startTime,
+            newTime: cl.startTime,
+            classId: cl.id
+          });
+        }
+        var reassigned = before.instructor !== cl.instructor && !!cl.instructor;
+        if (reassigned && !_selfSuppress(newInstructorId)) {
+          storage.notifications.emit(newInstructorId, 'class_assigned', {
+            className: cl.name,
+            date: cl.dayOfWeek,
+            classId: cl.id
+          });
+        }
+      }
     }
     function softDeleteClass(id){
       var before = classes.find(function(x){ return x.id === id; });
@@ -4813,6 +4953,20 @@
           }, opts));
         });
       });
+    }
+
+    /* Notification trigger hooks (Phase 3). Helpers used by addSubAssignment,
+       claimSub, addCancellation, auditedUpsertClass to fan out emits. */
+    function trainerIdByName(name){
+      if (!name) return null;
+      var p = (trainerProfiles || []).find(function(x){ return trainerNameMatches(name, x.name); });
+      return p ? p.id : null;
+    }
+    /* Self-suppress: skip emit if the target is the current actor. The
+       requester is also pre-filtered out of sub_posted target lists, but
+       this is the belt-and-suspenders check that all five hooks share. */
+    function _selfSuppress(targetId){
+      return !targetId || (session && targetId === session.trainer_id);
     }
 
     /* Notification mutators. Optimistic local update first, then PATCH;
