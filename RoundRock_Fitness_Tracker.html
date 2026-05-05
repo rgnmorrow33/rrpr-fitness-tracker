@@ -6750,10 +6750,19 @@
     var tabFilterTuple = useState(null);
     var tabFilter = tabFilterTuple[0]; var setTabFilter = tabFilterTuple[1];
 
+    /* Nav generation counter. Bumped on every navigate() call and folded
+       into the tab content's key so React remounts the tab on every nav -
+       even when re-tapping the current tab. That clears any inner detail
+       state (clientDetailId / classDetailId / sessionDetail) so the
+       bottom-nav buttons reliably "go home" from a drilled-in view. */
+    var navGenTuple = useState(0);
+    var navGen = navGenTuple[0]; var setNavGen = navGenTuple[1];
+
     function navigate(t, opts){
       setHeaderContext(null);
       setTabFilter((opts && opts.filter) || null);
       setTab(t);
+      setNavGen(function(g){ return g + 1; });
     }
 
     var trainerName = ctx.session.name;
@@ -6789,12 +6798,13 @@
     }).length;
 
     var content;
-    if (tab === 'today') content = e(TrainerToday, { ctx: ctx, setHeaderContext: setHeaderContext });
-    else if (tab === 'schedule') content = e(TrainerWeekView, { ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
-    else if (tab === 'pt') content = e(TrainerPT, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
-    else if (tab === 'gx') content = e(TrainerGX, { ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
-    else if (tab === 'leads') content = e(TrainerLeadsView, { ctx: ctx });
-    else if (tab === 'time_card') content = e(TimeCardView, { ctx: ctx });
+    var contentKey = tab + ':' + navGen;
+    if (tab === 'today') content = e(TrainerToday, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext });
+    else if (tab === 'schedule') content = e(TrainerWeekView, { key: contentKey, ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
+    else if (tab === 'pt') content = e(TrainerPT, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
+    else if (tab === 'gx') content = e(TrainerGX, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
+    else if (tab === 'leads') content = e(TrainerLeadsView, { key: contentKey, ctx: ctx });
+    else if (tab === 'time_card') content = e(TimeCardView, { key: contentKey, ctx: ctx });
 
     return e('div', null,
       e('div', { className: 'header' },
