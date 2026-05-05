@@ -6987,6 +6987,7 @@
           end: cls.endTime || cls.startTime || '00:00',
           color: CLASS_TYPE_COLOR[cls.classType] || 'var(--teal)',
           label: cls.name || 'Class',
+          location: cls.location || '',
           onClick: function(){
             setClassDetailId(cls.id);
             setHeaderContext({
@@ -7012,6 +7013,7 @@
             end: endTime,
             color: 'var(--teal)',
             label: client.name,
+            location: client.location || '',
             onClick: function(){
               if (s.status === 'scheduled') {
                 setSignOff({ client: client, session: s });
@@ -7041,6 +7043,7 @@
           end: endTime,
           color: 'var(--gold)',
           label: w.participantName ? ('WRO · ' + w.participantName) : 'WRO',
+          location: w.location || '',
           onClick: function(){ setWroOpen(w); }
         });
       });
@@ -7057,6 +7060,7 @@
           end: it.timeOut || it.timeIn || '00:00',
           color: 'var(--slate)',
           label: aLabel,
+          location: '',
           onClick: function(){ setAdminOpen(it); }
         });
       });
@@ -7067,19 +7071,25 @@
       return events;
     }
 
-    /* Lane assignment for the day grid: overlapping events drop to the
-       next free lane so they don't visually collide. */
-    function assignLanes(events){
+    /* Lane assignment for the day grid: events whose visible block would
+       overlap drop to the next free lane so they don't collide. The
+       "effective end" optionally pads short events out to a minimum
+       width so multi-line content stays readable; if that pushes the
+       block past the next event's start, the next event gets a new
+       lane. */
+    function assignLanes(events, minWidthMin){
+      var pad = Math.max(0, minWidthMin || 0);
       var laneEnds = [];
       events.forEach(function(ev){
         var startMin = timeToMin(ev.start);
         var endMin = timeToMin(ev.end);
+        var effectiveEnd = Math.max(endMin, startMin + pad);
         var assigned = -1;
         for (var i = 0; i < laneEnds.length; i++) {
           if (laneEnds[i] <= startMin) { assigned = i; break; }
         }
         if (assigned === -1) { assigned = laneEnds.length; laneEnds.push(0); }
-        laneEnds[assigned] = endMin;
+        laneEnds[assigned] = effectiveEnd;
         ev.lane = assigned;
       });
       return Math.max(1, laneEnds.length);
@@ -7230,8 +7240,18 @@
             ),
             allTrainers.map(function(name){
               var events = buildEvents(name, dayYMD);
-              var laneCount = assignLanes(events);
-              var laneH = 26;
+              /* Multi-line blocks need a minimum pixel width so title +
+                 time range + location stay readable. Lane assignment uses
+                 an effective minimum end (in minutes) derived from that
+                 floor, so if the inflated block bleeds past the next
+                 event's start time the next event drops to a new lane.
+                 Time scale becomes a guide rather than a strict
+                 constraint - intentional per spec. */
+              var pxPerMin = stripW / WINDOW_SIZE;
+              var MIN_BLOCK_PX = 140;
+              var minWidthMin = MIN_BLOCK_PX / pxPerMin;
+              var laneCount = assignLanes(events, minWidthMin);
+              var laneH = 62;
               var rowH = Math.max(1, laneCount) * laneH + 8;
               return e('div', {
                 key: 'r-' + name,
@@ -7266,31 +7286,41 @@
                     var startMin = Math.max(WINDOW_START, Math.min(WINDOW_END, startMinRaw));
                     var endMin = Math.max(WINDOW_START, Math.min(WINDOW_END, endMinRaw));
                     if (endMin <= startMin) endMin = Math.min(WINDOW_END, startMin + 30);
-                    var leftPx = ((startMin - WINDOW_START) / WINDOW_SIZE) * stripW;
-                    var widthPx = Math.max(28, ((endMin - startMin) / WINDOW_SIZE) * stripW);
+                    var leftPx = (startMin - WINDOW_START) * pxPerMin;
+                    var durationPx = (endMin - startMin) * pxPerMin;
+                    var widthPx = Math.max(MIN_BLOCK_PX, durationPx);
+                    var timeRange = formatTime12(ev.start) + ' - ' + formatTime12(ev.end);
                     return e('div', {
                       key: 'ev-' + i,
                       onClick: ev.onClick,
-                      title: formatTime12(ev.start) + '–' + formatTime12(ev.end) + ' · ' + ev.label,
+                      title: timeRange + ' · ' + ev.label + (ev.location ? ' · ' + ev.location : ''),
                       style: {
                         position: 'absolute',
                         left: leftPx + 'px',
                         width: widthPx + 'px',
                         top: (ev.lane * laneH + 4) + 'px',
-                        height: (laneH - 4) + 'px',
+                        height: (laneH - 6) + 'px',
                         background: ev.color,
                         color: '#fff',
-                        borderRadius: '4px',
-                        padding: '0 6px',
+                        borderRadius: '6px',
+                        padding: '6px 8px',
                         fontSize: '11px',
                         fontWeight: 600,
                         cursor: 'pointer',
+                        boxSizing: 'border-box',
                         overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        lineHeight: (laneH - 4) + 'px'
+                        whiteSpace: 'normal',
+                        wordBreak: 'break-word',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px',
+                        lineHeight: 1.2
                       }
-                    }, formatTime12(ev.start) + ' · ' + ev.label);
+                    },
+                      e('div', { style: { fontWeight: 700, fontSize: '12px' } }, ev.label),
+                      e('div', { style: { opacity: 0.92 } }, timeRange),
+                      ev.location && e('div', { style: { opacity: 0.85 } }, ev.location)
+                    );
                   })
                 )
               );
@@ -7393,24 +7423,32 @@
                   events.length === 0
                     ? e('div', { style: { color: 'var(--slate-soft)', fontSize: '11px', fontStyle: 'italic', textAlign: 'center', paddingTop: '6px' } }, '—')
                     : events.map(function(ev, j){
+                        var timeRange = formatTime12(ev.start) + ' - ' + formatTime12(ev.end);
                         return e('div', {
                           key: 'b-' + j,
                           onClick: ev.onClick,
-                          title: formatTime12(ev.start) + '–' + formatTime12(ev.end) + ' · ' + ev.label,
+                          title: timeRange + ' · ' + ev.label + (ev.location ? ' · ' + ev.location : ''),
                           style: {
                             background: ev.color,
                             color: '#fff',
-                            borderRadius: '4px',
-                            padding: '3px 6px',
-                            marginBottom: '3px',
+                            borderRadius: '6px',
+                            padding: '5px 7px',
+                            marginBottom: '4px',
                             fontSize: '11px',
                             fontWeight: 600,
                             cursor: 'pointer',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap'
+                            whiteSpace: 'normal',
+                            wordBreak: 'break-word',
+                            lineHeight: 1.25,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '1px'
                           }
-                        }, formatTime12(ev.start) + ' · ' + ev.label);
+                        },
+                          e('div', { style: { fontWeight: 700, fontSize: '11.5px' } }, ev.label),
+                          e('div', { style: { opacity: 0.92 } }, timeRange),
+                          ev.location && e('div', { style: { opacity: 0.85 } }, ev.location)
+                        );
                       })
                 );
               })
