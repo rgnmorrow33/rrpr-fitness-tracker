@@ -1104,6 +1104,19 @@
      for keys not in the map. Always sets updated_at on toSupabase; never
      sets created_at (DB default fires on insert, untouched on update).
      drop[] are local-only fields stripped on write. */
+  /* True-uuid generator used at the Supabase boundary. Throws when
+     crypto.randomUUID isn't available rather than falling back to a
+     non-uuid string (which would later fail the uuid-typed id columns
+     with a confusing "invalid input syntax for uuid" error). uid() at
+     line ~1899 still has a safe fallback for client-side ids that never
+     touch Supabase. */
+  function freshUuid(){
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    throw new Error('crypto.randomUUID is not available - cannot generate uuid for Supabase row');
+  }
+
   function makeFieldTranslator(map, opts){
     var camelToSnake = {};
     var snakeToCamel = {};
@@ -1116,7 +1129,7 @@
     if (drop.indexOf('createdAt') === -1) drop.push('createdAt');
     return {
       toSupabase: function(o){
-        var out = { id: o.id || uid() };
+        var out = { id: o.id || freshUuid() };
         Object.keys(o).forEach(function(k){
           if (k === 'id') return;
           if (drop.indexOf(k) !== -1) return;
@@ -1227,6 +1240,10 @@
     trainers: {
       toSupabase: function(profile){
         var row = {
+          /* Always send a uuid - the trainers.id column is uuid NOT NULL.
+             Existing profiles keep their id; locally-added profiles get
+             a fresh uuid stamped at the boundary. */
+          id: profile.id || freshUuid(),
           name: profile.name,
           role: profile.role || 'trainer',
           role_tier: profile.role_tier || 'trainer',
@@ -1236,7 +1253,6 @@
           deleted_by: profile.deleted_by || null,
           updated_at: new Date().toISOString()
         };
-        if (profile.id) row.id = profile.id;
         if (profile.audit_log !== undefined) row.audit_log = profile.audit_log || [];
         return row;
       },
