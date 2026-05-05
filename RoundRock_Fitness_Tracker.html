@@ -1280,9 +1280,11 @@
     },
 
     /* Schedule versions: flat columns (id, label, effective_date,
-       is_active, created_by, created_at) plus a data jsonb. The local
-       'classes' array nests under data.classes. endDate and activatedAt
-       have no flat columns and live in data too. */
+       is_active, created_by, created_at, deleted_at, deleted_by) plus a
+       data jsonb. The local 'classes' array nests under data.classes.
+       endDate and activatedAt have no flat columns and live in data too.
+       deletedAt/deletedBy are flat so the SQL "where deleted_at is not
+       null" query the user runs against Supabase works. */
     scheduleVersions: {
       toSupabase: function(v){
         return {
@@ -1291,6 +1293,8 @@
           effective_date: v.startDate || null,
           is_active: !!v.activatedAt,
           created_by: v.createdBy || getAppSessionName(),
+          deleted_at: v.deletedAt || null,
+          deleted_by: v.deletedBy || null,
           data: {
             endDate: v.endDate || null,
             activatedAt: v.activatedAt || null,
@@ -1309,7 +1313,9 @@
           classes: d.classes || [],
           activatedAt: d.activatedAt || null,
           createdAt: row.created_at,
-          createdBy: row.created_by
+          createdBy: row.created_by,
+          deletedAt: row.deleted_at || null,
+          deletedBy: row.deleted_by || null
         };
       }
     },
@@ -4784,8 +4790,29 @@
         return list.concat([v]);
       });
     }
+    /* Soft-delete: stamp deletedAt / deletedBy so the row stays in
+       Supabase (the upsert save path persists the fields) and the UI
+       hides it from the active list. Restore via restoreScheduleVersion.
+       Hard-delete was the old behaviour but it never actually persisted
+       since the makeEntity save path is upsert-only - the row would
+       reappear on the next refresh. */
     function deleteScheduleVersion(id){
-      setScheduleVersions(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+      var actor = ctxCurrentUserName() || 'unknown';
+      var nowIso = new Date().toISOString();
+      setScheduleVersions(function(list){
+        return list.map(function(x){
+          if (x.id !== id) return x;
+          return Object.assign({}, x, { deletedAt: nowIso, deletedBy: actor });
+        });
+      });
+    }
+    function restoreScheduleVersion(id){
+      setScheduleVersions(function(list){
+        return list.map(function(x){
+          if (x.id !== id) return x;
+          return Object.assign({}, x, { deletedAt: null, deletedBy: null });
+        });
+      });
     }
     /* Apply a schedule version: reconcile classes against the version's
        roster. Idempotent; safe to re-run.
@@ -4932,11 +4959,13 @@
 
     /* v2.6: auto-activation. On every render where today >= a version's
        startDate AND that version isn't already activated, activate it.
-       Idempotent: activatedAt prevents repeat activation. */
+       Soft-deleted versions are skipped so a deleted future-dated row
+       can't quietly activate itself. Idempotent: activatedAt prevents
+       repeat activation. */
     useEffect(function(){
       var todayY = todayStr();
       var pending = (schedVersionsTuple[0] || []).filter(function(v){
-        return v.startDate && v.startDate <= todayY && !v.activatedAt;
+        return v.startDate && v.startDate <= todayY && !v.activatedAt && !v.deletedAt;
       }).sort(function(a, b){ return (a.startDate || '') < (b.startDate || '') ? -1 : 1; });
       pending.forEach(function(v){ activateScheduleVersion(v.id); });
     }, [scheduleVersions]);
@@ -5280,6 +5309,7 @@
       scheduleVersions: scheduleVersions,
       saveScheduleVersion: saveScheduleVersion,
       deleteScheduleVersion: deleteScheduleVersion,
+      restoreScheduleVersion: restoreScheduleVersion,
       activateScheduleVersion: activateScheduleVersion,
       /* Notifications (Phase 2 read side) */
       notifications: notifications,
@@ -6103,18 +6133,23 @@
       return occurrencesInWindow(ctx.classes, todayDate, todayDate, ctx.closures);
     }, [ctx.classes, ctx.closures, todayYMD]);
 
-    /* Filter to classes I'm teaching today (primary instructor or subbing) */
+    /* Filter to classes I'm teaching today (primary instructor or
+       subbing). When a sub assignment exists for this date with status
+       claimed or approved, the original instructor is no longer
+       responsible for that slot - hide it from their day. The sub sees
+       it on their day instead. Per-date scoping is automatic since
+       subAssignments are keyed by date. */
     var myClassesToday = todayOccs.filter(function(o){
       var c = o.cls;
       if (!c) return false;
-      /* Primary instructor */
-      if (trainerNameMatches(trainerName, c.instructor)) return true;
-      /* Sub assignment for this date */
       var sub = (c.subAssignments || []).find(function(s){
         return s.date === o.date && (subStatus(s) === 'claimed' || subStatus(s) === 'approved');
       });
-      if (sub && trainerNameMatches(trainerName, sub.subInstructor || sub.claimedBy)) return true;
-      return false;
+      var subTaken = !!sub;
+      var subName = sub && (sub.subInstructor || sub.claimedBy);
+      var isOriginal = trainerNameMatches(trainerName, c.instructor);
+      var isSub = subName && trainerNameMatches(trainerName, subName);
+      return (isOriginal && !subTaken) || isSub;
     }).sort(function(a, b){ return (a.time || '') < (b.time || '') ? -1 : 1; });
 
     /* Today's PT sessions for this trainer, plus any pre-scheduled
@@ -6564,8 +6599,15 @@
     var gxByDate = {};
     occs.forEach(function(o){
       var assignedSub = o.assignedSub;
-      var teaching = trainerNameMatches(trainerName, o.cls.instructor) ||
-                     (assignedSub && trainerNameMatches(trainerName, assignedSub.subInstructor || assignedSub.claimedBy));
+      var subStatusVal = assignedSub ? subStatus(assignedSub) : null;
+      var subTaken = subStatusVal === 'claimed' || subStatusVal === 'approved';
+      var subName = assignedSub && (assignedSub.subInstructor || assignedSub.claimedBy);
+      var isOriginal = trainerNameMatches(trainerName, o.cls.instructor);
+      var isSub = subName && trainerNameMatches(trainerName, subName);
+      /* Hide the original's slot for that date once a sub has claimed or
+         been approved. Sub sees the class on their schedule for that
+         date. */
+      var teaching = (isOriginal && !subTaken) || isSub;
       if (!teaching) return;
       if (!gxByDate[o.date]) gxByDate[o.date] = [];
       gxByDate[o.date].push(o);
@@ -6972,13 +7014,20 @@
       var dDate = parseYMD(dateYMD);
 
       /* GX classes - taught or actively subbed by this trainer. Skip
-         cancelled / closed occurrences. */
+         cancelled / closed occurrences. When a sub for this date is
+         claimed or approved, the original instructor's slot is hidden;
+         the sub sees the class instead. Per-date scoping is automatic
+         since assignedSub is per occurrence. */
       var occs = occurrencesInWindow(ctx.classes, dDate, dDate, ctx.closures);
       occs.forEach(function(o){
         if (o.isClosed || o.isCancelled) return;
         var assignedSub = o.assignedSub;
-        var teaching = trainerNameMatches(trainerName, o.cls.instructor) ||
-                       (assignedSub && trainerNameMatches(trainerName, assignedSub.subInstructor || assignedSub.claimedBy));
+        var subStatusVal = assignedSub ? subStatus(assignedSub) : null;
+        var subTaken = subStatusVal === 'claimed' || subStatusVal === 'approved';
+        var subName = assignedSub && (assignedSub.subInstructor || assignedSub.claimedBy);
+        var isOriginal = trainerNameMatches(trainerName, o.cls.instructor);
+        var isSub = subName && trainerNameMatches(trainerName, subName);
+        var teaching = (isOriginal && !subTaken) || isSub;
         if (!teaching) return;
         var cls = o.cls;
         events.push({
@@ -13240,7 +13289,15 @@
      deleted). */
   function ScheduleVersionsView(props){
     var ctx = props.ctx;
-    var versions = ctx.scheduleVersions || [];
+    var allVersions = ctx.scheduleVersions || [];
+    /* Active list excludes soft-deleted rows. Admin can flip the toggle
+       below to surface deleted rows for restore. */
+    var versions = allVersions.filter(function(v){ return !v.deletedAt; });
+    var deletedVersions = allVersions.filter(function(v){ return !!v.deletedAt; });
+    var canRestoreDeleted = ctx.can && ctx.can('canRestoreDeleted');
+
+    var showDeletedTuple = useState(false);
+    var showDeleted = showDeletedTuple[0]; var setShowDeleted = showDeletedTuple[1];
 
     var modeTuple = useState('list');  // 'list' | 'new' | 'detail'
     var mode = modeTuple[0]; var setMode = modeTuple[1];
@@ -13461,10 +13518,14 @@
     }
 
     function deleteVersion(versionId){
-      if (!window.confirm('Delete this schedule version? This does NOT roll back any class reconciliation that already happened.')) return;
+      if (!window.confirm('Delete this schedule version? Soft-deletes - class reconciliation is not rolled back, and admins can restore from "Show deleted".')) return;
       ctx.deleteScheduleVersion(versionId);
       ctx.toast && ctx.toast('Version deleted', 'info');
       if (detailId === versionId) { setDetailId(null); setMode('list'); }
+    }
+    function restoreVersion(versionId){
+      ctx.restoreScheduleVersion(versionId);
+      ctx.toast && ctx.toast('Version restored', 'success');
     }
 
     if (mode === 'new') {
@@ -13726,6 +13787,53 @@
             )
           );
         }).filter(Boolean)
+      ),
+
+      /* Soft-deleted versions panel - admin only. Hidden by default;
+         toggle reveals the list with per-row Restore. */
+      canRestoreDeleted && deletedVersions.length > 0 && e('div', { style: { marginTop: '20px' } },
+        e('button', {
+          className: 'btn btn-ghost btn-sm',
+          onClick: function(){ setShowDeleted(!showDeleted); }
+        }, (showDeleted ? '\u25be Hide' : '\u25b8 Show') + ' deleted (' + deletedVersions.length + ')'),
+        showDeleted && e('div', { style: { marginTop: '8px' } },
+          deletedVersions.slice().sort(function(a, b){
+            return (a.deletedAt || '') < (b.deletedAt || '') ? 1 : -1;
+          }).map(function(v){
+            return e('div', {
+              key: 'del-' + v.id,
+              style: {
+                background: 'var(--cream-2)',
+                border: '1.5px dashed var(--border)',
+                borderRadius: '12px',
+                padding: '10px 14px',
+                marginBottom: '6px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                flexWrap: 'wrap',
+                gap: '8px',
+                opacity: 0.85
+              }
+            },
+              e('div', { style: { flex: 1, minWidth: '160px' } },
+                e('div', { style: { fontWeight: 600, color: 'var(--slate)' } },
+                  '\ud83d\uddd1 ' + v.name
+                ),
+                e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '3px' } },
+                  v.startDate + (v.endDate ? (' \u2192 ' + v.endDate) : ' \u2192 ongoing') +
+                  ' \u00b7 ' + (v.classes || []).length + ' classes' +
+                  (v.deletedAt ? (' \u00b7 deleted ' + (v.deletedAt.slice(0, 10))) : '') +
+                  (v.deletedBy ? (' by ' + v.deletedBy) : '')
+                )
+              ),
+              e('button', {
+                className: 'btn btn-ghost btn-sm',
+                onClick: function(ev){ ev.stopPropagation(); restoreVersion(v.id); }
+              }, 'Restore')
+            );
+          })
+        )
       )
     );
   }
