@@ -4710,9 +4710,13 @@
           var vc = versionKeys[key];
           if (!vc) return c;
           seenInVersion[key] = true;
-          /* Reactivate or update with version data */
+          /* Reactivate or update with version data. Class records use
+             startTime/endTime (matching the rest of the app); legacy
+             versions may carry only `time`, so accept either. */
           var copy = Object.assign({}, c);
-          if (vc.time) copy.time = vc.time;
+          if (vc.startTime) copy.startTime = vc.startTime;
+          else if (vc.time) copy.startTime = vc.time;
+          if (vc.endTime) copy.endTime = vc.endTime;
           if (vc.duration != null) copy.duration = vc.duration;
           if (vc.instructor) copy.instructor = vc.instructor;
           copy.seasonStart = startYMD;
@@ -4729,7 +4733,8 @@
             name: vc.name,
             location: vc.location,
             dayOfWeek: vc.dayOfWeek,
-            time: vc.time || '',
+            startTime: vc.startTime || vc.time || '',
+            endTime: vc.endTime || '',
             duration: vc.duration || 60,
             instructor: vc.instructor || '',
             seasonStart: startYMD,
@@ -13125,26 +13130,41 @@
         return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
       }
 
+      /* Compute endTime from startTime + duration so imported classes have
+         the same shape (startTime / endTime / duration) the rest of the
+         app reads. Without this the grid view falls back to 00:00. */
+      function addMinutesToTime(hhmm, mins){
+        var p = hhmm.split(':');
+        var total = (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0) + mins;
+        total = Math.max(0, Math.min(24 * 60 - 1, total));
+        var h = Math.floor(total / 60);
+        var m = total % 60;
+        return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+      }
+
       var rows = [];
       var errors = [];
       for (var i = 1; i < lines.length; i++) {
         var r = parseRow(lines[i]);
         var className = r[idxName] || '';
         var day = normDay(r[idxDay]);
-        var time = normTime(r[idxTime]);
+        var startTime = normTime(r[idxTime]);
         var location = idxLoc !== -1 ? (r[idxLoc] || '') : '';
         var instructor = idxInstr !== -1 ? (r[idxInstr] || '') : '';
         var dur = idxDur !== -1 ? parseInt(r[idxDur], 10) : 60;
+        if (isNaN(dur) || dur <= 0) dur = 60;
         if (!className) { errors.push('Row ' + (i+1) + ': missing class name'); continue; }
         if (!day) { errors.push('Row ' + (i+1) + ': invalid day'); continue; }
-        if (!time) { errors.push('Row ' + (i+1) + ': invalid time'); continue; }
+        if (!startTime) { errors.push('Row ' + (i+1) + ': invalid time'); continue; }
+        var endTime = addMinutesToTime(startTime, dur);
         rows.push({
           name: className,
           dayOfWeek: day,
-          time: time,
+          startTime: startTime,
+          endTime: endTime,
           location: location,
           instructor: instructor,
-          duration: isNaN(dur) ? 60 : dur
+          duration: dur
         });
       }
       setParsedClasses(rows);
@@ -13250,7 +13270,7 @@
             e('div', { style: { background: 'var(--cream-2)', borderRadius: '8px', padding: '10px 12px', maxHeight: '180px', overflow: 'auto' } },
               parsedClasses.map(function(c, i){
                 return e('div', { key: i, style: { fontSize: '12px', color: 'var(--slate)', padding: '3px 0' } },
-                  c.name + ' \u00b7 ' + c.dayOfWeek + ' ' + c.time +
+                  c.name + ' \u00b7 ' + c.dayOfWeek + ' ' + (c.startTime || c.time || '') +
                   (c.location ? (' \u00b7 ' + c.location) : '') +
                   (c.instructor ? (' \u00b7 ' + c.instructor) : '')
                 );
@@ -13300,7 +13320,7 @@
             },
               e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, c.name),
               e('div', { style: { color: 'var(--slate)', fontSize: '12px', marginTop: '2px' } },
-                c.dayOfWeek + ' ' + c.time +
+                c.dayOfWeek + ' ' + (c.startTime || c.time || '') +
                 ' \u00b7 ' + (c.location || 'no location') +
                 ' \u00b7 ' + (c.instructor || 'unassigned') +
                 ' \u00b7 ' + c.duration + ' min'
