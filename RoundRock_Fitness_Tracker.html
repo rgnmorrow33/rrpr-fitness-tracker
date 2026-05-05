@@ -2242,7 +2242,10 @@
     return null;
   }
   function addPackageToClient(client, newPkg){
-    var pkgs = getPackages(client).slice();
+    /* Use the raw packages array, not getPackages() - the latter filters
+       out soft-deleted entries and reassigning the result would silently
+       drop them from the client record. */
+    var pkgs = (client.packages || []).slice();
     pkgs.push(newPkg);
     var updated = Object.assign({}, client, {
       packages: pkgs,
@@ -3883,6 +3886,11 @@
 
     /* ---- client CRUD ---- */
     function upsertClient(c){
+      /* Default is_active=true when missing. The clients table has is_active
+         as NOT NULL, so any insert that omits it fails the constraint. This
+         catches every create path (NewClientModal, ImportClientsModal,
+         WRO conversion) without each having to remember to stamp it. */
+      if (c && c.is_active === undefined) c = Object.assign({}, c, { is_active: true });
       setClients(function(list){
         var exists = list.some(function(x){ return x.id === c.id; });
         if (exists) return list.map(function(x){ return x.id === c.id ? c : x; });
