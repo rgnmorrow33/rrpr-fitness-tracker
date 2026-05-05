@@ -1806,6 +1806,7 @@
       canSetPINs: false,
       canBulkImport: false,
       canViewAllTimeCards: false,
+      canViewAnyTrainerSchedule: false,
       canDeleteSession: false,
       canEditAnyAttendance: false,
       canEditAnySession: false,
@@ -1829,6 +1830,7 @@
       canSetPINs: false,
       canBulkImport: false,
       canViewAllTimeCards: false,
+      canViewAnyTrainerSchedule: true,
       canDeleteSession: true,
       /* Lead expansions (unscoped this cycle) */
       canEditAnyAttendance: true,
@@ -1853,6 +1855,7 @@
       canSetPINs: true,
       canBulkImport: true,
       canViewAllTimeCards: true,
+      canViewAnyTrainerSchedule: true,
       canDeleteSession: true,
       canEditAnyAttendance: true,
       canEditAnySession: true,
@@ -5902,7 +5905,15 @@
      Trainer doesn't need to navigate to find what's happening today. */
   function TrainerToday(props){
     var ctx = props.ctx;
-    var trainerName = ctx.session.name;
+    /* Cross-trainer view: TrainerView passes the selected trainer when an
+       admin/lead is viewing someone else's day. Falls back to the signed-in
+       user otherwise. */
+    var trainerName = props.trainerName || ctx.session.name;
+    /* Compact mode is used when stacking multiple trainers under the
+       "All trainers" filter. Suppresses the greeting hero, the pay-period
+       chip, and the weekly-hours dashboard so each trainer's section only
+       shows the schedule items that vary trainer-to-trainer. */
+    var compact = !!props.compact;
 
     var todayYMD = todayStr();
     var todayDate = parseYMD(todayYMD);
@@ -6017,8 +6028,10 @@
     }
 
     return e('div', null,
-      /* Today header - emphasizes the actual date */
-      e('div', {
+      /* Today header - emphasizes the actual date. Suppressed in compact
+         mode (stacked "All trainers" view) so it doesn't repeat per
+         trainer. */
+      !compact && e('div', {
         style: {
           background: 'linear-gradient(135deg, var(--navy), #2a4a73)',
           color: '#fff',
@@ -6037,8 +6050,8 @@
         )
       ),
 
-      /* Pay-period chip (compact) */
-      e('div', {
+      /* Pay-period chip (compact). Hidden in stacked compact mode. */
+      !compact && e('div', {
         style: {
           background: 'var(--cream-2)',
           border: '1.5px solid var(--border)',
@@ -6070,8 +6083,9 @@
         )
       ),
 
-      /* Weekly hours dashboard - shared with the Time Card page. */
-      e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
+      /* Weekly hours dashboard - shared with the Time Card page. Hidden
+         in compact stacked mode. */
+      !compact && e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
 
       /* Today's classes section */
       myClassesToday.length > 0 && e('div', { style: { marginBottom: '20px' } },
@@ -6765,7 +6779,20 @@
       setNavGen(function(g){ return g + 1; });
     }
 
-    var trainerName = ctx.session.name;
+    /* Cross-trainer schedule view (admin/lead only). null = self, '__all__'
+       = stacked view of every active trainer, else a specific trainer name.
+       In-memory only - resets on sign-out by design (component unmounts).
+       Only flows through to Today/Schedule's body. The pay-period chip,
+       lead badge, and other side widgets stay tied to the signed-in user. */
+    var canViewAnyTrainerSchedule = ctx.can('canViewAnyTrainerSchedule');
+    var viewAsTuple = useState(null);
+    var viewAs = viewAsTuple[0]; var setViewAs = viewAsTuple[1];
+
+    var selfName = ctx.session.name;
+    var isAllMode = viewAs === '__all__';
+    var effectiveTrainerName = (viewAs && !isAllMode) ? viewAs : selfName;
+    var isViewingOther = !!viewAs && !isAllMode && viewAs !== selfName;
+    var trainerName = selfName;
 
     var subLabel = {
       today: 'Today',
@@ -6799,8 +6826,35 @@
 
     var content;
     var contentKey = tab + ':' + navGen;
-    if (tab === 'today') content = e(TrainerToday, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext });
-    else if (tab === 'schedule') content = e(TrainerWeekView, { key: contentKey, ctx: ctx, trainerName: trainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
+    /* "All trainers" stack only applies to Today and Schedule (the day +
+       week schedule views). Other tabs render as before for the signed-in
+       user even when "All" is selected. */
+    if (canViewAnyTrainerSchedule && isAllMode && (tab === 'today' || tab === 'schedule')) {
+      var allTrainers = (ctx.trainers || []).slice().sort(function(a, b){
+        return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
+      });
+      content = e('div', null,
+        allTrainers.map(function(name){
+          var sectionKey = tab + ':all:' + name + ':' + navGen;
+          var sectionHeader = e('div', {
+            style: {
+              display: 'flex', alignItems: 'baseline', gap: '8px',
+              padding: '8px 12px',
+              background: 'var(--navy)', color: '#fff',
+              borderRadius: '10px', marginTop: '14px', marginBottom: '8px'
+            }
+          },
+            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', opacity: 0.8 } }, 'Trainer'),
+            e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '18px' } }, name)
+          );
+          var body = tab === 'today'
+            ? e(TrainerToday, { ctx: ctx, trainerName: name, setHeaderContext: setHeaderContext, compact: true })
+            : e(TrainerWeekView, { ctx: ctx, trainerName: name, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
+          return e('div', { key: sectionKey }, sectionHeader, body);
+        })
+      );
+    } else if (tab === 'today') content = e(TrainerToday, { key: contentKey, ctx: ctx, trainerName: effectiveTrainerName, setHeaderContext: setHeaderContext });
+    else if (tab === 'schedule') content = e(TrainerWeekView, { key: contentKey, ctx: ctx, trainerName: effectiveTrainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
     else if (tab === 'pt') content = e(TrainerPT, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
     else if (tab === 'gx') content = e(TrainerGX, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
     else if (tab === 'leads') content = e(TrainerLeadsView, { key: contentKey, ctx: ctx });
@@ -6846,6 +6900,60 @@
           ctx: ctx,
           onJumpToTab: function(t, opts){ navigate(t, opts); }
         }),
+        /* Cross-trainer schedule filter (admin/lead only). Lives only on
+           the day + week tabs since those are the schedule surfaces.
+           Other tabs ignore the selection silently and the in-memory
+           value persists across day/week toggles. */
+        canViewAnyTrainerSchedule && (tab === 'today' || tab === 'schedule') && e('div', {
+          style: {
+            background: '#fff',
+            border: '1.5px solid var(--border)',
+            borderRadius: '12px',
+            padding: '10px 14px',
+            marginBottom: '10px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            flexWrap: 'wrap'
+          }
+        },
+          e('span', {
+            style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate-soft)', fontWeight: 700 }
+          }, 'Viewing'),
+          e('select', {
+            value: viewAs == null ? '__me__' : viewAs,
+            onChange: function(ev){
+              var v = ev.target.value;
+              setViewAs(v === '__me__' ? null : v);
+            },
+            style: {
+              flex: '1 1 auto',
+              minWidth: '160px',
+              padding: '6px 10px',
+              fontSize: '13px',
+              border: '1.5px solid var(--border)',
+              borderRadius: '8px',
+              background: '#fff',
+              color: 'var(--navy)',
+              fontWeight: 600
+            }
+          },
+            e('option', { value: '__me__' }, 'Me' + (selfName ? (' (' + selfName + ')') : '')),
+            (ctx.trainers || []).slice().sort(function(a, b){
+              return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
+            }).map(function(name){
+              return e('option', { key: name, value: name }, name);
+            }),
+            e('option', { value: '__all__' }, 'All trainers')
+          ),
+          (isViewingOther || isAllMode) && e('span', {
+            style: {
+              fontSize: '11px', padding: '3px 10px', borderRadius: '999px',
+              background: 'var(--teal-bg)', color: 'var(--teal)',
+              fontWeight: 700, letterSpacing: '0.04em'
+            }
+          }, isAllMode ? 'All trainers' : ('Viewing: ' + viewAs))
+        ),
         /* Compact pay-period summary chip (suppressed on today + time_card
            tabs - today shows its own bigger summary, time card is the full
            breakdown). */
