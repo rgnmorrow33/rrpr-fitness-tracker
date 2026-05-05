@@ -1124,7 +1124,8 @@
       camelToSnake[pair[0]] = pair[1];
       snakeToCamel[pair[1]] = pair[0];
     });
-    var drop = (opts && opts.drop) || [];
+    /* Copy with .slice() so push() below doesn't mutate the caller's array. */
+    var drop = ((opts && opts.drop) || []).slice();
     /* createdAt always dropped on write so DB controls created_at. */
     if (drop.indexOf('createdAt') === -1) drop.push('createdAt');
     return {
@@ -1463,7 +1464,7 @@
           });
       }
       try {
-        var raw = localStorage.getItem('pt_trainers_v4');
+        var raw = localStorage.getItem('cmrc_trainers_v4');
         if (!raw) return Promise.resolve(null);
         var parsed = JSON.parse(raw);
         /* Legacy localStorage may hold a string[] of names. Normalize to
@@ -1512,7 +1513,7 @@
         });
       }
       try {
-        localStorage.setItem('pt_trainers_v4', JSON.stringify(arr));
+        localStorage.setItem('cmrc_trainers_v4', JSON.stringify(arr));
         return Promise.resolve();
       } catch (err) {
         return Promise.reject(err);
@@ -1522,7 +1523,7 @@
 
   var storage = {
     trainers:         trainersStorage,
-    clients:          makeEntity('pt_clients_v3', 'clients', translate.clients),
+    clients:          makeEntity('cmrc_clients_v3', 'clients', translate.clients),
     classes:          makeEntity('cmrc_classes_v2', 'classes', translate.classes),
     closures:         makeEntity('cmrc_closures_v2', 'closures', translate.closures),
     wros:             makeEntity('cmrc_wros_v1', 'wros', translate.wros),
@@ -1561,6 +1562,29 @@
       }
     }
   };
+  /* One-time localStorage key migration. The two pt_* keys date back to
+     before the cmrc_* convention was settled. STORAGE_MODE is supabase in
+     production so this rarely fires, but iPads that ever ran in
+     localStorage mode could have data under the old key. Copies old → new
+     when only the old key is present, then removes the old key. */
+  (function migrateLocalStorageKeys(){
+    if (typeof localStorage === 'undefined') return;
+    var renames = [
+      ['pt_trainers_v4', 'cmrc_trainers_v4'],
+      ['pt_clients_v3',  'cmrc_clients_v3']
+    ];
+    renames.forEach(function(pair){
+      var oldKey = pair[0]; var newKey = pair[1];
+      try {
+        var oldVal = localStorage.getItem(oldKey);
+        if (oldVal == null) return;
+        var newVal = localStorage.getItem(newKey);
+        if (newVal == null) localStorage.setItem(newKey, oldVal);
+        localStorage.removeItem(oldKey);
+      } catch(_){}
+    });
+  })();
+
   /* Expose for debugging and the admin Maintenance "Clear local data" tool. */
   if (typeof window !== 'undefined') {
     window.STORAGE_MODE = STORAGE_MODE;
@@ -1570,18 +1594,6 @@
   }
 
   /* ============ CONSTANTS ============ */
-  /* Legacy flat CMRC-priced list. Still consumed by ImportClientsModal as
-     the bulk-import default-package fallback. New code paths use
-     PT_PACKAGES_BY_FACILITY below. Tracked on the deferred cleanup pile. */
-  var PACKAGES = [
-    { sessions: 1,  price: 38,  type: 'Personal-1'  },
-    { sessions: 3,  price: 105, type: 'Personal-3'  },
-    { sessions: 5,  price: 175, type: 'Personal-5'  },
-    { sessions: 10, price: 330, type: 'Personal-10' },
-    { sessions: 15, price: 495, type: 'Personal-15' },
-    { sessions: 20, price: 630, type: 'Personal-20' }
-  ];
-
   /* Facility-aware PT package lists. Used by AddPackageModal,
      EditPackageModal, NewClientModal. Selecting a template stamps
      template_id on the package; the synthesized `type` value (e.g.
@@ -1927,6 +1939,14 @@
     }
     return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
   }
+  /* Wrap a value in CSV-safe double quotes. Always quotes; downstream
+     spreadsheet readers handle empty quoted strings fine. Used by every
+     CSV export in the file. */
+  function csvEscape(v){
+    if (v == null) return '';
+    var s = String(v).replace(/"/g, '""');
+    return '"' + s + '"';
+  }
   function todayStr(){
     var d = new Date();
     var m = String(d.getMonth()+1).padStart(2,'0');
@@ -1949,19 +1969,6 @@
   function getInitials(name){
     if (!name) return '';
     return name.split(/\s+/).slice(0,3).map(function(p){ return p[0]; }).join('').toUpperCase();
-  }
-  function useLocal(key, initial){
-    var stateTuple = useState(function(){
-      try {
-        var raw = localStorage.getItem(key);
-        if (raw) return JSON.parse(raw);
-      } catch(_) {}
-      return initial;
-    });
-    useEffect(function(){
-      try { localStorage.setItem(key, JSON.stringify(stateTuple[0])); } catch(_) {}
-    }, [stateTuple[0]]);
-    return stateTuple;
   }
   function buildSeedClients(){
     return SEED_CLIENT_ROWS.map(function(r){
@@ -5254,15 +5261,15 @@
                      lastSessionClients.length + staleClients.length;
     if (totalCount === 0) return null;
 
-    function chip(label, count, color, onClick){
+    function chip(opts){
       return e('button', {
-        onClick: onClick,
+        onClick: opts.onClick,
         style: {
           flex: '1 1 100px',
           minWidth: '120px',
           background: '#fff',
-          border: '1.5px solid ' + color,
-          color: color,
+          border: '1.5px solid ' + opts.color,
+          color: opts.color,
           padding: '10px 14px',
           borderRadius: '10px',
           fontSize: '13px',
@@ -5276,8 +5283,8 @@
           textAlign: 'left'
         }
       },
-        e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', opacity: 0.85 } }, label),
-        e('div', { style: { fontSize: '20px', fontFamily: "'DM Serif Display', serif", lineHeight: 1 } }, count),
+        e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', opacity: 0.85 } }, opts.label),
+        e('div', { style: { fontSize: '20px', fontFamily: "'DM Serif Display', serif", lineHeight: 1 } }, opts.count),
         e('div', { style: { fontSize: '11px', opacity: 0.7 } }, 'Tap to view')
       );
     }
@@ -5314,36 +5321,36 @@
           flexWrap: 'wrap'
         }
       },
-        openSubs.length > 0 && chip(
-          'Open GX classes',
-          openSubs.length,
-          '#7B68B6',
-          function(){ onJumpToTab && onJumpToTab('gx', { filter: 'available_subs' }); }
-        ),
-        lastSessionClients.length > 0 && chip(
-          'On last session',
-          lastSessionClients.length,
-          'var(--amber)',
-          function(){ onJumpToTab && onJumpToTab('pt', { filter: 'last_session' }); }
-        ),
-        staleClients.length > 0 && chip(
-          'Stale packages',
-          staleClients.length,
-          'var(--slate)',
-          function(){ onJumpToTab && onJumpToTab('pt', { filter: 'stale' }); }
-        ),
-        waitingLeads.length > 0 && chip(
-          'New clients waiting',
-          waitingLeads.length,
-          'var(--teal)',
-          function(){ onJumpToTab && onJumpToTab('leads'); }
-        ),
-        availableWros.length > 0 && chip(
-          'New WROs',
-          availableWros.length,
-          'var(--gold)',
-          function(){ onJumpToTab && onJumpToTab('leads'); }
-        )
+        openSubs.length > 0 && chip({
+          label: 'Open GX classes',
+          count: openSubs.length,
+          color: '#7B68B6',
+          onClick: function(){ onJumpToTab && onJumpToTab('gx', { filter: 'available_subs' }); }
+        }),
+        lastSessionClients.length > 0 && chip({
+          label: 'On last session',
+          count: lastSessionClients.length,
+          color: 'var(--amber)',
+          onClick: function(){ onJumpToTab && onJumpToTab('pt', { filter: 'last_session' }); }
+        }),
+        staleClients.length > 0 && chip({
+          label: 'Stale packages',
+          count: staleClients.length,
+          color: 'var(--slate)',
+          onClick: function(){ onJumpToTab && onJumpToTab('pt', { filter: 'stale' }); }
+        }),
+        waitingLeads.length > 0 && chip({
+          label: 'New clients waiting',
+          count: waitingLeads.length,
+          color: 'var(--teal)',
+          onClick: function(){ onJumpToTab && onJumpToTab('leads'); }
+        }),
+        availableWros.length > 0 && chip({
+          label: 'New WROs',
+          count: availableWros.length,
+          color: 'var(--gold)',
+          onClick: function(){ onJumpToTab && onJumpToTab('leads'); }
+        })
       )
     );
   }
@@ -6378,10 +6385,6 @@
     var ctx = props.ctx;
     var trainerName = ctx.session.name;
 
-    var newOpenTuple = useState(false);
-    var newOpen = newOpenTuple[0];
-    var setNewOpen = newOpenTuple[1];
-
     var detailTuple = useState(null);
     var detailId = detailTuple[0];
     var setDetailId = detailTuple[1];
@@ -6543,17 +6546,7 @@
                 });
               }
             });
-          }),
-      newOpen && e(NewClientModal, {
-        ctx: ctx,
-        lockTrainer: trainerName,
-        onClose: function(){ setNewOpen(false); },
-        onCreate: function(c){
-          ctx.auditedUpsertClient(c, 'create');
-          setNewOpen(false);
-          ctx.toast('Client created ✓');
-        }
-      })
+          })
     );
   }
 
@@ -7295,10 +7288,11 @@
   }
 
   /* Edit an existing package on a client. Free-text type per spec
-     (allows entries beyond the PACKAGES preset). Stores sessionsUsed,
-     sessionsRemaining, and is_active on the package on save - these
-     fields are admin-tracked metadata; the existing client.sessions[]
-     count remains the source of truth for live remaining displays. */
+     (allows entries beyond the facility template list). Stores
+     sessionsUsed, sessionsRemaining, and is_active on the package on
+     save - these fields are admin-tracked metadata; the existing
+     client.sessions[] count remains the source of truth for live
+     remaining displays. */
   function EditPackageModal(props){
     var ctx = props.ctx;
     var client = props.client;
@@ -8595,7 +8589,7 @@
     var setCoverLog = coverLogTuple[1];
 
     var myClasses = useMemo(function(){
-      return ctx.classes.filter(function(c){ return c.instructor === trainerName; });
+      return ctx.classes.filter(function(c){ return trainerNameMatches(trainerName, c.instructor); });
     }, [ctx.classes, trainerName]);
 
     var upcomingSubs = useMemo(function(){
@@ -8943,8 +8937,7 @@
     var editOpen = editOpenTuple[0];
     var setEditOpen = editOpenTuple[1];
 
-    /* Sub-request modal (queue or direct assign). Replaces the older
-       AssignSubModal entry point on this view. */
+    /* Sub-request modal (queue or direct assign). */
     var subRequestOpenTuple = useState(false);
     var subRequestOpen = subRequestOpenTuple[0];
     var setSubRequestOpen = subRequestOpenTuple[1];
@@ -9641,9 +9634,7 @@
        (a) Post to sub queue (status: 'open') - any trainer can claim via
            the existing notification bar / claim flow
        (b) Direct assign (status: 'claimed') - specific trainer slotted in,
-           still routes through the existing approval pipeline
-     Replaces the older AssignSubModal as the entry point. AssignSubModal
-     is kept defined but no longer rendered (cleanup pile). */
+           still routes through the existing approval pipeline */
   function SubRequestModal(props){
     var ctx = props.ctx;
     var cls = props.cls;
@@ -9813,98 +9804,6 @@
               ? 'Replace assignment'
               : (mode === 'queue' ? 'Post to queue' : 'Assign')
           )
-        )
-      )
-    );
-  }
-
-  function AssignSubModal(props){
-    /* Schedule a future sub assignment for a class on a specific date */
-    var ctx = props.ctx;
-    var dateTuple = useState(todayStr());
-    var date = dateTuple[0];
-    var setDate = dateTuple[1];
-    var subTuple = useState(function(){
-      var others = ctx.trainers.filter(function(t){ return t !== props.cls.instructor; });
-      return others[0] || ctx.trainers[0] || '';
-    });
-    var sub = subTuple[0];
-    var setSub = subTuple[1];
-    var noteTuple = useState('');
-    var note = noteTuple[0];
-    var setNote = noteTuple[1];
-
-    function submit(){
-      if (!sub) { ctx.toast('Pick a sub', 'error'); return; }
-      if (sub === props.cls.instructor) { ctx.toast('Sub must be different from regular instructor', 'error'); return; }
-      var d = parseYMD(date);
-      if (!d) { ctx.toast('Pick a valid date', 'error'); return; }
-      if (IDX_TO_DOW[d.getDay()] !== normalizeDow(props.cls.dayOfWeek)) {
-        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + (normalizeDow(props.cls.dayOfWeek) || props.cls.dayOfWeek), 'error');
-        return;
-      }
-      var existing = getAssignedSubForDate(props.cls, date);
-      var assignment = {
-        id: existing ? existing.id : uid(),
-        date: date,
-        subInstructor: sub,
-        originalInstructor: props.cls.instructor,
-        note: note,
-        /* v2: enter the approval state machine claimed by the named sub */
-        status: 'claimed',
-        claimedBy: sub,
-        claimedAt: new Date().toISOString(),
-        approvedBy: null,
-        approvedAt: null,
-        denyReason: null,
-        createdAt: new Date().toISOString()
-      };
-      props.onSave(assignment);
-    }
-
-    var d = parseYMD(date);
-    var dayMatch = d && IDX_TO_DOW[d.getDay()] === normalizeDow(props.cls.dayOfWeek);
-    var existing = getAssignedSubForDate(props.cls, date);
-
-    return e('div', { className: 'modal-overlay' },
-      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
-        e('div', { className: 'modal-header' },
-          e('h2', null, 'Assign Sub'),
-          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
-        ),
-        e('div', { className: 'modal-body' },
-          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
-            e('b', null, props.cls.name),
-            ' · ' + props.cls.dayOfWeek + ' ' + formatTime12(props.cls.startTime) +
-            ' · Regular: ' + props.cls.instructor
-          ),
-          e('div', { className: 'field' },
-            e('label', null, 'Date being covered'),
-            e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } }),
-            d && !dayMatch && e('div', { style: { color: 'var(--red)', fontSize: '12px', marginTop: '4px' } },
-              '⚠ ' + IDX_TO_DOW[d.getDay()] + ' - class meets on ' + props.cls.dayOfWeek
-            ),
-            existing && e('div', { style: { color: 'var(--amber)', fontSize: '12px', marginTop: '4px' } },
-              '⚠ Existing assignment for this date (' + existing.subInstructor + ') will be replaced.'
-            )
-          ),
-          e('div', { className: 'field' },
-            e('label', null, 'Sub instructor'),
-            e('select', { value: sub, onChange: function(ev){ setSub(ev.target.value); } },
-              ctx.trainers.map(function(t){
-                return e('option', { key: t, value: t, disabled: t === props.cls.instructor },
-                  t + (t === props.cls.instructor ? ' (regular)' : ''));
-              })
-            )
-          ),
-          e('div', { className: 'field' },
-            e('label', null, 'Note (optional)'),
-            e('input', { value: note, onChange: function(ev){ setNote(ev.target.value); }, placeholder: 'E.g. Reagan out for conference' })
-          )
-        ),
-        e('div', { className: 'modal-footer' },
-          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
-          e('button', { className: 'btn btn-amber', onClick: submit, disabled: !dayMatch }, existing ? 'Replace Assignment' : 'Save Assignment')
         )
       )
     );
@@ -11685,7 +11584,7 @@
     }, 0);
     var teamHours = Math.round((teamMinutes / 60) * 10) / 10;
 
-    function exportCSV(){
+    function exportContactsCSV(){
       var rows = [['Date','Trainer','Type','Topic','Note']];
       filtered.slice().sort(function(a,b){ return a.date < b.date ? 1 : -1; }).forEach(function(c){
         rows.push([
@@ -11696,16 +11595,10 @@
           c.note || ''
         ]);
       });
-      var csv = rows.map(function(r){
-        return r.map(function(cell){
-          var s = String(cell == null ? '' : cell);
-          if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1) {
-            s = '"' + s.replace(/"/g, '""') + '"';
-          }
-          return s;
-        }).join(',');
+      var body = rows.map(function(r){
+        return r.map(csvEscape).join(',');
       }).join('\n');
-      var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      var blob = new Blob([body], { type: 'text/csv;charset=utf-8;' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'RRPR_contacts_' + windowSel + '_' + todayStr() + '.csv';
@@ -11724,7 +11617,7 @@
         ),
         e('button', {
           className: 'btn btn-outline btn-sm',
-          onClick: exportCSV,
+          onClick: exportContactsCSV,
           disabled: filtered.length === 0
         }, '\u2b07 Export CSV')
       ),
@@ -13497,11 +13390,6 @@
     }).sort(function(a,b){ return a.name.localeCompare(b.name); });
 
     function exportPTClientsCSV(){
-      function csv(v){
-        if (v == null) return '';
-        var s = String(v).replace(/"/g, '""');
-        return '"' + s + '"';
-      }
       var rows = [];
       rows.push([
         'Client Name','Phone','Email','Active Package Type','Sessions Purchased',
@@ -13524,19 +13412,19 @@
           if (ref && today) daysSince = Math.floor((today.getTime() - ref.getTime()) / 86400000);
         }
         rows.push([
-          csv(c.name),
-          csv(c.phone),
-          csv(c.email),
-          csv(activePkg ? (activePkg.type || (activePkg.sessions + '-session')) : ''),
-          csv(purchased),
-          csv(used),
-          csv(remaining),
-          csv(utilization === '' ? '' : utilization),
-          csv(lastDate || ''),
-          csv(daysSince === '' ? '' : daysSince),
-          csv(sessions.length),
-          csv(c.createdAt ? c.createdAt.substring(0,10) : ''),
-          csv(c.trainerName)
+          csvEscape(c.name),
+          csvEscape(c.phone),
+          csvEscape(c.email),
+          csvEscape(activePkg ? (activePkg.type || (activePkg.sessions + '-session')) : ''),
+          csvEscape(purchased),
+          csvEscape(used),
+          csvEscape(remaining),
+          csvEscape(utilization === '' ? '' : utilization),
+          csvEscape(lastDate || ''),
+          csvEscape(daysSince === '' ? '' : daysSince),
+          csvEscape(sessions.length),
+          csvEscape(c.createdAt ? c.createdAt.substring(0,10) : ''),
+          csvEscape(c.trainerName)
         ].join(','));
       });
       var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -13550,11 +13438,6 @@
     }
 
     function exportPTSessionsCSV(){
-      function csv(v){
-        if (v == null) return '';
-        var s = String(v).replace(/"/g, '""');
-        return '"' + s + '"';
-      }
       var rows = [];
       rows.push([
         'Date','Client Name','Trainer','Status','Duration (min)',
@@ -13570,14 +13453,14 @@
           var note = s.note || '';
           if (note.length > 200) note = note.substring(0, 200);
           rows.push([
-            csv(s.date || ''),
-            csv(c.name),
-            csv(c.trainerName),
-            csv(s.status || ''),
-            csv(dur === '' ? '' : dur),
-            csv(pkgLabel),
-            csv(bothSigned),
-            csv(note)
+            csvEscape(s.date || ''),
+            csvEscape(c.name),
+            csvEscape(c.trainerName),
+            csvEscape(s.status || ''),
+            csvEscape(dur === '' ? '' : dur),
+            csvEscape(pkgLabel),
+            csvEscape(bothSigned),
+            csvEscape(note)
           ].join(','));
         });
       });
@@ -13690,8 +13573,15 @@
     var mapping = mappingTuple[0];
     var setMapping = mappingTuple[1];
 
+    /* Bulk-import uses the CMRC list as the agnostic default. Per the
+       Phase 2 product call, bulk import is admin's responsibility - this
+       picker stays facility-agnostic; per-row location still comes from
+       the CSV. Drops the consultation row so the default fallback is
+       always a real package. */
+    var BULK_IMPORT_PACKAGES = PT_PACKAGES_BY_FACILITY.CMRC.filter(function(p){ return p.sessions > 0; });
+
     var defaultsTuple = useState({
-      packageType: PACKAGES[3].type, /* 10-session most common */
+      packageType: BULK_IMPORT_PACKAGES[3].type, /* 10-session most common */
       location: 'CMRC',
       trainerName: '' /* unassigned by default */
     });
@@ -13788,19 +13678,19 @@
 
     /* Detect package from a description string */
     function detectPackage(desc){
-      if (!desc) return PACKAGES.find(function(p){ return p.type === defaults.packageType; });
+      if (!desc) return BULK_IMPORT_PACKAGES.find(function(p){ return p.type === defaults.packageType; });
       var lower = desc.toLowerCase();
       var sessionMatch = lower.match(/(\d+)\s*[-\s]*(session|pack|class|visit)/);
       if (sessionMatch) {
         var n = parseInt(sessionMatch[1], 10);
-        var found = PACKAGES.find(function(p){ return p.sessions === n; });
+        var found = BULK_IMPORT_PACKAGES.find(function(p){ return p.sessions === n; });
         if (found) return found;
       }
       /* Single session fallback */
       if (/single|drop[-\s]?in|1[-\s]session/.test(lower)) {
-        return PACKAGES.find(function(p){ return p.sessions === 1; });
+        return BULK_IMPORT_PACKAGES.find(function(p){ return p.sessions === 1; });
       }
-      return PACKAGES.find(function(p){ return p.type === defaults.packageType; });
+      return BULK_IMPORT_PACKAGES.find(function(p){ return p.type === defaults.packageType; });
     }
 
     function buildClientFromRow(row){
@@ -14046,7 +13936,7 @@
               value: defaults.packageType,
               onChange: function(ev){ setDefaults(Object.assign({}, defaults, { packageType: ev.target.value })); }
             },
-              PACKAGES.map(function(p){ return e('option', { key: p.type, value: p.type }, p.sessions + '-session ($' + p.price + ')'); })
+              BULK_IMPORT_PACKAGES.map(function(p){ return e('option', { key: p.type, value: p.type }, p.sessions + '-session ($' + p.price + ')'); })
             )
           ),
           e('div', { className: 'field', style: { marginBottom: 0 } },
@@ -14211,11 +14101,6 @@
       .sort(function(a,b){ return a.name.localeCompare(b.name); });
 
     function exportGXClassesCSV(){
-      function csv(v){
-        if (v == null) return '';
-        var s = String(v).replace(/"/g, '""');
-        return '"' + s + '"';
-      }
       /* Default window is the current pay period. */
       var period = payPeriodForDate(new Date());
       var occs = occurrencesInWindow(ctx.classes, period.start, period.end, ctx.closures);
@@ -14239,15 +14124,15 @@
           fill = Math.round((stats.attTotal / (c.capacity * stats.occCount)) * 100);
         }
         rows.push([
-          csv(c.name),
-          csv(c.dayOfWeek || ''),
-          csv(c.startTime || ''),
-          csv(c.instructor || ''),
-          csv(c.capacity == null ? '' : c.capacity),
-          csv(stats.occCount),
-          csv(stats.attTotal),
-          csv(avg === '' ? '' : avg),
-          csv(fill === '' ? '' : fill)
+          csvEscape(c.name),
+          csvEscape(c.dayOfWeek || ''),
+          csvEscape(c.startTime || ''),
+          csvEscape(c.instructor || ''),
+          csvEscape(c.capacity == null ? '' : c.capacity),
+          csvEscape(stats.occCount),
+          csvEscape(stats.attTotal),
+          csvEscape(avg === '' ? '' : avg),
+          csvEscape(fill === '' ? '' : fill)
         ].join(','));
       });
       var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -15300,8 +15185,8 @@
   function AdminMaintenance(props){
     var ctx = props.ctx;
     var KNOWN_KEYS = [
-      'pt_trainers_v4',
-      'pt_clients_v3',
+      'cmrc_trainers_v4',
+      'cmrc_clients_v3',
       'cmrc_classes_v2',
       'cmrc_closures_v2',
       'cmrc_wros_v1',
@@ -15310,7 +15195,12 @@
       'cmrc_queue_v1',
       'cmrc_contacts_v1',
       'cmrc_schedule_versions_v1',
-      'admin_pin_v1'
+      'admin_pin_v1',
+      'rrpr_session_v1',
+      /* Old pt_* keys retained here so a "Clear local data" still wipes any
+         that linger from a device that never reloaded post-migration. */
+      'pt_trainers_v4',
+      'pt_clients_v3'
     ];
     function clearLocalData(){
       var ok = window.confirm(
@@ -16335,11 +16225,6 @@
        monthly snapshot of WRO data before that risk materializes. Includes
        both pre-form and post-form fields. */
     function exportWROsCSV(){
-      function csv(v){
-        if (v == null) return '';
-        var s = String(v).replace(/"/g, '""');
-        return '"' + s + '"';
-      }
       var rows = [];
       rows.push([
         'WRO ID','Date','Participant','Phone','Email','DOB','Location','Source',
@@ -16351,30 +16236,30 @@
       ].join(','));
       sorted.forEach(function(w){
         rows.push([
-          csv(w.id),
-          csv(w.date || ''),
-          csv(w.participantName || ''),
-          csv(w.phone || ''),
-          csv(w.email || ''),
-          csv(w.dob || ''),
-          csv(w.location || ''),
-          csv(w.source || 'kiosk'),
-          csv(w.goals || ''),
-          csv(w.experienceLevel || ''),
-          csv((w.tourInterests || []).join('; ')),
-          csv(w.healthFlags || ''),
-          csv(w.prefersInPersonHealthDiscussion ? 'Yes' : 'No'),
-          csv((w.followUpInterests || []).join('; ')),
-          csv(w.preSignature ? 'Yes' : 'No'),
-          csv(w.postCompleted ? 'Yes' : 'No'),
-          csv(w.specialist || ''),
-          csv(w.confirmedGoals || ''),
-          csv(w.observedFlags || ''),
-          csv(w.recommendations || ''),
-          csv(w.conversionOutcome || ''),
-          csv(w.postNotes || ''),
-          csv(w.convertedToClientId ? 'Yes' : 'No'),
-          csv(w.createdAt || '')
+          csvEscape(w.id),
+          csvEscape(w.date || ''),
+          csvEscape(w.participantName || ''),
+          csvEscape(w.phone || ''),
+          csvEscape(w.email || ''),
+          csvEscape(w.dob || ''),
+          csvEscape(w.location || ''),
+          csvEscape(w.source || 'kiosk'),
+          csvEscape(w.goals || ''),
+          csvEscape(w.experienceLevel || ''),
+          csvEscape((w.tourInterests || []).join('; ')),
+          csvEscape(w.healthFlags || ''),
+          csvEscape(w.prefersInPersonHealthDiscussion ? 'Yes' : 'No'),
+          csvEscape((w.followUpInterests || []).join('; ')),
+          csvEscape(w.preSignature ? 'Yes' : 'No'),
+          csvEscape(w.postCompleted ? 'Yes' : 'No'),
+          csvEscape(w.specialist || ''),
+          csvEscape(w.confirmedGoals || ''),
+          csvEscape(w.observedFlags || ''),
+          csvEscape(w.recommendations || ''),
+          csvEscape(w.conversionOutcome || ''),
+          csvEscape(w.postNotes || ''),
+          csvEscape(w.convertedToClientId ? 'Yes' : 'No'),
+          csvEscape(w.createdAt || '')
         ].join(','));
       });
       var blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -16560,16 +16445,16 @@
       ctx.toast('Referral deleted', 'error');
     }
 
-    function exportCSV(){
+    function exportReferralsCSV(){
       var rows = [];
       rows.push(['Date','Client','Reason','Concern','Referred By','Urgency','Status','Status Updated','Created'].join(','));
       refs.forEach(function(r){
         rows.push([
           r.date || '',
-          '"' + (r.clientName || '').replace(/"/g,'""') + '"',
-          '"' + (r.reason || '').replace(/"/g,'""') + '"',
-          '"' + (r.concern || '').replace(/"/g,'""') + '"',
-          '"' + (r.referredBy || '').replace(/"/g,'""') + '"',
+          csvEscape(r.clientName || ''),
+          csvEscape(r.reason || ''),
+          csvEscape(r.concern || ''),
+          csvEscape(r.referredBy || ''),
           r.urgency || '',
           r.status || '',
           r.statusUpdatedAt || '',
@@ -16594,7 +16479,7 @@
             pendingCount + ' pending · ' + contactedCount + ' contacted · ' + completedCount + ' completed'
           )
         ),
-        e('button', { className: 'btn btn-outline btn-sm', onClick: exportCSV }, '↓ Export CSV')
+        e('button', { className: 'btn btn-outline btn-sm', onClick: exportReferralsCSV }, '↓ Export CSV')
       ),
       e('div', { className: 'stats-grid', style: { marginBottom: '16px' } },
         e('div', { className: 'stat-card' + (pendingCount > 0 ? ' warn' : '') },
@@ -17459,7 +17344,7 @@
     var nextDates = Object.keys(nextByDate).sort();
 
     /* ---- CSV export (full audit) ---- */
-    function exportCSV(){
+    function exportScheduleAuditCSV(){
       var rows = [];
       rows.push(['Section','Date','Day','Time','Class','Location','Room','Regular Instructor','Scheduled Instructor','Actual Instructor','Was Sub','Capacity','Headcount','Fill %','Logged','Cancelled','Cancellation Reason','Class Type','Premium','Sub Note'].join(','));
       function row(section, o){
@@ -17471,22 +17356,22 @@
           o.date,
           date ? IDX_TO_DOW[date.getDay()] : '',
           formatTime12(c.startTime) + '\u2013' + formatTime12(c.endTime),
-          '"' + (c.name || '').replace(/"/g,'""') + '"',
+          csvEscape(c.name || ''),
           c.location || '',
-          '"' + (c.room || '').replace(/"/g,'""') + '"',
-          '"' + (c.instructor || '').replace(/"/g,'""') + '"',
-          '"' + (o.scheduledInstructor || '').replace(/"/g,'""') + '"',
-          '"' + (o.actualInstructor || '').replace(/"/g,'""') + '"',
+          csvEscape(c.room || ''),
+          csvEscape(c.instructor || ''),
+          csvEscape(o.scheduledInstructor || ''),
+          csvEscape(o.actualInstructor || ''),
           o.wasSub ? 'Y' : '',
           c.capacity != null ? c.capacity : '',
           o.headcount != null ? o.headcount : '',
           fill,
           o.logged ? 'Y' : 'N',
           o.isCancelled ? 'Y' : 'N',
-          '"' + ((o.cancellation && o.cancellation.reason) || '').replace(/"/g,'""') + '"',
-          '"' + (c.classType || '').replace(/"/g,'""') + '"',
+          csvEscape((o.cancellation && o.cancellation.reason) || ''),
+          csvEscape(c.classType || ''),
           c.isPremium ? 'Y' : 'N',
-          '"' + ((o.assignedSub && o.assignedSub.note) || '').replace(/"/g,'""') + '"'
+          csvEscape((o.assignedSub && o.assignedSub.note) || '')
         ].join(','));
       }
       periodOcc.forEach(function(o){ row('Period ' + period.startYMD + ' to ' + period.endYMD, o); });
@@ -18028,7 +17913,7 @@
         e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setClosuresOpen(true); } },
             'Closures (' + (ctx.closures || []).length + ')'),
-          e('button', { className: 'btn btn-outline btn-sm', onClick: exportCSV }, '\u2193 CSV')
+          e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
         )
       ),
       e('div', { className: 'audit-controls' },

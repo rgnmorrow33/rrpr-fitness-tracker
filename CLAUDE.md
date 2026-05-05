@@ -207,22 +207,26 @@ Git's .git folder.
 Tracked across all sessions. Address in a dedicated cleanup commit
 when convenient.
 
-- Tier 1 batch: csv(v) helper deduplication (defined ~8 times),
-  exportCSV() rename to scoped names (exportContactsCSV, etc.),
-  chip() factory options-object refactor in TrainerNotificationBar
-- Session 1: useLocal hook is dead code at line 1372, no callers
-- Session 2a: makeFieldTranslator drop array mutation (use .slice()),
-  _appSessionName module-level mutable global, _newId duplicating uid()
-- Session 2b candidates: trainers replace-all to diff-based optimization,
-  self-write originator filter for sub events, optional auto-reconnect
-  handler if channel drops aren't auto-recovering
-- Adjacent: storage key prefix inconsistency (pt_* vs cmrc_*),
-  useLocal's save-every-state-change effect
-- Legacy PACKAGES global (line ~1543) duplicates
-  PT_PACKAGES_BY_FACILITY.CMRC. Only ImportClientsModal still uses
-  it (default-package fallback dropdown + CSV description detection).
-  Migrate that consumer to PT_PACKAGES_BY_FACILITY and remove the
-  global.
+- _appSessionName module-level mutable global. Used in
+  translate.scheduleVersions to stamp created_by when no local
+  equivalent. Refactor would touch the translator signature; not a
+  quick win.
+- Trainers replace-all on save: every save sends the full profile
+  array. Diff-based save would only send changed rows. Add only if
+  Supabase rate limits surface.
+- Self-write originator filter for sub events: subscription echoes
+  our own writes back. Existing dirty-check filter handles the
+  no-op, but a true originator id would be cleaner.
+- Channel auto-reconnect on subscription drop. If subs actually
+  drop in production it's a P1 to investigate, not cleanup.
+- Subscription debounce. Fires on every change. Consider 200ms
+  debounce only if rendering pain shows up.
+- Lead expanded perms (canEditAnyAttendance, canEditAnySession)
+  are unscoped. Future work: scope to a reporting tree once we
+  have one.
+- Phantom 'claimed' sub_assignments: if sub_request flow ever
+  leaves orphaned claimed entries, write a one-time cleanup
+  query.
 
 ## Deferred features
 
