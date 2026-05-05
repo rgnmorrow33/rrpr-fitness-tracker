@@ -1196,6 +1196,7 @@
       ['timeIn', 'time_in'],
       ['timeOut', 'time_out'],
       ['createdBy', 'created_by'],
+      ['sourceSessionId', 'source_session_id'],
       ['createdAt', 'created_at']
     ]),
 
@@ -1639,6 +1640,14 @@
   var LOCATIONS = ['CMRC', 'Baca'];
   var DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   var DEFAULT_PIN = '1234';
+
+  /* Idle auto-sign-out for shared iPads. After IDLE_TIMEOUT_MS of no
+     activity, the user is signed out. WARN_BEFORE_MS earlier, a warning
+     modal gives them a chance to stay signed in. Kiosk WRO sessions are
+     exempt (members shouldn't get logged out mid-form). */
+  var IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+  var WARN_BEFORE_MS = 60 * 1000;
+  var IDLE_TICK_MS = 10 * 1000;
 
   /* ============ ROLE TIERS + PERMISSIONS ============
      trainer  - executes (logs sessions, claims subs, etc.)
@@ -3816,6 +3825,50 @@
       setAppSessionName(session && (session.trainer_name || session.name));
     }, [session]);
 
+    /* ---- Idle auto-sign-out for shared iPads ----
+       Single setInterval ticks every IDLE_TICK_MS. Activity listeners on
+       document update lastActivityRef in a ref (not state) to avoid
+       re-renders on every mousemove. Kiosk WRO sessions are exempt. */
+    var lastActivityRef = useRef(Date.now());
+    var idleWarnTuple = useState(false);
+    var idleWarn = idleWarnTuple[0];
+    var setIdleWarn = idleWarnTuple[1];
+
+    useEffect(function(){
+      if (!session) return;
+      if (session.role === 'kiosk_wro') return;
+      lastActivityRef.current = Date.now();
+      function bump(){ lastActivityRef.current = Date.now(); }
+      document.addEventListener('mousemove', bump);
+      document.addEventListener('keydown', bump);
+      document.addEventListener('touchstart', bump);
+      document.addEventListener('scroll', bump, true);
+      var iv = setInterval(function(){
+        var elapsed = Date.now() - lastActivityRef.current;
+        if (elapsed >= IDLE_TIMEOUT_MS) {
+          setIdleWarn(false);
+          setSession(null);
+        } else if (elapsed >= IDLE_TIMEOUT_MS - WARN_BEFORE_MS) {
+          setIdleWarn(true);
+        } else {
+          setIdleWarn(false);
+        }
+      }, IDLE_TICK_MS);
+      return function(){
+        document.removeEventListener('mousemove', bump);
+        document.removeEventListener('keydown', bump);
+        document.removeEventListener('touchstart', bump);
+        document.removeEventListener('scroll', bump, true);
+        clearInterval(iv);
+        setIdleWarn(false);
+      };
+    }, [session]);
+
+    function stayActive(){
+      lastActivityRef.current = Date.now();
+      setIdleWarn(false);
+    }
+
     var toastTuple = useState([]);
     var toasts = toastTuple[0];
     var setToasts = toastTuple[1];
@@ -4534,6 +4587,26 @@
       });
       upsertClient(stamped);
     }
+    /* Stamp a service-recovery payload onto a session and audit it on the
+       client record. Replaces the bare ctx.updateSession path for recovery
+       so the audit log captures who logged what recovery work. */
+    function logServiceRecovery(clientId, sessionId, recovery){
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      var sessBefore = (before.sessions || []).find(function(s){ return s.id === sessionId; });
+      if (!sessBefore) return;
+      var prevRecovery = sessBefore.serviceRecovery || null;
+      var updatedSessions = (before.sessions || []).map(function(s){
+        return s.id === sessionId ? Object.assign({}, s, { serviceRecovery: recovery }) : s;
+      });
+      var updated = Object.assign({}, before, { sessions: updatedSessions });
+      var stamped = appendAuditEntry(updated, session, 'recovery_logged', {
+        entity_type: 'client', target_id: sessionId,
+        before: prevRecovery,
+        after: recovery
+      });
+      upsertClient(stamped);
+    }
     /* Hard-delete a single package on a client. Reachable only from the
        deleted-records filter view via the "Delete forever" link. */
     function hardDeletePackage(clientId, packageId){
@@ -4622,6 +4695,7 @@
       softDeletePackage: softDeletePackage,
       restorePackage: restorePackage,
       hardDeletePackage: hardDeletePackage,
+      logServiceRecovery: logServiceRecovery,
       deleteClient: deleteClient,
       addSession: addSession,
       updateSession: updateSession,
@@ -4745,7 +4819,49 @@
     return e('div', { className: 'app-shell' },
       view,
       e(ToastStack, { toasts: toasts }),
-      syncDot
+      syncDot,
+      idleWarn && e(IdleWarningModal, { onStay: stayActive })
+    );
+  }
+
+  /* ============ IDLE WARNING MODAL ============
+     Shown WARN_BEFORE_MS before auto-sign-out. z-index above any open
+     modal so a forgotten dialog can't hide it. Tapping "Stay signed in"
+     bumps the activity timestamp; if the user does nothing, the App's
+     idle interval signs them out at IDLE_TIMEOUT_MS. */
+  function IdleWarningModal(props){
+    return e('div', {
+      style: {
+        position: 'fixed', inset: 0,
+        background: 'rgba(15, 23, 42, 0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 10000
+      }
+    },
+      e('div', {
+        onClick: function(ev){ ev.stopPropagation(); },
+        style: {
+          background: '#fff',
+          borderRadius: '14px',
+          padding: '24px',
+          maxWidth: '360px',
+          textAlign: 'center',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+        }
+      },
+        e('div', { style: { fontSize: '32px', marginBottom: '10px' } }, '⏱'),
+        e('div', { style: { fontSize: '18px', fontWeight: 700, color: 'var(--navy)', marginBottom: '6px' } },
+          'Still there?'
+        ),
+        e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '18px', lineHeight: 1.5 } },
+          'You\'ll be signed out in 60 seconds. Tap to stay signed in.'
+        ),
+        e('button', {
+          className: 'btn btn-primary',
+          onClick: props.onStay,
+          style: { width: '100%' }
+        }, 'Stay signed in')
+      )
     );
   }
 
@@ -5611,7 +5727,7 @@
         sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
         onClose: function(){ setRecoveryTarget(null); },
         onSave: function(recovery){
-          ctx.updateSession(recoveryTarget.clientId, recoveryTarget.sessionId, { serviceRecovery: recovery });
+          ctx.logServiceRecovery(recoveryTarget.clientId, recoveryTarget.sessionId, recovery);
           setRecoveryTarget(null);
           ctx.toast('Recovery logged ✓');
         }
@@ -5956,7 +6072,7 @@
         sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
         onClose: function(){ setRecoveryTarget(null); },
         onSave: function(recovery){
-          ctx.updateSession(recoveryTarget.clientId, recoveryTarget.sessionId, { serviceRecovery: recovery });
+          ctx.logServiceRecovery(recoveryTarget.clientId, recoveryTarget.sessionId, recovery);
           setRecoveryTarget(null);
           ctx.toast('Recovery logged ✓');
         }
@@ -6933,7 +7049,7 @@
           sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
           onClose: function(){ setRecoveryTarget(null); },
           onSave: function(recovery){
-            ctx.updateSession(c.id, recoveryTarget.sessionId, { serviceRecovery: recovery });
+            ctx.logServiceRecovery(c.id, recoveryTarget.sessionId, recovery);
             setRecoveryTarget(null);
             ctx.toast('Recovery logged ✓');
           }
@@ -9832,7 +9948,36 @@
     var noteTuple = useState(existing ? (existing.note || '') : '');
     var note = noteTuple[0]; var setNote = noteTuple[1];
 
+    /* Source-session linkage. Triggered by session? toggle. When yes,
+       picker shows the assignee trainer's last 14 days of sessions.
+       Linking only works when there's exactly one assignee. */
+    var linkSessionTuple = useState(!!(existing && existing.sourceSessionId));
+    var linkSession = linkSessionTuple[0]; var setLinkSession = linkSessionTuple[1];
+    var sourceSessionTuple = useState(existing ? (existing.sourceSessionId || '') : '');
+    var sourceSessionId = sourceSessionTuple[0]; var setSourceSessionId = sourceSessionTuple[1];
+
     var hours = hoursFromTimes(timeIn, timeOut);
+
+    /* Compute the picker options: sessions for the single assignee in the
+       last 14 days, sorted most-recent first. */
+    var pickerSessions = (function(){
+      if (assignees.length !== 1) return [];
+      var trainerName = assignees[0];
+      var todayMs = Date.now();
+      var cutoffMs = todayMs - 14 * 24 * 60 * 60 * 1000;
+      var rows = [];
+      (ctx.clients || []).forEach(function(c){
+        (c.sessions || []).forEach(function(s){
+          if (s.trainerName !== trainerName) return;
+          if (!s.date) return;
+          var t = new Date(s.date).getTime();
+          if (isNaN(t) || t < cutoffMs) return;
+          rows.push({ id: s.id, label: formatDate(s.date) + ' · ' + c.name + (s.time ? ' · ' + s.time : ''), date: s.date });
+        });
+      });
+      rows.sort(function(a, b){ return a.date < b.date ? 1 : -1; });
+      return rows;
+    })();
 
     /* v2.1: when the type changes (e.g., user picks 'Program Creation'),
        and the user has set a timeIn but no timeOut, auto-fill timeOut
@@ -9896,6 +10041,7 @@
         hours: hours,
         assignees: assignees.slice(),
         note: note.trim() || null,
+        sourceSessionId: linkSession && sourceSessionId ? sourceSessionId : null,
         createdBy: existing ? existing.createdBy : ((ctx.session && ctx.session.name) || 'admin'),
         createdAt: existing ? existing.createdAt : new Date().toISOString()
       };
@@ -9962,6 +10108,44 @@
                   }
                 }, (picked ? '\u2713 ' : '') + t);
               })
+            )
+          ),
+          /* Source-session linkage. Picker only appears when linked AND
+             there's exactly one assignee - admin time split across people
+             can't sensibly share a single source session. */
+          e('div', { className: 'field' },
+            e('label', null, 'Triggered by a session?'),
+            e('div', { style: { display: 'flex', gap: '14px', marginBottom: '6px' } },
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer' } },
+                e('input', {
+                  type: 'radio',
+                  checked: !linkSession,
+                  onChange: function(){ setLinkSession(false); setSourceSessionId(''); }
+                }),
+                'No, manual entry'
+              ),
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer', opacity: assignees.length === 1 ? 1 : 0.5 } },
+                e('input', {
+                  type: 'radio',
+                  checked: linkSession,
+                  disabled: assignees.length !== 1,
+                  onChange: function(){ setLinkSession(true); }
+                }),
+                'Yes, link to session'
+              )
+            ),
+            linkSession && assignees.length !== 1 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+              'Linking requires a single assignee.'
+            ),
+            linkSession && assignees.length === 1 && e('select', {
+              value: sourceSessionId,
+              onChange: function(ev){ setSourceSessionId(ev.target.value); }
+            },
+              e('option', { value: '' }, 'Pick a session...'),
+              pickerSessions.map(function(s){
+                return e('option', { key: s.id, value: s.id }, s.label);
+              }),
+              pickerSessions.length === 0 && e('option', { value: '', disabled: true }, '(No sessions in last 14 days)')
             )
           ),
           e('div', { className: 'field' },
@@ -11143,6 +11327,24 @@
     var modalTuple = useState(null); /* null | 'new' | item-object-for-edit */
     var modal = modalTuple[0]; var setModal = modalTuple[1];
 
+    /* Session detail target opened from a source-session link on an item. */
+    var sourceDetailTuple = useState(null);
+    var sourceDetail = sourceDetailTuple[0]; var setSourceDetail = sourceDetailTuple[1];
+
+    /* Lookup helper: find { client, session } for a given session id by
+       scanning ctx.clients. Returns null when not found (e.g., session
+       was deleted). */
+    function findSessionById(sessId){
+      if (!sessId) return null;
+      var allClients = ctx.allClients || ctx.clients || [];
+      for (var i = 0; i < allClients.length; i++) {
+        var c = allClients[i];
+        var match = (c.sessions || []).find(function(s){ return s.id === sessId; });
+        if (match) return { client: c, session: match };
+      }
+      return null;
+    }
+
     var filterTuple = useState('all'); /* all | mine | <type> */
     var filter = filterTuple[0]; var setFilter = filterTuple[1];
 
@@ -11237,6 +11439,29 @@
                     e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '4px' } },
                       'Assignees: ' + (it.assignees || []).join(', ')
                     ),
+                    it.sourceSessionId && (function(){
+                      var src = findSessionById(it.sourceSessionId);
+                      if (!src) {
+                        return e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '4px', fontStyle: 'italic' } },
+                          '↪ from a deleted session'
+                        );
+                      }
+                      return e('a', {
+                        href: '#',
+                        onClick: function(ev){
+                          ev.preventDefault();
+                          ev.stopPropagation();
+                          setSourceDetail({ session: src.session, client: src.client });
+                        },
+                        style: {
+                          fontSize: '12px',
+                          color: 'var(--teal)',
+                          marginTop: '4px',
+                          display: 'inline-block',
+                          textDecoration: 'none'
+                        }
+                      }, '↪ from ' + src.client.name + ' · ' + formatShort(parseYMD(src.session.date)));
+                    })(),
                     it.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '6px', fontStyle: 'italic' } }, it.note)
                   ),
                   e('div', { style: { textAlign: 'right' } },
@@ -11254,6 +11479,12 @@
         item: modal === 'new' ? null : modal,
         defaultAssignee: trainerName,
         onClose: function(){ setModal(null); }
+      }),
+      sourceDetail && e(SessionDetailModal, {
+        ctx: ctx,
+        session: sourceDetail.session,
+        client: sourceDetail.client,
+        onClose: function(){ setSourceDetail(null); }
       })
     );
   }
@@ -14361,7 +14592,8 @@
         package_restored: 'Restored package',
         package_hard_deleted: 'Hard-deleted package',
         lead_status_change: 'Lead status changed',
-        lead_reassigned: 'Lead reassigned'
+        lead_reassigned: 'Lead reassigned',
+        recovery_logged: 'Logged service recovery'
       };
       return map[action] || action;
     }
