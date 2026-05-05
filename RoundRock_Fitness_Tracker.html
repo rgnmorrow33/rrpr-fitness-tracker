@@ -5923,6 +5923,11 @@
        updateSession. Service recovery prompt fires for no_show/late_cancel. */
     var signOffTuple = useState(null);
     var signOff = signOffTuple[0]; var setSignOff = signOffTuple[1];
+    /* Read-only detail view for already-completed PT sessions tapped on
+       Today. Keeps the trainer on the Today tab instead of routing to
+       ClientDetail. */
+    var sessionDetailTuple = useState(null);
+    var sessionDetail = sessionDetailTuple[0]; var setSessionDetail = sessionDetailTuple[1];
     var recoveryTargetTuple = useState(null);
     var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
 
@@ -6141,11 +6146,10 @@
                 /* Direct sign-off: skip the ClientDetail intermediate. */
                 setSignOff({ client: item.client, session: sess });
               } else {
-                setClientDetailId(item.client.id);
-                setHeaderContext({
-                  title: item.client.name, sub: item.client.location,
-                  onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
-                });
+                /* Already-completed session - open read-only detail in
+                   place. Trainer stays on Today; no navigation to the
+                   client page. */
+                setSessionDetail({ client: item.client, session: sess });
               }
             },
             style: {
@@ -6302,6 +6306,19 @@
           ctx.logServiceRecovery(recoveryTarget.clientId, recoveryTarget.sessionId, recovery);
           setRecoveryTarget(null);
           ctx.toast('Recovery logged ✓');
+        }
+      }),
+      sessionDetail && e(SessionDetailModal, {
+        ctx: ctx,
+        session: sessionDetail.session,
+        client: sessionDetail.client,
+        onClose: function(){ setSessionDetail(null); },
+        onEdit: function(s){
+          /* Admin edit path: re-open the sign-off modal in edit mode so
+             status / sigs can be re-recorded. Routes through the same
+             updateSession path the scheduled flow uses. */
+          setSessionDetail(null);
+          setSignOff({ client: sessionDetail.client, session: s });
         }
       })
     );
