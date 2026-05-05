@@ -1363,6 +1363,31 @@
         });
         return out;
       }
+    },
+
+    /* Notifications: trainer-targeted messages. Inserts come from server-side
+       triggers (Phase 3); client only PATCHes read_at. Custom translator
+       because the table has no updated_at column - makeFieldTranslator would
+       auto-stamp one and break the upsert. */
+    notifications: {
+      toSupabase: function(n){
+        var out = { id: n.id || freshUuid() };
+        if (n.targetTrainerId !== undefined) out.target_trainer_id = n.targetTrainerId;
+        if (n.type !== undefined) out.type = n.type;
+        if (n.payload !== undefined) out.payload = n.payload || {};
+        if (n.readAt !== undefined) out.read_at = n.readAt;
+        return out;
+      },
+      fromSupabase: function(row){
+        return {
+          id: row.id,
+          targetTrainerId: row.target_trainer_id,
+          type: row.type,
+          payload: row.payload || {},
+          readAt: row.read_at,
+          createdAt: row.created_at
+        };
+      }
     }
   };
 
@@ -1521,6 +1546,67 @@
     }
   };
 
+  /* Notifications storage: per-trainer scoped reads, single-row PATCHes,
+     and a filtered realtime subscription. Diverges from makeEntity (which
+     is replace-all) because notifications are server-authored: the client
+     never bulk-saves, only marks rows read. localStorage mode is a no-op
+     shim - notifications are server-pushed, dev mode runs without them. */
+  var notificationsStorage = {
+    listForTrainer: function(trainerId, limit){
+      if (limit == null) limit = 50;
+      if (STORAGE_MODE === 'supabase') {
+        return supabaseClient.from('notifications').select('*')
+          .eq('target_trainer_id', trainerId)
+          .order('created_at', { ascending: false })
+          .limit(limit)
+          .then(function(res){
+            if (res.error) throw res.error;
+            return (res.data || []).map(translate.notifications.fromSupabase);
+          });
+      }
+      return Promise.resolve([]);
+    },
+    markRead: function(id){
+      if (STORAGE_MODE === 'supabase') {
+        return supabaseClient.from('notifications')
+          .update({ read_at: new Date().toISOString() })
+          .eq('id', id)
+          .then(function(res){ if (res.error) throw res.error; });
+      }
+      return Promise.resolve();
+    },
+    markAllRead: function(trainerId){
+      if (STORAGE_MODE === 'supabase') {
+        return supabaseClient.from('notifications')
+          .update({ read_at: new Date().toISOString() })
+          .eq('target_trainer_id', trainerId)
+          .is('read_at', null)
+          .then(function(res){ if (res.error) throw res.error; });
+      }
+      return Promise.resolve();
+    },
+    /* Returns an unsubscribe fn. Server-side filter so other trainers'
+       inserts never hit this client. Separate channel from 'app-changes'
+       (which is unfiltered and shared across the entity tables). */
+    subscribeForTrainer: function(trainerId, onInsert){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        return function(){};
+      }
+      var channel = supabaseClient.channel('notifications-' + trainerId);
+      channel.on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications',
+          filter: 'target_trainer_id=eq.' + trainerId },
+        function(payload){
+          try { onInsert(translate.notifications.fromSupabase(payload.new)); }
+          catch(err){ console.error('Notification insert handler failed:', err); }
+        });
+      channel.subscribe();
+      return function(){
+        try { supabaseClient.removeChannel(channel); } catch(_){}
+      };
+    }
+  };
+
   var storage = {
     trainers:         trainersStorage,
     clients:          makeEntity('cmrc_clients_v3', 'clients', translate.clients),
@@ -1534,6 +1620,7 @@
     leads:            makeEntity('cmrc_queue_v1', 'leads', translate.leads),
     contacts:         makeEntity('cmrc_contacts_v1', 'member_contacts', translate.contacts),
     scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
+    notifications:    notificationsStorage,
     adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
     /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
        'supabase'. Sign-in is per-device by design. Future Claude: do NOT
@@ -3553,6 +3640,15 @@
     var scheduleVersions = schedVersionsTuple[0];
     var setScheduleVersions = schedVersionsTuple[1];
 
+    /* Notifications: trainer-scoped, server-authored. No initial-load
+       coordination with loadAll - the list is keyed on session.trainer_id
+       and (re)loads in its own effect when sign-in resolves. No save
+       useEffect / dirty-check ref - mutations go through targeted
+       storage.notifications.markRead / markAllRead, not replace-all. */
+    var notificationsTuple = useState([]);
+    var notifications = notificationsTuple[0];
+    var setNotifications = notificationsTuple[1];
+
     var pinTuple = useState(DEFAULT_PIN);
     var pin = pinTuple[0];
     var setPin = pinTuple[1];
@@ -3712,6 +3808,38 @@
         setSyncStatus(STORAGE_MODE === 'supabase' ? 'disconnected' : 'idle');
       };
     }, []);
+
+    /* Notifications load + filtered subscription. Re-runs when
+       session.trainer_id changes so a sign-out/sign-in cleanly resets the
+       list and the channel. Hidden for kiosk and Front Desk admin (both
+       have no trainer_id). */
+    useEffect(function(){
+      if (!session || !session.trainer_id) {
+        setNotifications([]);
+        return;
+      }
+      var trainerId = session.trainer_id;
+      var cancelled = false;
+      storage.notifications.listForTrainer(trainerId, 50).then(function(rows){
+        if (!cancelled) setNotifications(rows || []);
+      }).catch(function(err){
+        console.error('Notifications load failed:', err);
+      });
+      var unsubscribe = storage.notifications.subscribeForTrainer(trainerId, function(n){
+        if (cancelled) return;
+        setNotifications(function(prev){
+          /* Dedupe by id - guards against double-fire on reconnect or
+             a self-write echo (triggers won't fire from this client today,
+             but keep the guard cheap rather than relying on that). */
+          if ((prev || []).some(function(p){ return p.id === n.id; })) return prev;
+          return [n].concat(prev || []).slice(0, 50);
+        });
+      });
+      return function(){
+        cancelled = true;
+        try { unsubscribe(); } catch(_){}
+      };
+    }, [session && session.trainer_id]);
 
     /* Per-entity save effects with dirty-check refs. Ref is set BEFORE
        save so a fast follow-up mutation sees the just-saved value, not
@@ -4687,6 +4815,43 @@
       });
     }
 
+    /* Notification mutators. Optimistic local update first, then PATCH;
+       rollback on error and surface via toast (matches the _saveIfDirty
+       failure-surface pattern). */
+    function markNotificationRead(id){
+      var existing = notifications.find(function(n){ return n.id === id; });
+      if (!existing || existing.readAt) return;
+      var now = new Date().toISOString();
+      setNotifications(notifications.map(function(n){
+        return n.id === id ? Object.assign({}, n, { readAt: now }) : n;
+      }));
+      storage.notifications.markRead(id).catch(function(err){
+        console.error('Mark notification read failed:', err);
+        setNotifications(function(prev){
+          return prev.map(function(n){
+            return n.id === id ? Object.assign({}, n, { readAt: existing.readAt || null }) : n;
+          });
+        });
+        toast('Mark read failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
+    }
+    function markAllNotificationsRead(){
+      if (!session || !session.trainer_id) return;
+      var trainerId = session.trainer_id;
+      var prevList = notifications;
+      if (!prevList.some(function(n){ return !n.readAt; })) return;
+      var now = new Date().toISOString();
+      setNotifications(prevList.map(function(n){
+        return n.readAt ? n : Object.assign({}, n, { readAt: now });
+      }));
+      storage.notifications.markAllRead(trainerId).catch(function(err){
+        console.error('Mark all notifications read failed:', err);
+        setNotifications(prevList);
+        toast('Mark all read failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
+    }
+    var unreadCount = notifications.filter(function(n){ return !n.readAt; }).length;
+
     var ctx = {
       trainers: trainers,
       trainerProfiles: trainerProfiles,
@@ -4764,7 +4929,12 @@
       scheduleVersions: scheduleVersions,
       saveScheduleVersion: saveScheduleVersion,
       deleteScheduleVersion: deleteScheduleVersion,
-      activateScheduleVersion: activateScheduleVersion
+      activateScheduleVersion: activateScheduleVersion,
+      /* Notifications (Phase 2 read side) */
+      notifications: notifications,
+      unreadCount: unreadCount,
+      markNotificationRead: markNotificationRead,
+      markAllNotificationsRead: markAllNotificationsRead
     };
 
     /* Loading / error screen. Initial Promise.all hits Supabase over the
@@ -4886,6 +5056,181 @@
       props.toasts.map(function(t){
         return e('div', { key: t.id, className: 'toast ' + (t.kind || '') }, t.msg);
       })
+    );
+  }
+
+  /* ============ NOTIFICATIONS BELL ============
+     Header-right bell. Shows a red dot when unreadCount > 0 (no number).
+     Click toggles a dropdown listing the newest 50. Outside-click closes.
+     Hidden when ctx.session has no trainer_id (kiosk + Front Desk admin). */
+  function notificationText(n){
+    var p = n.payload || {};
+    if (n.type === 'sub_posted')        return 'Sub needed: ' + (p.className || 'class') + ' on ' + (p.date || '?') + ' at ' + (p.time || '?');
+    if (n.type === 'sub_claimed')       return (p.trainerName || 'Someone') + ' claimed your sub for ' + (p.className || 'class') + ' on ' + (p.date || '?');
+    if (n.type === 'class_canceled')    return (p.className || 'Class') + ' on ' + (p.date || '?') + ' canceled';
+    if (n.type === 'class_rescheduled') return (p.className || 'Class') + ' moved from ' + (p.oldTime || '?') + ' to ' + (p.newTime || '?');
+    if (n.type === 'class_assigned')    return 'You’re scheduled for ' + (p.className || 'class') + ' on ' + (p.date || '?');
+    var snippet;
+    try { snippet = JSON.stringify(p); } catch(_){ snippet = ''; }
+    return n.type + ' ' + (snippet || '').slice(0, 80);
+  }
+  function relativeTime(iso){
+    if (!iso) return '';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return '';
+    var diff = Math.max(0, Date.now() - t);
+    var s = Math.floor(diff / 1000);
+    if (s < 60) return 'just now';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    var d = Math.floor(h / 24);
+    if (d === 1) return 'yesterday';
+    if (d < 7) return d + 'd ago';
+    var date = new Date(t);
+    return (date.getMonth() + 1) + '/' + date.getDate();
+  }
+  function NotificationsBell(props){
+    var ctx = props.ctx;
+    var openTuple = useState(false);
+    var open = openTuple[0]; var setOpen = openTuple[1];
+    var rootRef = useRef(null);
+
+    /* Close on outside click. Listener attaches only while open so we
+       don't run a global handler on every tap when the bell is closed. */
+    useEffect(function(){
+      if (!open) return;
+      function onDocClick(ev){
+        if (rootRef.current && !rootRef.current.contains(ev.target)) {
+          setOpen(false);
+        }
+      }
+      document.addEventListener('mousedown', onDocClick);
+      document.addEventListener('touchstart', onDocClick);
+      return function(){
+        document.removeEventListener('mousedown', onDocClick);
+        document.removeEventListener('touchstart', onDocClick);
+      };
+    }, [open]);
+
+    if (!ctx.session || !ctx.session.trainer_id) return null;
+
+    var unread = ctx.unreadCount || 0;
+    var list = ctx.notifications || [];
+
+    var bellBtn = e('button', {
+      onClick: function(){ setOpen(!open); },
+      'aria-label': 'Notifications' + (unread > 0 ? ' (' + unread + ' unread)' : ''),
+      style: {
+        position: 'relative',
+        background: 'rgba(255,255,255,0.08)',
+        color: 'var(--cream)',
+        border: 'none',
+        width: '36px', height: '36px',
+        borderRadius: '999px',
+        fontSize: '18px',
+        cursor: 'pointer',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
+      }
+    },
+      '🔔',
+      unread > 0 && e('span', {
+        style: {
+          position: 'absolute',
+          top: '6px', right: '6px',
+          width: '8px', height: '8px',
+          background: 'var(--red)',
+          borderRadius: '50%',
+          boxShadow: '0 0 0 2px var(--navy)'
+        }
+      })
+    );
+
+    var dropdown = open && e('div', {
+      onClick: function(ev){ ev.stopPropagation(); },
+      style: {
+        position: 'absolute',
+        top: 'calc(100% + 8px)',
+        right: 0,
+        width: '320px',
+        maxHeight: '420px',
+        background: '#fff',
+        border: '1.5px solid var(--border)',
+        borderRadius: '12px',
+        boxShadow: '0 12px 40px rgba(0,0,0,0.18)',
+        zIndex: 500,
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden'
+      }
+    },
+      e('div', {
+        style: {
+          padding: '12px 14px',
+          borderBottom: '1px solid var(--border)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: 'var(--cream-2)'
+        }
+      },
+        e('div', { style: { fontWeight: 600, color: 'var(--navy)', fontSize: '14px' } }, 'Notifications'),
+        unread > 0 && e('button', {
+          onClick: function(){ ctx.markAllNotificationsRead(); },
+          style: {
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: 'var(--teal)', fontSize: '12px', fontWeight: 500, padding: 0
+          }
+        }, 'Mark all read')
+      ),
+      e('div', { style: { overflowY: 'auto', flex: 1 } },
+        list.length === 0
+          ? e('div', { style: { padding: '24px 14px', textAlign: 'center', color: 'var(--slate-soft)', fontSize: '13px' } },
+              'No notifications')
+          : list.map(function(n){
+              var isUnread = !n.readAt;
+              return e('div', {
+                key: n.id,
+                onClick: function(){ if (isUnread) ctx.markNotificationRead(n.id); },
+                style: {
+                  padding: '10px 14px',
+                  borderBottom: '1px solid var(--border)',
+                  cursor: isUnread ? 'pointer' : 'default',
+                  display: 'flex', alignItems: 'flex-start', gap: '8px',
+                  background: isUnread ? '#fff' : 'transparent'
+                }
+              },
+                e('div', {
+                  style: {
+                    width: '8px', height: '8px', flexShrink: 0,
+                    marginTop: '6px',
+                    borderRadius: '50%',
+                    background: isUnread ? 'var(--red)' : 'transparent'
+                  }
+                }),
+                e('div', { style: { minWidth: 0, flex: 1 } },
+                  e('div', {
+                    style: {
+                      fontSize: '13px',
+                      color: isUnread ? 'var(--navy)' : 'var(--slate-soft)',
+                      fontWeight: isUnread ? 600 : 400,
+                      lineHeight: 1.35
+                    }
+                  }, notificationText(n)),
+                  e('div', {
+                    style: {
+                      fontSize: '11px',
+                      color: 'var(--slate-soft)',
+                      marginTop: '2px'
+                    }
+                  }, relativeTime(n.createdAt))
+                )
+              );
+            })
+      )
+    );
+
+    return e('div', { ref: rootRef, style: { position: 'relative' } },
+      bellBtn,
+      dropdown
     );
   }
 
@@ -6244,6 +6589,7 @@
               ]
         ),
         e('div', { className: 'header-right' },
+          e(NotificationsBell, { ctx: ctx }),
           e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
         )
       ),
@@ -13161,6 +13507,7 @@
           e('div', { className: 'sub' }, 'Round Rock Parks and Recreation')
         ),
         e('div', { className: 'header-right' },
+          e(NotificationsBell, { ctx: ctx }),
           e('span', { className: 'header-pill' }, 'Admin'),
           e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
         )
