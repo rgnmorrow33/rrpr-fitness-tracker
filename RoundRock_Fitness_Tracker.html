@@ -4276,6 +4276,10 @@
 
     /* ---- class CRUD ---- */
     function upsertClass(cl){
+      /* Default is_active=true when missing. The classes table has
+         is_active as NOT NULL, so any insert that omits it fails the
+         constraint. Mirrors the upsertClient guard. */
+      if (cl && cl.is_active === undefined) cl = Object.assign({}, cl, { is_active: true });
       setClasses(function(list){
         var exists = list.some(function(x){ return x.id === cl.id; });
         if (exists) return list.map(function(x){ return x.id === cl.id ? cl : x; });
@@ -4854,7 +4858,10 @@
           seenInVersion[key] = true;
           /* Reactivate or update with version data. Class records use
              startTime/endTime (matching the rest of the app); legacy
-             versions may carry only `time`, so accept either. */
+             versions may carry only `time`, so accept either. Preserve
+             existing is_active when set; null/undefined falls back to
+             true so the NOT NULL constraint on classes.is_active holds
+             for rows that pre-date the field. */
           var copy = Object.assign({}, c);
           if (vc.startTime) copy.startTime = vc.startTime;
           else if (vc.time) copy.startTime = vc.time;
@@ -4864,6 +4871,7 @@
           copy.seasonStart = startYMD;
           copy.seasonEnd = endYMD;
           copy.scheduleVersionId = versionId;
+          if (copy.is_active == null) copy.is_active = true;
           return copy;
         });
         /* Pass 2: append classes from version that aren't in list yet */
@@ -4882,6 +4890,7 @@
             seasonStart: startYMD,
             seasonEnd: endYMD,
             scheduleVersionId: versionId,
+            is_active: true,
             attendance: [],
             subAssignments: [],
             cancellations: [],
