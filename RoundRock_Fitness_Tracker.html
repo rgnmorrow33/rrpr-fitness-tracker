@@ -6736,6 +6736,536 @@
     );
   }
 
+  /* ============ ALL-TRAINERS GRID (Sling-style) ============
+     Cross-trainer schedule grid for the "All trainers" filter. Two modes:
+     - 'week': trainer rows × 7 day columns. Each cell stacks blocks.
+     - 'day':  trainer rows × hour columns (5 AM - 10 PM), blocks
+        positioned by start/end time across the strip.
+     Click a block to open the existing detail flow for that activity.
+     Color codes by activity type: GX uses CLASS_TYPE_COLOR by subtype,
+     PT teal, WRO gold, manual admin slate. */
+  function AllTrainersGridView(props){
+    var ctx = props.ctx;
+    var mode = props.mode === 'day' ? 'day' : 'week';
+    var setHeaderContext = props.setHeaderContext || function(){};
+
+    var weekOffsetTuple = useState(0);
+    var weekOffset = weekOffsetTuple[0]; var setWeekOffset = weekOffsetTuple[1];
+    var dayOffsetTuple = useState(0);
+    var dayOffset = dayOffsetTuple[0]; var setDayOffset = dayOffsetTuple[1];
+
+    /* Click-through targets - mirror the per-tab pattern so clicks land
+       on the same flows the single-trainer views already use. */
+    var classDetailIdTuple = useState(null);
+    var classDetailId = classDetailIdTuple[0]; var setClassDetailId = classDetailIdTuple[1];
+    var clientDetailIdTuple = useState(null);
+    var clientDetailId = clientDetailIdTuple[0]; var setClientDetailId = clientDetailIdTuple[1];
+    var signOffTuple = useState(null);
+    var signOff = signOffTuple[0]; var setSignOff = signOffTuple[1];
+    var sessionDetailTuple = useState(null);
+    var sessionDetail = sessionDetailTuple[0]; var setSessionDetail = sessionDetailTuple[1];
+    var wroOpenTuple = useState(null);
+    var wroOpen = wroOpenTuple[0]; var setWroOpen = wroOpenTuple[1];
+    var adminOpenTuple = useState(null);
+    var adminOpen = adminOpenTuple[0]; var setAdminOpen = adminOpenTuple[1];
+    var recoveryTargetTuple = useState(null);
+    var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
+
+    /* Detail swaps replace the grid in place; the back chevron in the
+       outer header (driven by setHeaderContext) restores the grid. */
+    if (classDetailId) {
+      var clForDetail = ctx.classes.find(function(x){ return x.id === classDetailId; });
+      if (!clForDetail) { setClassDetailId(null); return null; }
+      return e(ClassDetail, {
+        ctx: ctx, cls: clForDetail, hideHeader: true,
+        onBack: function(){ setClassDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
+    }
+    if (clientDetailId) {
+      var cliForDetail = ctx.clients.find(function(x){ return x.id === clientDetailId; });
+      if (!cliForDetail) { setClientDetailId(null); return null; }
+      return e(ClientDetail, {
+        ctx: ctx, client: cliForDetail, hideHeader: true,
+        onBack: function(){ setClientDetailId(null); setHeaderContext(null); },
+        canEdit: true
+      });
+    }
+
+    var allTrainers = (ctx.trainers || []).slice().sort(function(a, b){
+      return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
+    });
+
+    function timeToMin(t){
+      if (!t) return 0;
+      var p = String(t).split(':');
+      var h = parseInt(p[0], 10) || 0;
+      var m = parseInt(p[1], 10) || 0;
+      return h * 60 + m;
+    }
+    function minToTime(m){
+      m = Math.max(0, Math.min(24 * 60 - 1, m));
+      var hh = String(Math.floor(m / 60)).padStart(2, '0');
+      var mm = String(m % 60).padStart(2, '0');
+      return hh + ':' + mm;
+    }
+
+    /* Build the block list for one (trainer, dateYMD) cell. */
+    function buildEvents(trainerName, dateYMD){
+      var events = [];
+      var dDate = parseYMD(dateYMD);
+
+      /* GX classes - taught or actively subbed by this trainer. Skip
+         cancelled / closed occurrences. */
+      var occs = occurrencesInWindow(ctx.classes, dDate, dDate, ctx.closures);
+      occs.forEach(function(o){
+        if (o.isClosed || o.isCancelled) return;
+        var assignedSub = o.assignedSub;
+        var teaching = trainerNameMatches(trainerName, o.cls.instructor) ||
+                       (assignedSub && trainerNameMatches(trainerName, assignedSub.subInstructor || assignedSub.claimedBy));
+        if (!teaching) return;
+        var cls = o.cls;
+        events.push({
+          kind: 'gx',
+          start: cls.startTime || '00:00',
+          end: cls.endTime || cls.startTime || '00:00',
+          color: CLASS_TYPE_COLOR[cls.classType] || 'var(--teal)',
+          label: cls.name || 'Class',
+          onClick: function(){
+            setClassDetailId(cls.id);
+            setHeaderContext({
+              title: cls.name, sub: cls.location,
+              onBack: function(){ setClassDetailId(null); setHeaderContext(null); }
+            });
+          }
+        });
+      });
+
+      /* PT sessions on this date for this trainer (any status). */
+      (ctx.clients || []).forEach(function(client){
+        (client.sessions || []).forEach(function(s){
+          if (s.date !== dateYMD) return;
+          var sessTrainer = s.trainerName || client.trainerName;
+          if (!trainerNameMatches(trainerName, sessTrainer)) return;
+          var startTime = s.time || '00:00';
+          var dur = (typeof s.durationHours === 'number' && s.durationHours > 0) ? s.durationHours : 1;
+          var endTime = minToTime(timeToMin(startTime) + Math.round(dur * 60));
+          events.push({
+            kind: 'pt',
+            start: startTime,
+            end: endTime,
+            color: 'var(--teal)',
+            label: client.name,
+            onClick: function(){
+              if (s.status === 'scheduled') {
+                setSignOff({ client: client, session: s });
+              } else {
+                setSessionDetail({ client: client, session: s });
+              }
+            }
+          });
+        });
+      });
+
+      /* WROs - claimer or specialist match, orientation date in window. */
+      (ctx.wros || []).forEach(function(w){
+        var orientYMD = (w.post && w.post.orientationDate) || w.date;
+        if (orientYMD !== dateYMD) return;
+        var sp = (w.post && w.post.specialistName) || w.claimedBy;
+        if (!trainerNameMatches(trainerName, sp)) return;
+        var startTime = (w.post && w.post.timeIn) || w.time || '10:00';
+        var endTime = (w.post && w.post.timeOut) || null;
+        if (!endTime) {
+          var wDur = (w.post && typeof w.post.durationHours === 'number' && w.post.durationHours > 0) ? w.post.durationHours : 1;
+          endTime = minToTime(timeToMin(startTime) + Math.round(wDur * 60));
+        }
+        events.push({
+          kind: 'wro',
+          start: startTime,
+          end: endTime,
+          color: 'var(--gold)',
+          label: w.participantName ? ('WRO · ' + w.participantName) : 'WRO',
+          onClick: function(){ setWroOpen(w); }
+        });
+      });
+
+      /* Manual admin items where this trainer is an assignee. */
+      (ctx.items || []).forEach(function(it){
+        if (it.date !== dateYMD) return;
+        var matches = (it.assignees || []).some(function(n){ return trainerNameMatches(trainerName, n); });
+        if (!matches) return;
+        var aLabel = it.title || (it.type === 'Other' ? (it.customType || 'Other') : it.type) || 'Admin';
+        events.push({
+          kind: 'admin',
+          start: it.timeIn || '00:00',
+          end: it.timeOut || it.timeIn || '00:00',
+          color: 'var(--slate)',
+          label: aLabel,
+          onClick: function(){ setAdminOpen(it); }
+        });
+      });
+
+      events.sort(function(a, b){
+        return (a.start || '') < (b.start || '') ? -1 : 1;
+      });
+      return events;
+    }
+
+    /* Lane assignment for the day grid: overlapping events drop to the
+       next free lane so they don't visually collide. */
+    function assignLanes(events){
+      var laneEnds = [];
+      events.forEach(function(ev){
+        var startMin = timeToMin(ev.start);
+        var endMin = timeToMin(ev.end);
+        var assigned = -1;
+        for (var i = 0; i < laneEnds.length; i++) {
+          if (laneEnds[i] <= startMin) { assigned = i; break; }
+        }
+        if (assigned === -1) { assigned = laneEnds.length; laneEnds.push(0); }
+        laneEnds[assigned] = endMin;
+        ev.lane = assigned;
+      });
+      return Math.max(1, laneEnds.length);
+    }
+
+    /* Modals shared between modes. Rendered as an array; React keys keep
+       reconciliation stable. */
+    var modals = [
+      signOff && e(LogSessionModal, {
+        key: 'm-signoff',
+        ctx: ctx,
+        client: signOff.client,
+        existingSession: signOff.session,
+        onClose: function(){ setSignOff(null); },
+        onLog: function(sess){
+          var needsRecovery = sess.status === 'no_show' || sess.status === 'late_cancel';
+          var clientId = signOff.client.id;
+          var sessId = signOff.session.id;
+          ctx.updateSession(clientId, sessId, {
+            status: sess.status, date: sess.date, time: sess.time,
+            note: sess.note, durationHours: sess.durationHours,
+            trainerSig: sess.trainerSig, clientSig: sess.clientSig
+          });
+          setSignOff(null);
+          ctx.toast('Session signed off ✓');
+          if (needsRecovery) setRecoveryTarget({
+            clientId: clientId, sessionId: sessId,
+            status: sess.status, durationHours: sess.durationHours || 1
+          });
+        }
+      }),
+      sessionDetail && e(SessionDetailModal, {
+        key: 'm-sessiondetail',
+        ctx: ctx,
+        session: sessionDetail.session,
+        client: sessionDetail.client,
+        onClose: function(){ setSessionDetail(null); },
+        onEdit: function(s){
+          setSessionDetail(null);
+          setSignOff({ client: sessionDetail.client, session: s });
+        }
+      }),
+      wroOpen && e(PostWROModal, {
+        key: 'm-wro',
+        ctx: ctx,
+        wro: wroOpen,
+        onClose: function(){ setWroOpen(null); },
+        onSave: function(updated){
+          ctx.upsertWRO(updated);
+          setWroOpen(null);
+          ctx.toast('Orientation saved ✓');
+        }
+      }),
+      adminOpen && e(LogAdminTimeModal, {
+        key: 'm-admin',
+        ctx: ctx,
+        item: adminOpen,
+        onClose: function(){ setAdminOpen(null); }
+      }),
+      recoveryTarget && e(ServiceRecoveryModal, {
+        key: 'm-recovery',
+        ctx: ctx,
+        durationHours: recoveryTarget.durationHours,
+        sourceLabel: recoveryTarget.status === 'no_show' ? 'No-show session' : 'Late cancel session',
+        onClose: function(){ setRecoveryTarget(null); },
+        onSave: function(recovery){
+          ctx.logServiceRecovery(recoveryTarget.clientId, recoveryTarget.sessionId, recovery);
+          setRecoveryTarget(null);
+          ctx.toast('Recovery logged ✓');
+        }
+      })
+    ];
+
+    function legendChip(color, label){
+      return e('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+        e('span', { style: { display: 'inline-block', width: '10px', height: '10px', background: color, borderRadius: '2px' } }),
+        label
+      );
+    }
+    var legend = e('div', {
+      style: {
+        display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '10px',
+        fontSize: '11px', color: 'var(--slate)'
+      }
+    },
+      legendChip('var(--teal)', 'PT'),
+      legendChip('var(--gold)', 'WRO'),
+      legendChip('var(--slate)', 'Admin'),
+      legendChip('#a63d9e', 'GX (by class type)')
+    );
+
+    var todayYMD = todayStr();
+
+    if (mode === 'day') {
+      var dayDate = addDays(parseYMD(todayYMD), dayOffset);
+      var dayYMD = toYMD(dayDate);
+      var dayLabel = dayDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      var WINDOW_START = 5 * 60;
+      var WINDOW_END = 22 * 60;
+      var WINDOW_SIZE = WINDOW_END - WINDOW_START;
+      var hourLabels = [];
+      for (var hh = 5; hh <= 22; hh++) {
+        var ampm = hh >= 12 ? 'P' : 'A';
+        var h12 = hh % 12; if (h12 === 0) h12 = 12;
+        hourLabels.push(h12 + ampm);
+      }
+      var trainerColW = 110;
+      var hourColW = 60;
+      var stripW = hourColW * 18;
+
+      return e('div', null,
+        e('div', {
+          style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '10px' }
+        },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setDayOffset(dayOffset - 1); } }, '← Prev'),
+          e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '20px', color: 'var(--navy)' } }, dayLabel),
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setDayOffset(dayOffset + 1); } }, 'Next →')
+        ),
+        dayOffset !== 0 && e('div', { style: { textAlign: 'center', marginBottom: '8px' } },
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setDayOffset(0); } }, 'Today')
+        ),
+        legend,
+        e('div', {
+          style: { overflowX: 'auto', border: '1.5px solid var(--border)', borderRadius: '12px', background: '#fff' }
+        },
+          e('div', { style: { minWidth: (trainerColW + stripW) + 'px' } },
+            e('div', { style: { display: 'flex', borderBottom: '1.5px solid var(--border)', background: 'var(--cream-2)' } },
+              e('div', {
+                style: {
+                  width: trainerColW + 'px', flexShrink: 0,
+                  padding: '8px 10px', fontSize: '11px', fontWeight: 700,
+                  textTransform: 'uppercase', color: 'var(--slate)', letterSpacing: '0.05em'
+                }
+              }, 'Trainer'),
+              e('div', { style: { display: 'flex', flex: 1 } },
+                hourLabels.map(function(lbl, i){
+                  return e('div', {
+                    key: 'h-' + i,
+                    style: {
+                      width: hourColW + 'px', flexShrink: 0,
+                      padding: '8px 0', textAlign: 'center',
+                      fontSize: '11px', fontWeight: 700, color: 'var(--slate)',
+                      borderLeft: i > 0 ? '1px solid var(--border)' : 'none'
+                    }
+                  }, lbl);
+                })
+              )
+            ),
+            allTrainers.map(function(name){
+              var events = buildEvents(name, dayYMD);
+              var laneCount = assignLanes(events);
+              var laneH = 26;
+              var rowH = Math.max(1, laneCount) * laneH + 8;
+              return e('div', {
+                key: 'r-' + name,
+                style: { display: 'flex', minHeight: rowH + 'px', borderBottom: '1px solid var(--border)' }
+              },
+                e('div', {
+                  style: {
+                    width: trainerColW + 'px', flexShrink: 0,
+                    padding: '10px', fontSize: '13px', fontWeight: 600,
+                    color: 'var(--navy)', background: 'var(--cream-2)',
+                    borderRight: '1px solid var(--border)',
+                    display: 'flex', alignItems: 'center'
+                  }
+                }, name),
+                e('div', { style: { flex: 1, position: 'relative', minHeight: rowH + 'px' } },
+                  hourLabels.map(function(lbl, i){
+                    if (i === 0) return null;
+                    return e('div', {
+                      key: 'gl-' + i,
+                      style: {
+                        position: 'absolute',
+                        left: (i * hourColW) + 'px',
+                        top: 0, bottom: 0,
+                        borderLeft: '1px dashed var(--border)',
+                        pointerEvents: 'none'
+                      }
+                    });
+                  }),
+                  events.map(function(ev, i){
+                    var startMinRaw = timeToMin(ev.start);
+                    var endMinRaw = timeToMin(ev.end);
+                    var startMin = Math.max(WINDOW_START, Math.min(WINDOW_END, startMinRaw));
+                    var endMin = Math.max(WINDOW_START, Math.min(WINDOW_END, endMinRaw));
+                    if (endMin <= startMin) endMin = Math.min(WINDOW_END, startMin + 30);
+                    var leftPx = ((startMin - WINDOW_START) / WINDOW_SIZE) * stripW;
+                    var widthPx = Math.max(28, ((endMin - startMin) / WINDOW_SIZE) * stripW);
+                    return e('div', {
+                      key: 'ev-' + i,
+                      onClick: ev.onClick,
+                      title: formatTime12(ev.start) + '–' + formatTime12(ev.end) + ' · ' + ev.label,
+                      style: {
+                        position: 'absolute',
+                        left: leftPx + 'px',
+                        width: widthPx + 'px',
+                        top: (ev.lane * laneH + 4) + 'px',
+                        height: (laneH - 4) + 'px',
+                        background: ev.color,
+                        color: '#fff',
+                        borderRadius: '4px',
+                        padding: '0 6px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        lineHeight: (laneH - 4) + 'px'
+                      }
+                    }, formatTime12(ev.start) + ' · ' + ev.label);
+                  })
+                )
+              );
+            })
+          )
+        ),
+        modals
+      );
+    }
+
+    /* week mode */
+    var weekTodayDate = parseYMD(todayYMD);
+    var startOfThisWeek = (function(){
+      var d = new Date(weekTodayDate.getTime());
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - d.getDay());
+      return d;
+    })();
+    var weekStart = addDays(startOfThisWeek, weekOffset * 7);
+    var weekEnd = addDays(weekStart, 6);
+    var weekRange = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+      ' - ' + weekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    var dayCols = [];
+    for (var di = 0; di < 7; di++) {
+      var dd = addDays(weekStart, di);
+      dayCols.push({ date: dd, ymd: toYMD(dd) });
+    }
+
+    return e('div', null,
+      e('div', {
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '10px' }
+      },
+        e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setWeekOffset(weekOffset - 1); } }, '← Prev'),
+        e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '18px', color: 'var(--navy)' } }, weekRange),
+        e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setWeekOffset(weekOffset + 1); } }, 'Next →')
+      ),
+      weekOffset !== 0 && e('div', { style: { textAlign: 'center', marginBottom: '8px' } },
+        e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setWeekOffset(0); } }, 'This week')
+      ),
+      legend,
+      e('div', {
+        style: { overflowX: 'auto', border: '1.5px solid var(--border)', borderRadius: '12px', background: '#fff' }
+      },
+        e('div', { style: { minWidth: '900px' } },
+          e('div', { style: { display: 'flex', borderBottom: '1.5px solid var(--border)', background: 'var(--cream-2)' } },
+            e('div', {
+              style: {
+                width: '110px', flexShrink: 0,
+                padding: '8px 10px', fontSize: '11px', fontWeight: 700,
+                textTransform: 'uppercase', color: 'var(--slate)', letterSpacing: '0.05em'
+              }
+            }, 'Trainer'),
+            dayCols.map(function(d, i){
+              var isToday = d.ymd === todayYMD;
+              return e('div', {
+                key: 'd-' + i,
+                style: {
+                  flex: 1, minWidth: '110px',
+                  padding: '8px', textAlign: 'center',
+                  borderLeft: i > 0 ? '1px solid var(--border)' : 'none',
+                  background: isToday ? 'var(--teal-bg)' : 'transparent'
+                }
+              },
+                e('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700 } },
+                  d.date.toLocaleDateString('en-US', { weekday: 'short' })
+                ),
+                e('div', { style: { fontSize: '14px', fontWeight: 700, color: isToday ? 'var(--teal)' : 'var(--navy)' } },
+                  d.date.getDate()
+                )
+              );
+            })
+          ),
+          allTrainers.map(function(name){
+            return e('div', {
+              key: 'r-' + name,
+              style: { display: 'flex', borderBottom: '1px solid var(--border)' }
+            },
+              e('div', {
+                style: {
+                  width: '110px', flexShrink: 0,
+                  padding: '10px', fontSize: '13px', fontWeight: 600,
+                  color: 'var(--navy)', background: 'var(--cream-2)',
+                  borderRight: '1px solid var(--border)',
+                  display: 'flex', alignItems: 'center'
+                }
+              }, name),
+              dayCols.map(function(d, i){
+                var events = buildEvents(name, d.ymd);
+                var isToday = d.ymd === todayYMD;
+                return e('div', {
+                  key: 'c-' + i,
+                  style: {
+                    flex: 1, minWidth: '110px',
+                    padding: '6px',
+                    borderLeft: i > 0 ? '1px solid var(--border)' : 'none',
+                    background: isToday ? 'rgba(13, 115, 119, 0.04)' : 'transparent',
+                    minHeight: '44px'
+                  }
+                },
+                  events.length === 0
+                    ? e('div', { style: { color: 'var(--slate-soft)', fontSize: '11px', fontStyle: 'italic', textAlign: 'center', paddingTop: '6px' } }, '—')
+                    : events.map(function(ev, j){
+                        return e('div', {
+                          key: 'b-' + j,
+                          onClick: ev.onClick,
+                          title: formatTime12(ev.start) + '–' + formatTime12(ev.end) + ' · ' + ev.label,
+                          style: {
+                            background: ev.color,
+                            color: '#fff',
+                            borderRadius: '4px',
+                            padding: '3px 6px',
+                            marginBottom: '3px',
+                            fontSize: '11px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }
+                        }, formatTime12(ev.start) + ' · ' + ev.label);
+                      })
+                );
+              })
+            );
+          })
+        )
+      ),
+      modals
+    );
+  }
+
   /* ============ TRAINER VIEW (PT + GX toggle) ============ */
   function TrainerView(props){
     var ctx = props.ctx;
@@ -6826,33 +7356,16 @@
 
     var content;
     var contentKey = tab + ':' + navGen;
-    /* "All trainers" stack only applies to Today and Schedule (the day +
-       week schedule views). Other tabs render as before for the signed-in
-       user even when "All" is selected. */
+    /* "All trainers" applies only to Today and Schedule (the day + week
+       schedule surfaces). Other tabs render as the signed-in user even
+       when "All" is selected. */
     if (canViewAnyTrainerSchedule && isAllMode && (tab === 'today' || tab === 'schedule')) {
-      var allTrainers = (ctx.trainers || []).slice().sort(function(a, b){
-        return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
+      content = e(AllTrainersGridView, {
+        key: contentKey,
+        ctx: ctx,
+        mode: tab === 'today' ? 'day' : 'week',
+        setHeaderContext: setHeaderContext
       });
-      content = e('div', null,
-        allTrainers.map(function(name){
-          var sectionKey = tab + ':all:' + name + ':' + navGen;
-          var sectionHeader = e('div', {
-            style: {
-              display: 'flex', alignItems: 'baseline', gap: '8px',
-              padding: '8px 12px',
-              background: 'var(--navy)', color: '#fff',
-              borderRadius: '10px', marginTop: '14px', marginBottom: '8px'
-            }
-          },
-            e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', opacity: 0.8 } }, 'Trainer'),
-            e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '18px' } }, name)
-          );
-          var body = tab === 'today'
-            ? e(TrainerToday, { ctx: ctx, trainerName: name, setHeaderContext: setHeaderContext, compact: true })
-            : e(TrainerWeekView, { ctx: ctx, trainerName: name, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
-          return e('div', { key: sectionKey }, sectionHeader, body);
-        })
-      );
     } else if (tab === 'today') content = e(TrainerToday, { key: contentKey, ctx: ctx, trainerName: effectiveTrainerName, setHeaderContext: setHeaderContext });
     else if (tab === 'schedule') content = e(TrainerWeekView, { key: contentKey, ctx: ctx, trainerName: effectiveTrainerName, setHeaderContext: setHeaderContext, allowDirectSignOff: true });
     else if (tab === 'pt') content = e(TrainerPT, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
