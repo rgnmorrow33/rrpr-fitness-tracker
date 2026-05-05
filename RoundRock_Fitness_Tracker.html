@@ -2071,6 +2071,39 @@
     var s = String(v).replace(/"/g, '""');
     return '"' + s + '"';
   }
+  /* Robust CSV parser. Handles quoted fields including embedded commas,
+     escaped double quotes ("" inside a quoted field), and CR / LF / CRLF
+     line endings. Returns an array of rows, each row an array of cells.
+     Hoisted so the schedule import and the RecTrac client import share
+     one implementation. */
+  function parseCSV(text){
+    var lines = [];
+    var cur = [];
+    var field = '';
+    var inQuotes = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else { inQuotes = false; }
+        } else {
+          field += ch;
+        }
+      } else {
+        if (ch === '"') { inQuotes = true; }
+        else if (ch === ',') { cur.push(field); field = ''; }
+        else if (ch === '\n' || ch === '\r') {
+          if (ch === '\r' && text[i + 1] === '\n') i++;
+          cur.push(field); field = '';
+          if (cur.length > 1 || (cur.length === 1 && cur[0] !== '')) lines.push(cur);
+          cur = [];
+        } else { field += ch; }
+      }
+    }
+    if (field !== '' || cur.length > 0) { cur.push(field); lines.push(cur); }
+    return lines;
+  }
   function todayStr(){
     var d = new Date();
     var m = String(d.getMonth()+1).padStart(2,'0');
@@ -4764,8 +4797,11 @@
        no seasonEnd set, mark them as ended on (newScheduleStart - 1 day).
        This preserves all historical attendance and instructor data while
        removing them from active rotation. */
-    function activateScheduleVersion(versionId){
-      var version = (schedVersionsTuple[0] || []).find(function(v){ return v.id === versionId; });
+    function activateScheduleVersion(versionId, versionObj){
+      /* Optional versionObj lets callers pass the version directly (e.g.
+         immediately after saveScheduleVersion within the same tick, when
+         schedVersionsTuple state hasn't been committed yet). */
+      var version = versionObj || (schedVersionsTuple[0] || []).find(function(v){ return v.id === versionId; });
       if (!version) return { ok: false, reason: 'Version not found' };
       var startYMD = version.startDate;
       var endYMD = version.endDate || null;
@@ -4789,6 +4825,24 @@
 
       var versionKeys = {};
       (version.classes || []).forEach(function(vc){ versionKeys[classMatchKey(vc)] = vc; });
+
+      /* Pre-count new vs existing rows. Computed against the closure's
+         current classes snapshot (non-deleted) so the counts can be
+         returned to the caller for the import toast without depending on
+         the state-update closure. Each version row is either an update
+         (its key matches an existing active class) or a create. */
+      var snapshotClasses = (classesTuple[0] || []);
+      var existingActiveKeys = {};
+      snapshotClasses.forEach(function(c){
+        if (c.deleted_at) return;
+        existingActiveKeys[classMatchKey(c)] = true;
+      });
+      var createdCount = 0;
+      var updatedCount = 0;
+      (version.classes || []).forEach(function(vc){
+        if (existingActiveKeys[classMatchKey(vc)]) updatedCount++;
+        else createdCount++;
+      });
 
       setClasses(function(list){
         var seenInVersion = {};
@@ -4864,7 +4918,7 @@
         });
       });
 
-      return { ok: true };
+      return { ok: true, created: createdCount, updated: updatedCount };
     }
 
     /* v2.6: auto-activation. On every render where today >= a version's
@@ -13152,6 +13206,15 @@
     var startDate = startTuple[0]; var setStartDate = startTuple[1];
     var endTuple = useState('');
     var endDate = endTuple[0]; var setEndDate = endTuple[1];
+    /* File-drop UI state. fileMeta holds the chosen file's name/size for
+       display; isDragging drives the drop-zone hover style. The raw text
+       is held internally for re-parse but no longer surfaced as a
+       textarea. */
+    var fileMetaTuple = useState(null);
+    var fileMeta = fileMetaTuple[0]; var setFileMeta = fileMetaTuple[1];
+    var isDraggingTuple = useState(false);
+    var isDragging = isDraggingTuple[0]; var setIsDragging = isDraggingTuple[1];
+    var fileInputRef = useRef(null);
     var pasteTuple = useState('');
     var paste = pasteTuple[0]; var setPaste = pasteTuple[1];
     var parsedTuple = useState([]);
@@ -13169,18 +13232,18 @@
 
     /* CSV parser. Expected columns: Class Name, Day, Time, Location, Instructor, Duration (min)
        Header row is required for clarity. Day accepts MO/TU/WE/TH/FR/SA/SU or
-       full names. Time can be 24h ("09:30") or 12h ("9:30 AM"). */
+       full names. Time can be 24h ("09:30") or 12h ("9:30 AM"). Headers are
+       tolerant of snake_case and kebab-case (class_name, day_of_week,
+       start_time, duration_minutes etc) since RecTrac and similar exports
+       use those forms. */
     function parsePaste(text){
-      var lines = text.split(/\r?\n/).map(function(l){ return l.trim(); }).filter(function(l){ return l.length > 0; });
-      if (lines.length === 0) { setParsedClasses([]); setParseError(''); return; }
+      var rows = parseCSV(text || '');
+      if (rows.length === 0) { setParsedClasses([]); setParseError(''); return; }
 
-      function parseRow(line){
-        /* Allow comma OR tab separation */
-        var sep = line.indexOf('\t') !== -1 ? '\t' : ',';
-        return line.split(sep).map(function(s){ return s.replace(/^"|"$/g, '').trim(); });
+      function normHeader(s){
+        return (s || '').toString().toLowerCase().replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ').trim();
       }
-
-      var header = parseRow(lines[0]).map(function(s){ return s.toLowerCase(); });
+      var header = rows[0].map(normHeader);
       function colIdx(names){
         for (var i = 0; i < names.length; i++) {
           var idx = header.indexOf(names[i]);
@@ -13193,7 +13256,7 @@
       var idxTime = colIdx(['time', 'start time', 'start']);
       var idxLoc = colIdx(['location', 'site', 'facility']);
       var idxInstr = colIdx(['instructor', 'teacher', 'lead']);
-      var idxDur = colIdx(['duration', 'duration (min)', 'minutes', 'mins']);
+      var idxDur = colIdx(['duration', 'duration (min)', 'duration min', 'duration minutes', 'minutes', 'mins']);
 
       if (idxName === -1 || idxDay === -1 || idxTime === -1) {
         setParseError('Missing required columns. Need at least: Class Name, Day, Time. Got: ' + header.join(', '));
@@ -13230,22 +13293,23 @@
         return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
       }
 
-      var rows = [];
+      var parsed = [];
       var errors = [];
-      for (var i = 1; i < lines.length; i++) {
-        var r = parseRow(lines[i]);
-        var className = r[idxName] || '';
+      for (var i = 1; i < rows.length; i++) {
+        var r = rows[i];
+        if (!r || r.every(function(c){ return (c || '').trim() === ''; })) continue;
+        var className = (r[idxName] || '').trim();
         var day = normDay(r[idxDay]);
         var startTime = normTime(r[idxTime]);
-        var location = idxLoc !== -1 ? (r[idxLoc] || '') : '';
-        var instructor = idxInstr !== -1 ? (r[idxInstr] || '') : '';
+        var location = idxLoc !== -1 ? (r[idxLoc] || '').trim() : '';
+        var instructor = idxInstr !== -1 ? (r[idxInstr] || '').trim() : '';
         var dur = idxDur !== -1 ? parseInt(r[idxDur], 10) : 60;
         if (isNaN(dur) || dur <= 0) dur = 60;
         if (!className) { errors.push('Row ' + (i+1) + ': missing class name'); continue; }
         if (!day) { errors.push('Row ' + (i+1) + ': invalid day'); continue; }
         if (!startTime) { errors.push('Row ' + (i+1) + ': invalid time'); continue; }
         var endTime = addMinutesToTime(startTime, dur);
-        rows.push({
+        parsed.push({
           name: className,
           dayOfWeek: day,
           startTime: startTime,
@@ -13255,14 +13319,14 @@
           duration: dur
         });
       }
-      setParsedClasses(rows);
+      setParsedClasses(parsed);
       setParseError(errors.length > 0 ? (errors.length + ' issue(s): ' + errors.slice(0, 3).join('; ')) : '');
     }
 
     function saveNew(){
       if (!name.trim()) { ctx.toast && ctx.toast('Name is required', 'error'); return; }
       if (!startDate) { ctx.toast && ctx.toast('Start date is required', 'error'); return; }
-      if (parsedClasses.length === 0) { ctx.toast && ctx.toast('Paste in at least one class', 'error'); return; }
+      if (parsedClasses.length === 0) { ctx.toast && ctx.toast('Drop a CSV with at least one class', 'error'); return; }
       var v = {
         id: uid(),
         name: name.trim(),
@@ -13273,12 +13337,70 @@
         activatedAt: null
       };
       ctx.saveScheduleVersion(v);
-      ctx.toast && ctx.toast('Schedule version saved \u2713', 'success');
-      /* If the start date is today or earlier, the auto-activation effect
-         will pick it up. If it's in the future, it will activate when
-         the date arrives. */
+      /* If the start date is today or earlier, activate immediately so
+         the toast can report new vs updated counts. Pass the version
+         object directly since saveScheduleVersion's setState hasn't
+         committed yet within this synchronous block. Future-dated
+         versions defer to the auto-activation effect. */
+      if (v.startDate <= todayStr()) {
+        var result = ctx.activateScheduleVersion(v.id, v);
+        if (result && result.ok) {
+          var total = (result.created || 0) + (result.updated || 0);
+          ctx.toast && ctx.toast(
+            'Imported ' + total + ' (' + (result.created || 0) + ' new, ' + (result.updated || 0) + ' updated)',
+            'success'
+          );
+        } else {
+          ctx.toast && ctx.toast('Saved, but activation failed: ' + ((result && result.reason) || 'unknown'), 'error');
+        }
+      } else {
+        ctx.toast && ctx.toast('Schedule saved. Activates ' + startDate + '.', 'success');
+      }
       setName(''); setStartDate(todayStr()); setEndDate(''); setPaste(''); setParsedClasses([]);
+      setFileMeta(null); setIsDragging(false);
       setMode('list');
+    }
+
+    function ingestFile(file){
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function(ev){
+        var text = (ev.target && ev.target.result) || '';
+        setPaste(text);
+        parsePaste(text);
+        setFileMeta({ name: file.name, size: file.size });
+      };
+      reader.onerror = function(){
+        ctx.toast && ctx.toast('Could not read file', 'error');
+      };
+      reader.readAsText(file);
+    }
+
+    function onDropZoneClick(){
+      if (fileInputRef.current) fileInputRef.current.click();
+    }
+    function onFilePicked(ev){
+      var f = ev.target && ev.target.files && ev.target.files[0];
+      if (f) ingestFile(f);
+      /* Reset input so picking the same file again still triggers change. */
+      if (ev.target) ev.target.value = '';
+    }
+    function onDragOver(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      if (!isDragging) setIsDragging(true);
+    }
+    function onDragLeave(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      setIsDragging(false);
+    }
+    function onDrop(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      setIsDragging(false);
+      var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (f) ingestFile(f);
+    }
+    function clearFile(){
+      setFileMeta(null); setPaste(''); setParsedClasses([]); setParseError('');
     }
 
     function activateNow(versionId){
@@ -13303,7 +13425,7 @@
         e('div', { className: 'section-head' },
           e('div', null,
             e('h2', null, 'New Schedule Version'),
-            e('div', { className: 'meta' }, 'Upload a new rotation. It auto-activates on the start date.')
+            e('div', { className: 'meta' }, 'Drop a CSV. Imports immediately if the start date is today or earlier; future dates auto-activate when the date arrives.')
           ),
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setMode('list'); } }, '\u2190 Back')
         ),
@@ -13336,37 +13458,82 @@
             )
           ),
           e('div', null,
-            e('label', { style: { display: 'block', fontSize: '12px', color: 'var(--slate)', marginBottom: '4px', fontWeight: 600 } }, 'Paste schedule (CSV with header row)'),
+            e('label', { style: { display: 'block', fontSize: '12px', color: 'var(--slate)', marginBottom: '4px', fontWeight: 600 } }, 'CSV upload'),
             e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginBottom: '6px', lineHeight: 1.4 } },
-              'Required columns: Class Name, Day, Time. Optional: Location, Instructor, Duration (min). Days accept MO/TU/WE/TH/FR/SA/SU or full names. Times accept 24h or 12h with AM/PM.'
+              'Required columns: Class Name, Day, Time. Optional: Location, Instructor, Duration (min). Headers accept snake_case (class_name, day_of_week, start_time, duration_minutes). Days accept MO/TU/WE/TH/FR/SA/SU or full names. Times accept 24h or 12h with AM/PM.'
             ),
-            e('textarea', {
-              value: paste,
-              onChange: function(ev){ setPaste(ev.target.value); parsePaste(ev.target.value); },
-              placeholder: 'Class Name,Day,Time,Location,Instructor,Duration\nMorning Yoga,MO,06:00,CMRC,Heather,60\nAqua Aerobics,WE,09:30,CMRC,Kathy,45',
-              rows: 8,
-              style: { width: '100%', padding: '10px 12px', fontSize: '13px', fontFamily: 'monospace', borderRadius: '8px', border: '1.5px solid var(--border)', resize: 'vertical' }
-            })
+            e('input', {
+              ref: fileInputRef,
+              type: 'file',
+              accept: '.csv,text/csv',
+              onChange: onFilePicked,
+              style: { display: 'none' }
+            }),
+            e('div', {
+              onClick: onDropZoneClick,
+              onDragEnter: onDragOver,
+              onDragOver: onDragOver,
+              onDragLeave: onDragLeave,
+              onDrop: onDrop,
+              style: {
+                border: '2px dashed ' + (isDragging ? 'var(--teal)' : 'var(--border)'),
+                background: isDragging ? 'var(--teal-bg)' : 'var(--cream-2)',
+                borderRadius: '12px',
+                padding: '28px 18px',
+                textAlign: 'center',
+                cursor: 'pointer',
+                transition: 'background 120ms ease, border-color 120ms ease'
+              }
+            },
+              fileMeta
+                ? [
+                    e('div', { key: 'name', style: { fontSize: '14px', color: 'var(--navy)', fontWeight: 700, marginBottom: '4px' } },
+                      '\ud83d\udcc4 ' + fileMeta.name
+                    ),
+                    e('div', { key: 'meta', style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '8px' } },
+                      Math.max(1, Math.round(fileMeta.size / 1024)) + ' KB \u00b7 click or drop to replace'
+                    ),
+                    e('button', {
+                      key: 'clear',
+                      type: 'button',
+                      className: 'btn btn-ghost btn-sm',
+                      onClick: function(ev){ ev.stopPropagation(); clearFile(); }
+                    }, 'Clear')
+                  ]
+                : [
+                    e('div', { key: 'icon', style: { fontSize: '28px', marginBottom: '6px' } }, '\ud83d\udcc4'),
+                    e('div', { key: 'main', style: { fontSize: '14px', color: 'var(--navy)', fontWeight: 600, marginBottom: '2px' } },
+                      'Drop your CSV here or click to choose'
+                    ),
+                    e('div', { key: 'sub', style: { fontSize: '12px', color: 'var(--slate)' } },
+                      'Reagan-style schedule export, .csv'
+                    )
+                  ]
+            )
           ),
           parseError && e('div', {
             style: { padding: '8px 12px', background: '#fee', color: 'var(--red)', borderRadius: '8px', fontSize: '13px', border: '1px solid var(--red)' }
           }, '\u26a0 ' + parseError),
           parsedClasses.length > 0 && e('div', null,
             e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 600, marginBottom: '6px' } },
-              '\u2713 Parsed ' + parsedClasses.length + ' class' + (parsedClasses.length === 1 ? '' : 'es')
+              '\u2713 Parsed ' + parsedClasses.length + ' class' + (parsedClasses.length === 1 ? '' : 'es') +
+              (parsedClasses.length > 5 ? ' (showing first 5)' : '')
             ),
-            e('div', { style: { background: 'var(--cream-2)', borderRadius: '8px', padding: '10px 12px', maxHeight: '180px', overflow: 'auto' } },
-              parsedClasses.map(function(c, i){
+            e('div', { style: { background: 'var(--cream-2)', borderRadius: '8px', padding: '10px 12px' } },
+              parsedClasses.slice(0, 5).map(function(c, i){
                 return e('div', { key: i, style: { fontSize: '12px', color: 'var(--slate)', padding: '3px 0' } },
                   c.name + ' \u00b7 ' + c.dayOfWeek + ' ' + (c.startTime || c.time || '') +
                   (c.location ? (' \u00b7 ' + c.location) : '') +
                   (c.instructor ? (' \u00b7 ' + c.instructor) : '')
                 );
-              })
+              }),
+              parsedClasses.length > 5 && e('div', {
+                style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', paddingTop: '6px', marginTop: '4px', borderTop: '1px dashed var(--border)' }
+              }, '+ ' + (parsedClasses.length - 5) + ' more')
             )
           ),
           e('div', { style: { display: 'flex', gap: '8px' } },
-            e('button', { className: 'btn btn-primary', onClick: saveNew }, 'Save schedule version'),
+            e('button', { className: 'btn btn-primary', onClick: saveNew, disabled: parsedClasses.length === 0 }, 'Confirm import'),
             e('button', { className: 'btn btn-outline', onClick: function(){ setMode('list'); } }, 'Cancel')
           )
         )
@@ -14917,35 +15084,7 @@
     var result = resultTuple[0];
     var setResult = resultTuple[1];
 
-    /* Robust CSV parser that handles quoted fields */
-    function parseCSV(text){
-      var lines = [];
-      var cur = [];
-      var field = '';
-      var inQuotes = false;
-      for (var i = 0; i < text.length; i++) {
-        var ch = text[i];
-        if (inQuotes) {
-          if (ch === '"') {
-            if (text[i+1] === '"') { field += '"'; i++; }
-            else { inQuotes = false; }
-          } else {
-            field += ch;
-          }
-        } else {
-          if (ch === '"') { inQuotes = true; }
-          else if (ch === ',') { cur.push(field); field = ''; }
-          else if (ch === '\n' || ch === '\r') {
-            if (ch === '\r' && text[i+1] === '\n') i++;
-            cur.push(field); field = '';
-            if (cur.length > 1 || (cur.length === 1 && cur[0] !== '')) lines.push(cur);
-            cur = [];
-          } else { field += ch; }
-        }
-      }
-      if (field !== '' || cur.length > 0) { cur.push(field); lines.push(cur); }
-      return lines;
-    }
+    /* parseCSV is hoisted to a top-level helper. */
 
     /* Try to auto-detect column mapping by header name patterns */
     function autoDetect(headers){
