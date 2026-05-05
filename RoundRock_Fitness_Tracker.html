@@ -1829,7 +1829,7 @@
       canSetPINs: false,
       canBulkImport: false,
       canViewAllTimeCards: false,
-      canDeleteSession: false,
+      canDeleteSession: true,
       /* Lead expansions (unscoped this cycle) */
       canEditAnyAttendance: true,
       canEditAnySession: true,
@@ -4093,6 +4093,26 @@
         return list.map(function(c){
           if (c.id !== clientId) return c;
           matchedClient = c;
+          /* Dedup with an existing scheduled placeholder for the same
+             slot. If the trainer logs a non-scheduled outcome at a
+             date+time that already has a scheduled session on file,
+             treat the log as a sign-off of that slot and update in
+             place instead of inserting a duplicate row. Preserves the
+             scheduled session's id; new fields win on the merge. */
+          var newStatus = sess && sess.status;
+          if (newStatus && newStatus !== 'scheduled' && sess.date) {
+            var sessTime = sess.time || '';
+            var match = (c.sessions || []).find(function(x){
+              return x.status === 'scheduled' && x.date === sess.date && (x.time || '') === sessTime;
+            });
+            if (match) {
+              var copy = Object.assign({}, c);
+              copy.sessions = (c.sessions || []).map(function(x){
+                return x.id === match.id ? Object.assign({}, x, sess, { id: match.id }) : x;
+              });
+              return copy;
+            }
+          }
           var copy = Object.assign({}, c);
           copy.sessions = (c.sessions || []).concat([sess]);
           return copy;
@@ -6160,7 +6180,19 @@
                 isSignedAttended && e('div', { style: { fontSize: '12px', color: 'var(--green)', marginTop: '4px', fontWeight: 600 } },
                   'Signed off'
                 )
-              )
+              ),
+              /* Explicit Sign-off action on scheduled cards. Whole-card
+                 click also routes here, but the pill makes the action
+                 discoverable. Stop propagation so we only fire once. */
+              isScheduled && e('button', {
+                type: 'button',
+                onClick: function(ev){
+                  ev.stopPropagation();
+                  setSignOff({ client: item.client, session: sess });
+                },
+                className: 'btn btn-sm btn-primary',
+                style: { whiteSpace: 'nowrap' }
+              }, 'Sign off')
             )
           );
         })
@@ -7503,25 +7535,25 @@
                               }
                             }, stLabel)
                   ),
-                  /* Both-signatures lock for trainers: signed sessions are
-                     a record of what happened; only admin can delete. */
+                  /* Completed sessions (any non-scheduled status) are a
+                     record of what happened; only admin / lead can
+                     delete. Trainers can still clear their own
+                     not-yet-logged scheduled placeholders. */
                   (function(){
-                    var bothSigned = !!(s.trainerSig && s.clientSig);
-                    var locked = bothSigned && !canDeleteSession;
+                    var isCompleted = st !== 'scheduled';
+                    var locked = isCompleted && !canDeleteSession;
                     var hasRecovery = !!(s.serviceRecovery && (s.serviceRecovery.actions || []).length > 0);
                     return e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'flex-end' } },
                       hasRecovery && e('span', {
                         title: 'Service recovery logged: ' + (s.serviceRecovery.actions || []).join(', '),
                         style: { fontSize: '14px' }
                       }, '📞'),
-                      e('button', {
+                      !locked && e('button', {
                         className: 'btn btn-ghost btn-sm',
-                        style: { color: 'var(--red)', opacity: locked ? 0.4 : 1, cursor: locked ? 'not-allowed' : 'pointer' },
-                        disabled: locked,
-                        title: locked ? 'Signed sessions cannot be deleted - contact admin to override.' : 'Delete this session',
+                        style: { color: 'var(--red)', cursor: 'pointer' },
+                        title: 'Delete this session',
                         onClick: function(ev){
                           ev.stopPropagation();
-                          if (locked) return;
                           if (window.confirm('Delete this session?')) ctx.deleteSession(c.id, s.id);
                         }
                       }, '✕')
