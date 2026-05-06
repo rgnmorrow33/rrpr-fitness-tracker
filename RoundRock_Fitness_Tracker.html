@@ -8066,6 +8066,11 @@
     var navGenTuple = useState(0);
     var navGen = navGenTuple[0]; var setNavGen = navGenTuple[1];
 
+    /* Sprint L: time-off manager modal state. Visible to lead/admin only
+       via the addTimeOff permission check on the entry button. */
+    var timeOffOpenTuple = useState(false);
+    var timeOffOpen = timeOffOpenTuple[0]; var setTimeOffOpen = timeOffOpenTuple[1];
+
     function navigate(t, opts){
       setHeaderContext(null);
       setTabFilter((opts && opts.filter) || null);
@@ -8229,7 +8234,11 @@
               background: 'var(--teal-bg)', color: 'var(--teal)',
               fontWeight: 700, letterSpacing: '0.04em'
             }
-          }, isAllMode ? 'All trainers' : ('Viewing: ' + viewAs))
+          }, isAllMode ? 'All trainers' : ('Viewing: ' + viewAs)),
+          ctx.can('addTimeOff') && e('button', {
+            className: 'btn btn-outline btn-sm',
+            onClick: function(){ setTimeOffOpen(true); }
+          }, 'Time Off')
         ),
         /* Compact pay-period summary chip (suppressed on today + time_card
            tabs - today shows its own bigger summary, time card is the full
@@ -8352,6 +8361,11 @@
       contactOpen && e(LogContactModal, {
         ctx: ctx,
         onClose: function(){ setContactOpen(false); }
+      }),
+      /* Sprint L: time-off manager (lead/admin only) */
+      timeOffOpen && e(TimeOffManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setTimeOffOpen(false); }
       })
     );
   }
@@ -19250,6 +19264,300 @@
     );
   }
 
+  /* ============ TIME-OFF ENTRY MODAL (Sprint L) ============
+     Form modal for trainer time-off entries. Permission-gated at the
+     entry-point caller (ctx.can('addTimeOff')) - lead and admin only.
+     Trainers never see the open trigger.
+
+     all_day:
+       ON  - date range only (start/end dates), times locked to 00:00 / 23:59
+       OFF - date+time pickers; time inputs use snapTime15 from Sprint K
+
+     Save constructs ISO timestamps from the date+time inputs (local time
+     interpretation; the timestamptz column persists with TZ offset). For
+     edit, the existing record's stored ISO is split back into date+time
+     fields on mount. */
+  function TimeOffEntryModal(props){
+    var ctx = props.ctx;
+    var existing = props.existing || null;
+    var defaultTrainerId = props.defaultTrainerId || (existing && existing.trainerId) || null;
+
+    var KIND_OPTIONS = [
+      { value: 'sick',         label: 'Sick' },
+      { value: 'vacation',     label: 'Vacation' },
+      { value: 'personal',     label: 'Personal' },
+      { value: 'holiday',      label: 'Holiday' },
+      { value: 'jury',         label: 'Jury duty' },
+      { value: 'bereavement',  label: 'Bereavement' }
+    ];
+
+    function splitIso(iso){
+      if (!iso) return { date: '', time: '' };
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return { date: '', time: '' };
+      var y = d.getFullYear();
+      var mo = String(d.getMonth() + 1); if (mo.length < 2) mo = '0' + mo;
+      var da = String(d.getDate());      if (da.length < 2) da = '0' + da;
+      var h = String(d.getHours());      if (h.length < 2)  h  = '0' + h;
+      var mi = String(d.getMinutes());   if (mi.length < 2) mi = '0' + mi;
+      return { date: y + '-' + mo + '-' + da, time: h + ':' + mi };
+    }
+    function joinIso(dateStr, timeStr){
+      if (!dateStr) return null;
+      var t = timeStr || '00:00';
+      var d = new Date(dateStr + 'T' + t);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    }
+
+    var startSplit = splitIso(existing && existing.startAt);
+    var endSplit = splitIso(existing && existing.endAt);
+
+    var trainerIdTuple   = useState(defaultTrainerId || (existing && existing.trainerId) || '');
+    var trainerId        = trainerIdTuple[0];        var setTrainerId   = trainerIdTuple[1];
+    var kindTuple        = useState(existing ? (existing.kind || 'sick') : 'sick');
+    var kind             = kindTuple[0];             var setKind        = kindTuple[1];
+    var allDayTuple      = useState(existing ? !!existing.allDay : true);
+    var allDay           = allDayTuple[0];           var setAllDay      = allDayTuple[1];
+    var startDateTuple   = useState(startSplit.date || todayStr());
+    var startDate        = startDateTuple[0];        var setStartDate   = startDateTuple[1];
+    var startTimeTuple   = useState(startSplit.time || '08:00');
+    var startTime        = startTimeTuple[0];        var setStartTime   = startTimeTuple[1];
+    var endDateTuple     = useState(endSplit.date || startSplit.date || todayStr());
+    var endDate          = endDateTuple[0];          var setEndDate     = endDateTuple[1];
+    var endTimeTuple     = useState(endSplit.time || '17:00');
+    var endTime          = endTimeTuple[0];          var setEndTime     = endTimeTuple[1];
+    var reasonTuple      = useState(existing ? (existing.reason || '') : '');
+    var reason           = reasonTuple[0];           var setReason      = reasonTuple[1];
+    var errorTuple       = useState(null);
+    var error            = errorTuple[0];            var setError       = errorTuple[1];
+
+    var activeTrainers = (ctx.trainerProfiles || []).filter(function(p){
+      return p && p.is_active !== false && !p.deleted_at && p.id;
+    }).slice().sort(function(a, b){
+      return (a.name || '').toLowerCase() < (b.name || '').toLowerCase() ? -1 : 1;
+    });
+
+    function save(){
+      if (!trainerId) { setError('Pick a trainer'); return; }
+      if (!startDate) { setError('Start date required'); return; }
+      if (!endDate)   { setError('End date required'); return; }
+      var sIso, eIso;
+      if (allDay) {
+        sIso = joinIso(startDate, '00:00');
+        eIso = joinIso(endDate, '23:59');
+      } else {
+        sIso = joinIso(startDate, startTime || '00:00');
+        eIso = joinIso(endDate, endTime || '23:59');
+      }
+      if (!sIso || !eIso) { setError('Invalid date/time'); return; }
+      if (eIso <= sIso) { setError('End must be after start'); return; }
+
+      var record = Object.assign({}, existing || {}, {
+        id: existing ? existing.id : undefined,
+        trainerId: trainerId,
+        startAt: sIso,
+        endAt: eIso,
+        allDay: !!allDay,
+        kind: kind,
+        reason: reason ? reason.trim() : null
+      });
+      var saved = ctx.upsertTimeOff(record);
+      ctx.toast(existing ? 'Time off updated ✓' : 'Time off added ✓');
+      if (props.onSave) props.onSave(saved);
+      props.onClose();
+    }
+
+    function doDelete(){
+      if (!existing) return;
+      if (!window.confirm('Delete this time-off entry?')) return;
+      ctx.softDeleteTimeOff(existing.id);
+      ctx.toast('Time off deleted', 'error');
+      if (props.onDelete) props.onDelete(existing.id);
+      props.onClose();
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, existing ? 'Edit Time Off' : 'Add Time Off'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { className: 'field' },
+            e('label', null, 'Trainer *'),
+            e('select', {
+              value: trainerId,
+              onChange: function(ev){ setTrainerId(ev.target.value); }
+            },
+              e('option', { value: '' }, '— Select trainer —'),
+              activeTrainers.map(function(p){
+                return e('option', { key: p.id, value: p.id }, p.name);
+              })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Kind *'),
+            e('select', {
+              value: kind,
+              onChange: function(ev){ setKind(ev.target.value); }
+            },
+              KIND_OPTIONS.map(function(opt){
+                return e('option', { key: opt.value, value: opt.value }, opt.label);
+              })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer' } },
+              e('input', {
+                type: 'checkbox',
+                checked: allDay,
+                onChange: function(ev){ setAllDay(ev.target.checked); }
+              }),
+              'All-day'
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Start date *'),
+              e('input', { type: 'date', value: startDate, onChange: function(ev){ setStartDate(ev.target.value); } })
+            ),
+            !allDay && e('div', { className: 'field' },
+              e('label', null, 'Start time'),
+              e('input', { type: 'time', value: startTime, onChange: function(ev){ setStartTime(snapTime15(ev.target.value)); } })
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'End date *'),
+              e('input', { type: 'date', value: endDate, onChange: function(ev){ setEndDate(ev.target.value); } })
+            ),
+            !allDay && e('div', { className: 'field' },
+              e('label', null, 'End time'),
+              e('input', { type: 'time', value: endTime, onChange: function(ev){ setEndTime(snapTime15(ev.target.value)); } })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Reason (optional)'),
+            e('input', {
+              type: 'text', value: reason,
+              onChange: function(ev){ setReason(ev.target.value); },
+              placeholder: 'e.g. flu, family vacation'
+            })
+          ),
+          error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error)
+        ),
+        e('div', { className: 'modal-footer' },
+          existing && e('button', {
+            className: 'btn btn-ghost',
+            style: { color: 'var(--red)', marginRight: 'auto' },
+            onClick: doDelete
+          }, 'Delete'),
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-primary', onClick: save }, existing ? 'Save' : 'Add')
+        )
+      )
+    );
+  }
+
+  /* ============ TIME-OFF MANAGER MODAL (Sprint L) ============
+     Lists current and upcoming time-off entries with an "Add" button to
+     open TimeOffEntryModal. Tap a row to edit. Permission-gated at the
+     entry-point caller. */
+  function TimeOffManagerModal(props){
+    var ctx = props.ctx;
+    var entryOpenTuple = useState(false);
+    var entryOpen = entryOpenTuple[0]; var setEntryOpen = entryOpenTuple[1];
+    var editTargetTuple = useState(null);
+    var editTarget = editTargetTuple[0]; var setEditTarget = editTargetTuple[1];
+
+    var nowIso = new Date().toISOString();
+    var rows = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; })
+      .slice()
+      .sort(function(a, b){ return (a.startAt || '') < (b.startAt || '') ? -1 : 1; });
+    var upcoming = rows.filter(function(t){ return (t.endAt || '') >= nowIso; });
+    var past = rows.filter(function(t){ return (t.endAt || '') < nowIso; });
+
+    function trainerName(id){
+      var p = (ctx.trainerProfiles || []).find(function(x){ return x.id === id; });
+      return p ? p.name : '—';
+    }
+    function fmtRange(t){
+      var s = new Date(t.startAt);
+      var e2 = new Date(t.endAt);
+      if (isNaN(s.getTime()) || isNaN(e2.getTime())) return '';
+      var fmtD = function(d){ return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+      var fmtT = function(d){
+        var h = d.getHours(); var m = d.getMinutes();
+        var ampm = h >= 12 ? 'PM' : 'AM';
+        var h12 = h % 12; if (h12 === 0) h12 = 12;
+        var mm = String(m); if (mm.length < 2) mm = '0' + mm;
+        return h12 + ':' + mm + ' ' + ampm;
+      };
+      var sameDay = s.toDateString() === e2.toDateString();
+      if (t.allDay) {
+        return sameDay ? fmtD(s) : (fmtD(s) + ' – ' + fmtD(e2));
+      }
+      return sameDay
+        ? (fmtD(s) + ' ' + fmtT(s) + ' – ' + fmtT(e2))
+        : (fmtD(s) + ' ' + fmtT(s) + ' – ' + fmtD(e2) + ' ' + fmtT(e2));
+    }
+    function row(t){
+      return e('div', {
+        key: t.id,
+        className: 'list-row',
+        style: { cursor: 'pointer' },
+        onClick: function(){ setEditTarget(t); setEntryOpen(true); }
+      },
+        e('div', null,
+          e('div', { style: { fontWeight: 700 } }, trainerName(t.trainerId) + ' · ' + (t.kind || '?')),
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
+            fmtRange(t) + (t.reason ? ' · ' + t.reason : '')
+          )
+        )
+      );
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Trainer Time Off'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Track sick days, vacation, personal time, holidays. Tap a row to edit. Conflicting classes will be flagged on save.'
+          ),
+          e('div', { style: { marginBottom: '14px' } },
+            e('button', {
+              className: 'btn btn-primary',
+              onClick: function(){ setEditTarget(null); setEntryOpen(true); }
+            }, '+ Add Time Off')
+          ),
+          upcoming.length > 0 && e('div', { style: { marginBottom: '12px' } },
+            e('h3', { style: { fontSize: '14px', marginBottom: '6px' } }, 'Upcoming'),
+            upcoming.map(row)
+          ),
+          past.length > 0 && e('div', null,
+            e('h3', { style: { fontSize: '14px', marginBottom: '6px', color: 'var(--slate-soft)' } }, 'Past'),
+            past.slice(0, 20).map(row)
+          ),
+          rows.length === 0 && e('div', { style: { color: 'var(--slate)', fontStyle: 'italic', fontSize: '13px' } },
+            'No time off recorded.'
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-primary', onClick: props.onClose }, 'Done')
+        ),
+        entryOpen && e(TimeOffEntryModal, {
+          ctx: ctx,
+          existing: editTarget,
+          onClose: function(){ setEntryOpen(false); setEditTarget(null); }
+        })
+      )
+    );
+  }
+
   /* ============ CLOSURES MANAGER MODAL ============ */
   function ClosuresManagerModal(props){
     var ctx = props.ctx;
@@ -19339,6 +19647,12 @@
     var closuresOpenTuple = useState(false);
     var closuresOpen = closuresOpenTuple[0];
     var setClosuresOpen = closuresOpenTuple[1];
+
+    /* Sprint L: time-off manager modal state. Admin only at this entry
+       point; lead access lives in TrainerView's viewAs panel. */
+    var timeOffOpenTuple = useState(false);
+    var timeOffOpen = timeOffOpenTuple[0];
+    var setTimeOffOpen = timeOffOpenTuple[1];
 
     var cancelTargetTuple = useState(null); /* { cls, date } */
     var cancelTarget = cancelTargetTuple[0];
@@ -20036,6 +20350,8 @@
         e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setClosuresOpen(true); } },
             'Closures (' + (ctx.closures || []).length + ')'),
+          ctx.can('addTimeOff') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setTimeOffOpen(true); } },
+            'Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
         )
       ),
@@ -20074,6 +20390,10 @@
       closuresOpen && e(ClosuresManagerModal, {
         ctx: ctx,
         onClose: function(){ setClosuresOpen(false); }
+      }),
+      timeOffOpen && e(TimeOffManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setTimeOffOpen(false); }
       }),
       cancelTarget && e(CancelClassModal, {
         ctx: ctx,
