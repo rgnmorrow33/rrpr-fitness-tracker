@@ -29,6 +29,9 @@
     --red-bg: #fde7e7;
     --teal: #0d7377;
     --teal-bg: #e2f1f2;
+    /* Sprint L: time-off block color. Muted neutral gray, distinct from
+       --slate. Reads as 'absent' on the schedule grid. */
+    --timeoff: #7A8088;
     --border: #e5ddc8;
     --shadow: 0 2px 8px rgba(26,46,74,0.08);
     --shadow-lg: 0 8px 32px rgba(26,46,74,0.18);
@@ -7483,6 +7486,12 @@
     var recoveryTargetTuple = useState(null);
     var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
 
+    /* Sprint L: time-off block tap target. Lead/admin opens edit modal,
+       trainers see the block but cannot edit (onClick is a no-op). */
+    var timeOffEditTuple = useState(null);
+    var timeOffEdit = timeOffEditTuple[0]; var setTimeOffEdit = timeOffEditTuple[1];
+    var canEditTimeOff = ctx.can('addTimeOff');
+
     /* Detail swaps replace the grid in place; the back chevron in the
        outer header (driven by setHeaderContext) restores the grid. */
     if (classDetailId) {
@@ -7628,6 +7637,50 @@
         });
       });
 
+      /* Sprint L: time-off entries that cover this date for this trainer.
+         Resolve trainer name -> profile id once; entries clamp to the
+         day's window so a multi-day block renders 00:00-23:59 on
+         interior days, narrowed on the start/end days. Tap is a no-op
+         for trainers (canEditTimeOff false); lead/admin opens edit. */
+      var profile = (ctx.trainerProfiles || []).find(function(p){
+        return p && p.id && trainerNameMatches(trainerName, p.name);
+      });
+      if (profile) {
+        var dayStartIso = new Date(dateYMD + 'T00:00:00').toISOString();
+        var dayEndIso   = new Date(dateYMD + 'T23:59:59').toISOString();
+        listTimeOffForTrainer(ctx.timeOff, profile.id, dayStartIso, dayEndIso).forEach(function(t){
+          var startD = new Date(t.startAt);
+          var endD = new Date(t.endAt);
+          if (isNaN(startD.getTime()) || isNaN(endD.getTime())) return;
+          var startsBefore = startD < new Date(dayStartIso);
+          var endsAfter = endD > new Date(dayEndIso);
+          var blockStart, blockEnd;
+          if (t.allDay || startsBefore) blockStart = '00:00';
+          else {
+            var sh = String(startD.getHours()); if (sh.length < 2) sh = '0' + sh;
+            var sm = String(startD.getMinutes()); if (sm.length < 2) sm = '0' + sm;
+            blockStart = sh + ':' + sm;
+          }
+          if (t.allDay || endsAfter) blockEnd = '23:59';
+          else {
+            var eh = String(endD.getHours()); if (eh.length < 2) eh = '0' + eh;
+            var em = String(endD.getMinutes()); if (em.length < 2) em = '0' + em;
+            blockEnd = eh + ':' + em;
+          }
+          var kindLabel = (t.kind || 'off');
+          kindLabel = kindLabel.charAt(0).toUpperCase() + kindLabel.slice(1);
+          events.push({
+            kind: 'timeoff',
+            start: blockStart,
+            end: blockEnd,
+            color: 'var(--timeoff)',
+            label: kindLabel,
+            location: t.reason || '',
+            onClick: canEditTimeOff ? (function(entry){ return function(){ setTimeOffEdit(entry); }; })(t) : function(){}
+          });
+        });
+      }
+
       events.sort(function(a, b){
         return (a.start || '') < (b.start || '') ? -1 : 1;
       });
@@ -7723,6 +7776,12 @@
           setRecoveryTarget(null);
           ctx.toast('Recovery logged ✓');
         }
+      }),
+      timeOffEdit && e(TimeOffEntryModal, {
+        key: 'm-timeoff',
+        ctx: ctx,
+        existing: timeOffEdit,
+        onClose: function(){ setTimeOffEdit(null); }
       })
     ];
 
@@ -7741,6 +7800,7 @@
       legendChip('var(--teal)', 'PT'),
       legendChip('var(--gold)', 'WRO'),
       legendChip('var(--slate)', 'Admin'),
+      legendChip('var(--timeoff)', 'Time Off'),
       legendChip('#a63d9e', 'GX (by class type)')
     );
 
