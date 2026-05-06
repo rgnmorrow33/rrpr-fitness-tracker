@@ -1394,7 +1394,24 @@
           createdAt: row.created_at
         };
       }
-    }
+    },
+
+    /* trainer_time_off: per-trainer absence records (sick, vacation, etc).
+       audit_log is intentionally OUT of the field map below so it round-
+       trips as snake_case in-memory, which is what appendAuditEntry reads.
+       (Other entities map auditLog<->audit_log in their translators - that
+       is a pre-existing latent shape mismatch with appendAuditEntry; not
+       fixed here.) */
+    timeOff: makeFieldTranslator([
+      ['trainerId',  'trainer_id'],
+      ['startAt',    'start_at'],
+      ['endAt',      'end_at'],
+      ['allDay',     'all_day'],
+      ['createdBy',  'created_by'],
+      ['deletedAt',  'deleted_at'],
+      ['deletedBy',  'deleted_by'],
+      ['createdAt',  'created_at']
+    ])
   };
 
   /* Entity factory: localStorage-key + Supabase-table + translator =
@@ -1701,6 +1718,7 @@
     leads:            makeEntity('cmrc_queue_v1', 'leads', translate.leads),
     contacts:         makeEntity('cmrc_contacts_v1', 'member_contacts', translate.contacts),
     scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
+    timeOff:          makeEntity('cmrc_time_off_v1', 'trainer_time_off', translate.timeOff),
     notifications:    notificationsStorage,
     adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
     /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
@@ -1875,7 +1893,8 @@
       canManageClosures: false,
       canViewAuditHistory: false,
       canRestoreDeleted: false,
-      canHardDelete: false
+      canHardDelete: false,
+      addTimeOff: false
     },
     lead: {
       canEditOwnAttendance: true,
@@ -1900,7 +1919,8 @@
       canManageClosures: false,
       canViewAuditHistory: false,
       canRestoreDeleted: false,
-      canHardDelete: false
+      canHardDelete: false,
+      addTimeOff: true
     },
     admin: {
       canEditOwnAttendance: true,
@@ -1924,7 +1944,8 @@
       canManageClosures: true,
       canViewAuditHistory: true,
       canRestoreDeleted: true,
-      canHardDelete: true
+      canHardDelete: true,
+      addTimeOff: true
     }
   };
 
@@ -3259,6 +3280,28 @@
     return tFirst === cFirst && tFirst.length >= 3;
   }
 
+  /* Time-off range filters. Both skip soft-deleted entries. Range bounds
+     are ISO timestamps; either may be null/undefined for an open-ended
+     query. Overlap test: a record overlaps the window if its end is at
+     or after rangeStart AND its start is at or before rangeEnd. */
+  function listTimeOffForTrainer(timeOff, trainerId, rangeStartIso, rangeEndIso){
+    return (timeOff || []).filter(function(t){
+      if (!t || t.deleted_at) return false;
+      if (t.trainerId !== trainerId) return false;
+      if (rangeEndIso && t.startAt && t.startAt > rangeEndIso) return false;
+      if (rangeStartIso && t.endAt && t.endAt < rangeStartIso) return false;
+      return true;
+    });
+  }
+  function listTimeOffAllTrainers(timeOff, rangeStartIso, rangeEndIso){
+    return (timeOff || []).filter(function(t){
+      if (!t || t.deleted_at) return false;
+      if (rangeEndIso && t.startAt && t.startAt > rangeEndIso) return false;
+      if (rangeStartIso && t.endAt && t.endAt < rangeStartIso) return false;
+      return true;
+    });
+  }
+
   /* package_expiring sweep. Per-device, per-signed-in-trainer: each
      trainer's iPad fans out for their own assigned clients only.
      Idempotent via storage.notifications.existsForTrainer dedup keyed on
@@ -3952,6 +3995,13 @@
     var scheduleVersions = schedVersionsTuple[0];
     var setScheduleVersions = schedVersionsTuple[1];
 
+    /* Sprint L: trainer time-off (sick, vacation, personal, etc).
+       Loaded as a flat array; range queries derived in-memory by the
+       listTimeOff helpers. */
+    var timeOffTuple = useState([]);
+    var timeOff = timeOffTuple[0];
+    var setTimeOff = timeOffTuple[1];
+
     /* Notifications: trainer-scoped, server-authored. No initial-load
        coordination with loadAll - the list is keyed on session.trainer_id
        and (re)loads in its own effect when sign-in resolves. No save
@@ -3993,6 +4043,7 @@
     var queueRef = useRef(null);
     var contactsRef = useRef(null);
     var schedVersionsRef = useRef(null);
+    var timeOffRef = useRef(null);
     var pinRef = useRef(null);
 
     /* Strip server-managed timestamps before stringify-comparing local
@@ -4029,6 +4080,7 @@
         storage.leads.load(),
         storage.contacts.load(),
         storage.scheduleVersions.load(),
+        storage.timeOff.load(),
         storage.adminPin.load()
       ]).then(function(r){
         /* Hydrate refs synchronously BEFORE the setX calls so the save
@@ -4044,7 +4096,8 @@
         var q  = r[7] != null ? r[7] : queue;
         var ct = r[8] != null ? r[8] : contacts;
         var sv = r[9] != null ? r[9] : scheduleVersions;
-        var pn = r[10] != null ? r[10] : pin;
+        var to = r[10] != null ? r[10] : timeOff;
+        var pn = r[11] != null ? r[11] : pin;
         trainerProfilesRef.current = t;
         clientsRef.current = c;
         classesRef.current = cl;
@@ -4055,6 +4108,7 @@
         queueRef.current = q;
         contactsRef.current = ct;
         schedVersionsRef.current = sv;
+        timeOffRef.current = to;
         pinRef.current = pn;
         setTrainerProfiles(t);
         setClients(c);
@@ -4066,6 +4120,7 @@
         setQueue(q);
         setContacts(ct);
         setScheduleVersions(sv);
+        setTimeOff(to);
         setPin(pn);
         setLoading(false);
       }).catch(function(err){
@@ -4095,7 +4150,8 @@
         ['referrals',         setReferrals,         'referrals'],
         ['closures',          setClosures,          'closures'],
         ['trainers',          setTrainerProfiles,   'trainers'],
-        ['schedule_versions', setScheduleVersions,  'scheduleVersions']
+        ['schedule_versions', setScheduleVersions,  'scheduleVersions'],
+        ['trainer_time_off',  setTimeOff,           'timeOff']
       ];
       subs.forEach(function(sub){
         var table = sub[0]; var setter = sub[1]; var entity = sub[2];
@@ -4182,6 +4238,7 @@
     useEffect(function(){ _saveIfDirty(queueRef,        queue,            storage.leads.save,            'leads'); },            [queue, loading]);
     useEffect(function(){ _saveIfDirty(contactsRef,     contacts,         storage.contacts.save,         'contacts'); },         [contacts, loading]);
     useEffect(function(){ _saveIfDirty(schedVersionsRef, scheduleVersions, storage.scheduleVersions.save, 'scheduleVersions'); }, [scheduleVersions, loading]);
+    useEffect(function(){ _saveIfDirty(timeOffRef,     timeOff,          storage.timeOff.save,          'timeOff'); },          [timeOff, loading]);
     useEffect(function(){ _saveIfDirty(pinRef,          pin,              storage.adminPin.save,         'pin'); },              [pin, loading]);
 
     /* v2: idempotent sub-status migration. Walks every class once on mount;
@@ -4834,6 +4891,50 @@
     }
     function removeClosure(date){
       setClosures(function(list){ return list.filter(function(x){ return x.date !== date; }); });
+    }
+    /* Sprint L: trainer time-off mutators. Stamp id + audit on insert,
+       diff + audit on update, soft-delete with audit. Reuses the
+       appendAuditEntry pattern from clients/classes. */
+    function upsertTimeOff(t){
+      var hadId = !!(t && t.id);
+      var withId = hadId ? t : Object.assign({ id: uid() }, t);
+      var before = hadId ? (timeOff || []).find(function(x){ return x.id === withId.id; }) : null;
+      var action = before ? 'timeoff_edited' : 'timeoff_added';
+      var withCreator = !before
+        ? Object.assign({}, withId, {
+            createdBy: withId.createdBy || ctxCurrentUserName() || 'unknown',
+            createdAt: withId.createdAt || new Date().toISOString()
+          })
+        : withId;
+      var stamped = appendAuditEntry(withCreator, session, action, {
+        entity_type: 'time_off',
+        target_id: withCreator.id,
+        before: before,
+        after: withCreator
+      });
+      setTimeOff(function(list){
+        if (before) return list.map(function(x){ return x.id === stamped.id ? stamped : x; });
+        return list.concat([stamped]);
+      });
+      return stamped;
+    }
+    function softDeleteTimeOff(id){
+      var before = (timeOff || []).find(function(x){ return x.id === id; });
+      if (!before) return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var deleted = Object.assign({}, before, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: actor
+      });
+      var stamped = appendAuditEntry(deleted, session, 'timeoff_deleted', {
+        entity_type: 'time_off',
+        target_id: id,
+        before: before,
+        after: deleted
+      });
+      setTimeOff(function(list){
+        return list.map(function(x){ return x.id === id ? stamped : x; });
+      });
     }
     function upsertWRO(w){
       setWros(function(list){
@@ -5678,6 +5779,9 @@
       updateCancellation: updateCancellation,
       addClosure: addClosure,
       removeClosure: removeClosure,
+      timeOff: timeOff,
+      upsertTimeOff: upsertTimeOff,
+      softDeleteTimeOff: softDeleteTimeOff,
       upsertWRO: upsertWRO,
       claimWRO: claimWRO,
       unclaimWRO: unclaimWRO,
