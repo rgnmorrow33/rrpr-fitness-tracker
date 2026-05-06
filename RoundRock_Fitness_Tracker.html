@@ -4796,12 +4796,21 @@
         });
       });
 
-      /* sub_posted: fan out to all active trainers minus requester. Only
-         fires on a genuinely new open post (skip if prev was already open -
-         re-saves of the same date shouldn't re-spam). */
+      /* sub_posted: fan out to all active trainers minus the requester.
+         Sprint L: requester is resolved from assignment.requestedBy (the
+         absent trainer) via trainerIdByName, NOT from session.trainer_id.
+         Previously the filter used session.trainer_id which only worked
+         when the actor was also the absent trainer. Lead/admin posting
+         on behalf of someone else (Sprint L commit 4 fan-out) now
+         excludes the right trainer. Falls back to session.trainer_id
+         when assignment.requestedBy is empty so legacy callers still
+         self-suppress correctly. Only fires on a genuinely new open
+         post (skip if prev was already open - re-saves of the same date
+         shouldn't re-spam). */
       if (assignment.status === 'open' && (!prevForDate || prevForDate.status !== 'open')) {
         var className = prevClass ? prevClass.name : null;
-        var requesterId = session && session.trainer_id;
+        var requesterId = (assignment.requestedBy ? trainerIdByName(assignment.requestedBy) : null)
+          || (session && session.trainer_id) || null;
         var rows = (trainerProfiles || [])
           .filter(function(p){ return p.is_active !== false && p.id && p.id !== requesterId; })
           .map(function(p){
@@ -19392,16 +19401,68 @@
     var errorTuple       = useState(null);
     var error            = errorTuple[0];            var setError       = errorTuple[1];
 
+    /* Sprint L commit 4: conflict-warning two-stage save flow. */
+    var pendingTuple     = useState(null);
+    var pending          = pendingTuple[0];          var setPending     = pendingTuple[1];
+    var postSubsTuple    = useState(true);
+    var postSubs         = postSubsTuple[0];         var setPostSubs    = postSubsTuple[1];
+
     var activeTrainers = (ctx.trainerProfiles || []).filter(function(p){
       return p && p.is_active !== false && !p.deleted_at && p.id;
     }).slice().sort(function(a, b){
       return (a.name || '').toLowerCase() < (b.name || '').toLowerCase() ? -1 : 1;
     });
 
-    function save(){
-      if (!trainerId) { setError('Pick a trainer'); return; }
-      if (!startDate) { setError('Start date required'); return; }
-      if (!endDate)   { setError('End date required'); return; }
+    /* Find class occurrences scheduled on the chosen trainer that overlap
+       the proposed time-off window. Walks each day in the window, matches
+       classes by instructor name (via trainerNameMatches) and dayOfWeek.
+       Skips: soft-deleted classes, occurrences cancelled for that date,
+       facility-closed dates, and dates where a sub is already claimed or
+       approved (open subs are still flagged - they need a real claimer). */
+    function findConflicts(record){
+      var profile = (ctx.trainerProfiles || []).find(function(p){ return p.id === record.trainerId; });
+      if (!profile) return [];
+      var trainerName = profile.name;
+      var startD = new Date(record.startAt);
+      var endD = new Date(record.endAt);
+      if (isNaN(startD.getTime()) || isNaN(endD.getTime())) return [];
+      var conflicts = [];
+      var cursor = new Date(startD.getFullYear(), startD.getMonth(), startD.getDate());
+      var lastDay = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate());
+      while (cursor.getTime() <= lastDay.getTime()) {
+        var ymd = toYMD(cursor);
+        var dow = IDX_TO_DOW[cursor.getDay()];
+        if (!(ctx.closures || []).some(function(cl){ return cl.date === ymd; })) {
+          (ctx.classes || []).forEach(function(c){
+            if (!c || c.deleted_at) return;
+            if (!trainerNameMatches(trainerName, c.instructor)) return;
+            if (normalizeDow(c.dayOfWeek) !== dow) return;
+            if (c.seasonStart && ymd < c.seasonStart) return;
+            if (c.seasonEnd && ymd > c.seasonEnd) return;
+            if ((c.cancellations || []).some(function(x){ return x.date === ymd; })) return;
+            var existingSub = (c.subAssignments || []).find(function(s){ return s.date === ymd; });
+            if (existingSub) {
+              var st = existingSub.status;
+              if (st === 'claimed' || st === 'approved') return;
+            }
+            var clsStart = new Date(ymd + 'T' + (c.startTime || '00:00') + ':00');
+            var clsEnd = new Date(ymd + 'T' + (c.endTime || c.startTime || '23:59') + ':00');
+            if (clsEnd < startD || clsStart > endD) return;
+            conflicts.push({
+              cls: c, ymd: ymd,
+              startTime: c.startTime || '',
+              endTime: c.endTime || '',
+              location: c.location || '',
+              alreadyOpen: !!(existingSub && existingSub.status === 'open')
+            });
+          });
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      return conflicts;
+    }
+
+    function buildRecord(){
       var sIso, eIso;
       if (allDay) {
         sIso = joinIso(startDate, '00:00');
@@ -19410,21 +19471,71 @@
         sIso = joinIso(startDate, startTime || '00:00');
         eIso = joinIso(endDate, endTime || '23:59');
       }
-      if (!sIso || !eIso) { setError('Invalid date/time'); return; }
-      if (eIso <= sIso) { setError('End must be after start'); return; }
+      if (!sIso || !eIso) return { error: 'Invalid date/time' };
+      if (eIso <= sIso) return { error: 'End must be after start' };
+      return {
+        record: Object.assign({}, existing || {}, {
+          id: existing ? existing.id : undefined,
+          trainerId: trainerId,
+          startAt: sIso,
+          endAt: eIso,
+          allDay: !!allDay,
+          kind: kind,
+          reason: reason ? reason.trim() : null
+        })
+      };
+    }
 
-      var record = Object.assign({}, existing || {}, {
-        id: existing ? existing.id : undefined,
-        trainerId: trainerId,
-        startAt: sIso,
-        endAt: eIso,
-        allDay: !!allDay,
-        kind: kind,
-        reason: reason ? reason.trim() : null
-      });
-      var saved = ctx.upsertTimeOff(record);
-      ctx.toast(existing ? 'Time off updated ✓' : 'Time off added ✓');
-      if (props.onSave) props.onSave(saved);
+    function save(){
+      if (!trainerId) { setError('Pick a trainer'); return; }
+      if (!startDate) { setError('Start date required'); return; }
+      if (!endDate)   { setError('End date required'); return; }
+      var built = buildRecord();
+      if (built.error) { setError(built.error); return; }
+      setError(null);
+
+      var conflicts = findConflicts(built.record);
+      if (conflicts.length > 0) {
+        setPending({ record: built.record, conflicts: conflicts });
+        return;
+      }
+      commitSave(built.record, []);
+    }
+
+    /* Final commit. Saves the time-off, then optionally fans out open
+       sub requests for each conflicting occurrence. requestedBy is the
+       absent trainer's name (resolved via the trainer profile lookup);
+       the sub_posted fan-out at addSubAssignment uses that to exclude
+       the absent trainer from notification. */
+    function commitSave(record, conflicts){
+      ctx.upsertTimeOff(record);
+      if (postSubs && conflicts.length > 0) {
+        var profile = (ctx.trainerProfiles || []).find(function(p){ return p.id === record.trainerId; });
+        var trainerName = profile ? profile.name : '';
+        var posted = 0;
+        conflicts.forEach(function(cf){
+          if (cf.alreadyOpen) return;
+          var assignment = {
+            id: uid(),
+            date: cf.ymd,
+            status: 'open',
+            requestedBy: trainerName,
+            originalInstructor: cf.cls.instructor,
+            note: 'Auto-posted from time-off entry',
+            createdAt: new Date().toISOString()
+          };
+          ctx.addSubAssignment(cf.cls.id, assignment);
+          posted++;
+        });
+        ctx.toast(
+          existing
+            ? ('Time off updated · ' + posted + ' sub request' + (posted === 1 ? '' : 's') + ' posted')
+            : ('Time off added · ' + posted + ' sub request' + (posted === 1 ? '' : 's') + ' posted')
+        );
+      } else {
+        ctx.toast(existing ? 'Time off updated ✓' : 'Time off added ✓');
+      }
+      if (props.onSave) props.onSave(record);
       props.onClose();
     }
 
@@ -19505,16 +19616,75 @@
               placeholder: 'e.g. flu, family vacation'
             })
           ),
-          error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error)
+          error && e('div', { className: 'banner red', style: { marginTop: '10px' } }, error),
+
+          /* Sprint L commit 4: conflict-warning panel. Rendered when the
+             user clicked Save and findConflicts returned hits. The user
+             confirms with the chosen sub-fan-out option. */
+          pending && e('div', {
+            style: {
+              marginTop: '14px', padding: '12px 14px',
+              background: 'var(--amber-bg)', border: '1.5px solid var(--amber)',
+              borderRadius: '10px'
+            }
+          },
+            e('div', { style: { fontWeight: 700, color: 'var(--amber)', marginBottom: '6px' } },
+              pending.conflicts.length + ' class' + (pending.conflicts.length === 1 ? '' : 'es') + ' will conflict with this time-off:'
+            ),
+            e('div', { style: { maxHeight: '160px', overflowY: 'auto', marginBottom: '10px' } },
+              pending.conflicts.map(function(cf, i){
+                return e('div', {
+                  key: 'cf-' + i,
+                  style: { fontSize: '12px', color: 'var(--navy)', padding: '4px 0', borderBottom: '1px dashed var(--border)' }
+                },
+                  e('b', null, cf.cls.name || 'Class'),
+                  ' · ' + cf.ymd + ' ' + (cf.startTime || '?') +
+                  (cf.location ? (' · ' + cf.location) : '') +
+                  (cf.alreadyOpen ? ' · already open in sub queue' : '')
+                );
+              })
+            ),
+            e('label', {
+              style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', marginBottom: '4px' }
+            },
+              e('input', {
+                type: 'checkbox',
+                checked: postSubs,
+                onChange: function(ev){ setPostSubs(ev.target.checked); }
+              }),
+              'Post sub requests for the conflicting classes'
+            ),
+            e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginLeft: '24px' } },
+              postSubs
+                ? 'Open sub requests will fan out to all other active trainers.'
+                : 'Time off saves; conflicting classes are left for manual handling.'
+            )
+          )
         ),
         e('div', { className: 'modal-footer' },
-          existing && e('button', {
+          !pending && existing && e('button', {
             className: 'btn btn-ghost',
             style: { color: 'var(--red)', marginRight: 'auto' },
             onClick: doDelete
           }, 'Delete'),
-          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
-          e('button', { className: 'btn btn-primary', onClick: save }, existing ? 'Save' : 'Add')
+          e('button', {
+            className: 'btn btn-ghost',
+            onClick: function(){
+              if (pending) { setPending(null); }
+              else { props.onClose(); }
+            }
+          }, pending ? 'Back' : 'Cancel'),
+          e('button', {
+            className: 'btn btn-primary',
+            onClick: function(){
+              if (pending) { commitSave(pending.record, pending.conflicts); }
+              else { save(); }
+            }
+          },
+            pending
+              ? (postSubs ? ('Save & Post (' + pending.conflicts.filter(function(c){ return !c.alreadyOpen; }).length + ')') : 'Save Only')
+              : (existing ? 'Save' : 'Add')
+          )
         )
       )
     );
