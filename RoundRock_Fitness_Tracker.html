@@ -3264,8 +3264,9 @@
      Idempotent via storage.notifications.existsForTrainer dedup keyed on
      <package_id>:<threshold_band>. Bands: 14 (>7 and <=14 days), 7 (>0
      and <=7), 0 (<=0 days). Skips fully-consumed clients (live recompute
-     vs the stored sessionsUsed/sessionsRemaining/is_active fields - those
-     are admin-edit metadata, not authoritative). validDays resolves from
+     from client.sessions[] is the only source of truth - the previously-
+     stored sessionsUsed / sessionsRemaining / is_active package fields
+     were write-only and were removed in Sprint K). validDays resolves from
      the matched template (template_id preferred, type-string fallback);
      packages with no resolvable validDays are silently skipped, which is
      why consult rows (sessions=0, no validDays) and legacy seed packages
@@ -3338,7 +3339,7 @@
       var activePackages = (client.packages || []).filter(function(p){ return !p.deleted_at; });
       if (activePackages.length === 0) return;
 
-      /* Live remaining count - mirrors line 2308 sessionsRemaining. Excused
+      /* Live remaining count - mirrors the sessionsRemaining helper. Excused
          absences don't consume; everything else does. Client-wide check (no
          per-package linkage on client.sessions[] yet - flagged deferred). */
       var purchased = activePackages.reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
@@ -4373,6 +4374,84 @@
             target_id: c.id,
             before: ch.before,
             after: ch.after
+          });
+        });
+      });
+    }, [loading]);
+
+    /* One-time strip of write-only package fields. Sprint K dropped
+       sessionsUsed / sessionsRemaining / is_active from the saved package
+       shape - those values were never read by any consumer (live counter
+       at sessionsRemaining(client) recomputes from client.sessions[]).
+       This migration removes the dead fields from any package row that
+       still carries them. Idempotent: rows already clean pass through.
+       Iterates active + soft-deleted clients. Stamps a
+       strip_writeonly_pkg_fields audit entry on each touched client with
+       the per-package list of fields removed. */
+    var stripWriteonlyPkgFieldsRanRef = useRef(false);
+    useEffect(function(){
+      if (loading) return;
+      if (stripWriteonlyPkgFieldsRanRef.current) return;
+      var current = clientsTuple[0] || [];
+      if (current.length === 0) return;
+      stripWriteonlyPkgFieldsRanRef.current = true;
+
+      var DEAD_FIELDS = ['sessionsUsed', 'sessionsRemaining', 'is_active'];
+      var changes = [];
+      var packageCount = 0;
+
+      current.forEach(function(c){
+        if (!c || !c.packages || c.packages.length === 0) return;
+        var anyDirty = c.packages.some(function(p){
+          return p && DEAD_FIELDS.some(function(f){ return p.hasOwnProperty(f); });
+        });
+        if (!anyDirty) return;
+
+        var perPackageRemoved = [];
+        var newPackages = c.packages.map(function(p){
+          if (!p) return p;
+          var removedHere = DEAD_FIELDS.filter(function(f){ return p.hasOwnProperty(f); });
+          if (removedHere.length === 0) {
+            perPackageRemoved.push([]);
+            return p;
+          }
+          packageCount++;
+          perPackageRemoved.push(removedHere);
+          var copy = Object.assign({}, p);
+          DEAD_FIELDS.forEach(function(f){ delete copy[f]; });
+          return copy;
+        });
+
+        changes.push({
+          clientId: c.id,
+          before: perPackageRemoved,
+          newPackages: newPackages
+        });
+      });
+
+      if (changes.length === 0) {
+        console.info('strip_writeonly_pkg_fields: no write-only package fields found');
+        return;
+      }
+
+      console.info(
+        'strip_writeonly_pkg_fields: stripped fields from ' + packageCount +
+        ' package(s) across ' + changes.length + ' client(s)'
+      );
+
+      var changeMap = {};
+      changes.forEach(function(ch){ changeMap[ch.clientId] = ch; });
+
+      setClients(function(list){
+        return list.map(function(c){
+          var ch = changeMap[c.id];
+          if (!ch) return c;
+          var updated = Object.assign({}, c, { packages: ch.newPackages });
+          return appendAuditEntry(updated, session, 'strip_writeonly_pkg_fields', {
+            entity_type: 'client',
+            target_id: c.id,
+            before: ch.before,
+            after: ch.newPackages.map(function(p){ return p && p.id ? p.id : null; })
           });
         });
       });
@@ -9081,11 +9160,11 @@
   }
 
   /* Edit an existing package on a client. Free-text type per spec
-     (allows entries beyond the facility template list). Stores
-     sessionsUsed, sessionsRemaining, and is_active on the package on
-     save - these fields are admin-tracked metadata; the existing
-     client.sessions[] count remains the source of truth for live
-     remaining displays. */
+     (allows entries beyond the facility template list). Sprint K stripped
+     the write-only sessionsUsed / sessionsRemaining / is_active fields
+     from the saved shape - those values were never read by the rest of
+     the app, the live counter at sessionsRemaining(client) recomputes
+     from client.sessions[] is the only source of truth. */
   function EditPackageModal(props){
     var ctx = props.ctx;
     var client = props.client;
@@ -9099,8 +9178,6 @@
     var type = typeTuple[0]; var setType = typeTuple[1];
     var sessionsTuple = useState(String(original.sessions != null ? original.sessions : ''));
     var sessions = sessionsTuple[0]; var setSessions = sessionsTuple[1];
-    var sessionsUsedTuple = useState(String(original.sessionsUsed != null ? original.sessionsUsed : 0));
-    var sessionsUsed = sessionsUsedTuple[0]; var setSessionsUsed = sessionsUsedTuple[1];
     var purchaseDateTuple = useState(original.purchaseDate || '');
     var purchaseDate = purchaseDateTuple[0]; var setPurchaseDate = purchaseDateTuple[1];
     var paymentTypeTuple = useState(original.paymentType || '');
@@ -9135,12 +9212,10 @@
     }
 
     var sessionsInt = parseInt(sessions, 10);
-    var sessionsUsedInt = parseInt(sessionsUsed, 10);
 
     var dirty = (
       type.trim() !== (original.type || '') ||
       (isNaN(sessionsInt) ? '' : String(sessionsInt)) !== String(original.sessions != null ? original.sessions : '') ||
-      (isNaN(sessionsUsedInt) ? '' : String(sessionsUsedInt)) !== String(original.sessionsUsed != null ? original.sessionsUsed : 0) ||
       purchaseDate !== (original.purchaseDate || '') ||
       paymentType !== (original.paymentType || '') ||
       totalPaid !== String(original.amountPaid != null ? original.amountPaid : (original.price != null ? original.price : '')) ||
@@ -9150,8 +9225,6 @@
     function validate(){
       if (!type.trim()) return 'Package type is required';
       if (isNaN(sessionsInt) || sessionsInt < 0) return 'Sessions purchased must be 0 or more';
-      if (isNaN(sessionsUsedInt) || sessionsUsedInt < 0) return 'Sessions used must be 0 or more';
-      if (sessionsUsedInt > sessionsInt) return 'Sessions used cannot exceed sessions purchased';
       return null;
     }
 
@@ -9160,13 +9233,16 @@
       if (err) { setError(err); return; }
       setError(null);
       var paid = totalPaid === '' ? null : parseFloat(totalPaid);
-      var sessionsRemaining = sessionsInt - sessionsUsedInt;
-      var updatedPkg = Object.assign({}, original, {
+      /* Strip stale write-only fields off the original record so the
+         saved shape never re-introduces them on round-trip. The migration
+         covers existing clients; this guard covers the edit path. */
+      var clean = Object.assign({}, original);
+      delete clean.sessionsUsed;
+      delete clean.sessionsRemaining;
+      delete clean.is_active;
+      var updatedPkg = Object.assign(clean, {
         type: type.trim(),
         sessions: sessionsInt,
-        sessionsUsed: sessionsUsedInt,
-        sessionsRemaining: sessionsRemaining,
-        is_active: sessionsRemaining > 0,
         purchaseDate: purchaseDate || null,
         paymentType: paymentType || null,
         amountPaid: (paid == null || isNaN(paid)) ? null : paid,
@@ -9221,23 +9297,13 @@
               placeholder: 'E.g. CMRC-10'
             })
           ),
-          e('div', { className: 'row2' },
-            e('div', { className: 'field' },
-              e('label', null, 'Sessions purchased *'),
-              e('input', {
-                type: 'number', step: '1', min: '0',
-                value: sessions,
-                onChange: function(ev){ setSessions(ev.target.value); }
-              })
-            ),
-            e('div', { className: 'field' },
-              e('label', null, 'Sessions used *'),
-              e('input', {
-                type: 'number', step: '1', min: '0',
-                value: sessionsUsed,
-                onChange: function(ev){ setSessionsUsed(ev.target.value); }
-              })
-            )
+          e('div', { className: 'field' },
+            e('label', null, 'Sessions purchased *'),
+            e('input', {
+              type: 'number', step: '1', min: '0',
+              value: sessions,
+              onChange: function(ev){ setSessions(ev.target.value); }
+            })
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
