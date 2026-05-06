@@ -15496,10 +15496,24 @@
       referrals: pendingReferrals
     };
 
+    /* Per-user PIN sessions carry trainer_id + name; the legacy 1111 admin
+       session has trainer_id=null and trainer_name='Front Desk'. */
+    var headerActorName;
+    if (ctx.session && ctx.session.trainer_id) {
+      headerActorName = ctx.session.name || 'Unknown';
+    } else if (ctx.session && ctx.session.trainer_name === 'Front Desk') {
+      headerActorName = 'Front Desk';
+    } else {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('AdminDashboard: unable to resolve actor name', ctx.session);
+      }
+      headerActorName = 'Unknown';
+    }
+
     return e('div', null,
       e('div', { className: 'header' },
         e('div', null,
-          e('h1', null, 'Front Desk'),
+          e('h1', null, headerActorName),
           e('div', { className: 'sub' }, 'Round Rock Parks and Recreation')
         ),
         e('div', { className: 'header-right' },
