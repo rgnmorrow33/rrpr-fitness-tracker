@@ -7683,7 +7683,14 @@
                         background: ev.color,
                         color: '#fff',
                         borderRadius: '6px',
-                        padding: '6px 8px',
+                        /* Vertical padding shaved from 6px to 5px so the
+                           three-line content (label + time range + location)
+                           fits inside the 56px block. With 6px top/bottom
+                           the third line clipped by ~0.8px on iPad subpixel
+                           rendering, surfacing as 'CMR...' for short
+                           location strings. Outer block height unchanged
+                           so non-stacked blocks look identical. */
+                        padding: '5px 8px',
                         fontSize: '11px',
                         fontWeight: 600,
                         cursor: 'pointer',
