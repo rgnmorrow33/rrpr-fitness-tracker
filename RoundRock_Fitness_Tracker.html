@@ -3166,7 +3166,11 @@
      that occurrence has a matching attendance log. */
   function occurrencesInWindow(classes, startDate, endDate, closures){
     var closureMap = {};
-    (closures || []).forEach(function(cl){ closureMap[cl.date] = cl; });
+    /* Sprint L commit 5: skip soft-deleted closures so a removed-then-
+       re-added closure on the same date doesn't report stale state. */
+    (closures || []).forEach(function(cl){
+      if (cl && !cl.deleted_at) closureMap[cl.date] = cl;
+    });
     var result = [];
     var cursor = new Date(startDate.getTime());
     var endMs = endDate.getTime();
@@ -4891,18 +4895,49 @@
         });
       });
     }
+    /* Sprint L commit 5: closures get audit_log integration. Switched
+       from hard-delete to soft-delete (deleted_at / deleted_by) so the
+       closure_deleted audit entry has somewhere to live. addClosure
+       soft-deletes any prior active closure on the same date - the
+       previous filter-by-date hard-delete approach would have lost the
+       prior record's audit trail. */
     function addClosure(closure){
+      var actor = ctxCurrentUserName() || 'unknown';
+      var nowIso = new Date().toISOString();
+      var withId = Object.assign({ id: uid(), createdBy: actor }, closure);
+      var stamped = appendAuditEntry(withId, session, 'closure_added', {
+        entity_type: 'closure',
+        target_id: withId.id,
+        before: null,
+        after: withId
+      });
       setClosures(function(list){
-        var existing = list.filter(function(x){ return x.date !== closure.date; });
-        /* Stamp a stable id on the new record. Without this, makeFieldTranslator
-           generates a fresh uuid every save round-trip and rapid-fire mutations
-           can create duplicate rows for the same closure. */
-        var withId = Object.assign({ id: uid() }, closure);
-        return existing.concat([withId]);
+        var withReplaced = (list || []).map(function(x){
+          if (x.date === closure.date && !x.deleted_at) {
+            return Object.assign({}, x, { deleted_at: nowIso, deleted_by: actor });
+          }
+          return x;
+        });
+        return withReplaced.concat([stamped]);
       });
     }
     function removeClosure(date){
-      setClosures(function(list){ return list.filter(function(x){ return x.date !== date; }); });
+      var before = (closures || []).find(function(x){ return x.date === date && !x.deleted_at; });
+      if (!before) return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var deleted = Object.assign({}, before, {
+        deleted_at: new Date().toISOString(),
+        deleted_by: actor
+      });
+      var stamped = appendAuditEntry(deleted, session, 'closure_deleted', {
+        entity_type: 'closure',
+        target_id: before.id,
+        before: before,
+        after: deleted
+      });
+      setClosures(function(list){
+        return list.map(function(x){ return x.id === stamped.id ? stamped : x; });
+      });
     }
     /* Sprint L: trainer time-off mutators. Stamp id + audit on insert,
        diff + audit on update, soft-delete with audit. Reuses the
@@ -16692,7 +16727,12 @@
         package_hard_deleted: 'Hard-deleted package',
         lead_status_change: 'Lead status changed',
         lead_reassigned: 'Lead reassigned',
-        recovery_logged: 'Logged service recovery'
+        recovery_logged: 'Logged service recovery',
+        closure_added: 'Added closure',
+        closure_deleted: 'Removed closure',
+        timeoff_added: 'Added time off',
+        timeoff_edited: 'Edited time off',
+        timeoff_deleted: 'Deleted time off'
       };
       return map[action] || action;
     }
@@ -19811,7 +19851,11 @@
       ctx.toast('Closure removed', 'error');
     }
 
-    var sorted = (ctx.closures || []).slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; });
+    var canViewAuditHistory = ctx.can('canViewAuditHistory');
+    var auditTargetTuple = useState(null);
+    var auditTarget = auditTargetTuple[0]; var setAuditTarget = auditTargetTuple[1];
+    var sorted = (ctx.closures || []).filter(function(c){ return !c.deleted_at; })
+      .slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; });
 
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
@@ -19839,18 +19883,30 @@
           sorted.length === 0
             ? e('div', { style: { color: 'var(--slate)', fontStyle: 'italic', fontSize: '13px' } }, 'No closures recorded.')
             : sorted.map(function(cl){
-                return e('div', { key: cl.date, className: 'list-row' },
+                return e('div', { key: cl.id || cl.date, className: 'list-row' },
                   e('div', null,
                     e('div', { style: { fontWeight: 700 } }, formatShort(parseYMD(cl.date))),
                     e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, cl.reason || 'Closed')
                   ),
-                  e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(cl.date); } }, '✕')
+                  e('div', { style: { display: 'flex', gap: '6px' } },
+                    canViewAuditHistory && (cl.audit_log || []).length > 0 && e('button', {
+                      className: 'btn btn-ghost btn-sm',
+                      title: 'View audit history',
+                      onClick: function(){ setAuditTarget(cl); }
+                    }, '📜'),
+                    e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(cl.date); } }, '✕')
+                  )
                 );
               })
         ),
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-primary', onClick: props.onClose }, 'Done')
-        )
+        ),
+        auditTarget && e(AuditHistoryModal, {
+          entries: auditTarget.audit_log || [],
+          label: 'Closure ' + auditTarget.date + ' (' + (auditTarget.reason || 'Closed') + ')',
+          onClose: function(){ setAuditTarget(null); }
+        })
       )
     );
   }
@@ -20579,7 +20635,7 @@
         ),
         e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setClosuresOpen(true); } },
-            'Closures (' + (ctx.closures || []).length + ')'),
+            'Closures (' + ((ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length) + ')'),
           ctx.can('addTimeOff') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setTimeOffOpen(true); } },
             'Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
