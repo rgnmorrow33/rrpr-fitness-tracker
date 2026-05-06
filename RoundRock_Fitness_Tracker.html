@@ -2589,26 +2589,100 @@
     var h12 = h % 12; if (h12 === 0) h12 = 12;
     return h12 + ':' + m + ' ' + ampm;
   }
-  /* Snap an HH:MM time string to the nearest 15-minute increment. Wired
-     into onChange handlers on every <input type="time"> so new entries
-     and edits land on :00 / :15 / :30 / :45 only. CSV imports do not
-     route through this - off-quarter times from RecTrac and the schedule
-     CSV pass through unchanged by design. Empty / malformed inputs pass
-     through unchanged so a clearing edit doesn't turn into '00:00'. */
-  function snapTime15(value){
-    if (!value || typeof value !== 'string') return value;
-    var m = value.match(/^(\d{1,2}):(\d{2})/);
-    if (!m) return value;
-    var h = parseInt(m[1], 10);
-    var min = parseInt(m[2], 10);
-    if (isNaN(h) || isNaN(min)) return value;
-    var total = h * 60 + min;
-    var snapped = Math.round(total / 15) * 15;
-    if (snapped >= 24 * 60) snapped = 23 * 60 + 45;
-    if (snapped < 0) snapped = 0;
-    var sh = Math.floor(snapped / 60);
-    var sm = snapped % 60;
-    return (sh < 10 ? '0' : '') + sh + ':' + (sm < 10 ? '0' : '') + sm;
+  /* Constrained time picker (Sprint K.5). Two selects - hour and minute -
+     where the minute column shows only :00 / :15 / :30 / :45. Replaces
+     the native HTML5 <input type="time"> across the 11 time-input
+     surfaces. Invalid choices (8:07, 8:50, etc.) cannot be entered;
+     they are not options in the picker.
+
+     Editing existing off-quarter values: on mount, if value is off-
+     quarter, fires onChange with the snapped value. This commits the
+     snap silently when the user opens an edit modal on a legacy class
+     and saves without touching the picker. Intentional one-time
+     normalization on edit per spec; CSV-imported off-quarter times
+     pass through unchanged until first edit.
+
+     Empty / malformed values pass through unchanged - a clearing edit
+     does not turn into '00:00'. */
+  function TimePicker(props){
+    var value = props.value || '';
+    var disabled = !!props.disabled;
+    var onChange = props.onChange || function(){};
+
+    function snap(v){
+      if (!v || typeof v !== 'string') return null;
+      var m = v.match(/^(\d{1,2}):(\d{2})/);
+      if (!m) return null;
+      var h = parseInt(m[1], 10);
+      var mi = parseInt(m[2], 10);
+      if (isNaN(h) || isNaN(mi)) return null;
+      var total = h * 60 + mi;
+      var s = Math.round(total / 15) * 15;
+      if (s >= 24 * 60) s = 23 * 60 + 45;
+      if (s < 0) s = 0;
+      var sh = Math.floor(s / 60);
+      var sm = s % 60;
+      var hh = String(sh); if (hh.length < 2) hh = '0' + hh;
+      var mm = String(sm); if (mm.length < 2) mm = '0' + mm;
+      return { h: sh, m: sm, str: hh + ':' + mm };
+    }
+
+    var snapped = snap(value);
+    var displayH = snapped ? snapped.h : 0;
+    var displayM = snapped ? snapped.m : 0;
+    var snappedStr = snapped ? snapped.str : '';
+
+    /* Mount-time normalization: if the incoming value is off-quarter,
+       push the snapped value up to the parent state so a save-without-
+       changes commits the snap. Empty values skip - they are not a
+       legacy off-quarter, just unset. */
+    useEffect(function(){
+      if (value && snappedStr && value !== snappedStr) {
+        onChange(snappedStr);
+      }
+    }, []);
+
+    function emit(h, m){
+      var hh = String(h); if (hh.length < 2) hh = '0' + hh;
+      var mm = String(m); if (mm.length < 2) mm = '0' + mm;
+      onChange(hh + ':' + mm);
+    }
+
+    function fmtHour12(h){
+      var ampm = h >= 12 ? 'PM' : 'AM';
+      var h12 = h % 12; if (h12 === 0) h12 = 12;
+      return h12 + ' ' + ampm;
+    }
+
+    var hourOptions = [];
+    for (var i = 0; i < 24; i++) {
+      hourOptions.push({ value: i, label: fmtHour12(i) });
+    }
+    var minuteOptions = [
+      { value: 0,  label: ':00' },
+      { value: 15, label: ':15' },
+      { value: 30, label: ':30' },
+      { value: 45, label: ':45' }
+    ];
+
+    return e('div', { style: { display: 'flex', gap: '6px' } },
+      e('select', {
+        value: displayH,
+        disabled: disabled,
+        onChange: function(ev){ emit(parseInt(ev.target.value, 10), displayM); },
+        style: { flex: 1, minWidth: '80px' }
+      },
+        hourOptions.map(function(o){ return e('option', { key: o.value, value: o.value }, o.label); })
+      ),
+      e('select', {
+        value: displayM,
+        disabled: disabled,
+        onChange: function(ev){ emit(displayH, parseInt(ev.target.value, 10)); },
+        style: { width: '70px' }
+      },
+        minuteOptions.map(function(o){ return e('option', { key: o.value, value: o.value }, o.label); })
+      )
+    );
   }
   function minutesBetween(start, end){
     if (!start || !end) return 0;
@@ -10129,7 +10203,7 @@
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time'),
-              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: time, onChange: setTime })
             )
           ),
           e('div', { className: 'field' },
@@ -10520,7 +10594,7 @@
           ),
           e('div', { className: 'field' },
             e('label', null, 'Time'),
-            e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
+            e(TimePicker, { value: time, onChange: setTime })
           )
         ),
         /* v2.1: session duration picker (only relevant for attended sessions) */
@@ -11474,11 +11548,11 @@
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Start Time'),
-              e('input', { type: 'time', value: form.startTime, onChange: function(ev){ update('startTime', snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: form.startTime, onChange: function(v){ update('startTime', v); } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'End Time'),
-              e('input', { type: 'time', value: form.endTime, onChange: function(ev){ update('endTime', snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: form.endTime, onChange: function(v){ update('endTime', v); } })
             )
           ),
           e('div', { className: 'row2' },
@@ -11680,7 +11754,7 @@
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time'),
-              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: time, onChange: setTime })
             )
           ),
           e('div', { className: 'field' },
@@ -12066,11 +12140,11 @@
           e('div', { style: { display: 'flex', gap: '10px' } },
             e('div', { className: 'field', style: { flex: 1 } },
               e('label', null, 'Time in'),
-              e('input', { type: 'time', value: timeIn, onChange: function(ev){ changeTimeIn(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: timeIn, onChange: changeTimeIn })
             ),
             e('div', { className: 'field', style: { flex: 1 } },
               e('label', null, 'Time out'),
-              e('input', { type: 'time', value: timeOut, onChange: function(ev){ setTimeOut(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: timeOut, onChange: setTimeOut })
             )
           ),
           e('div', { style: { fontSize: '13px', color: hours > 0 ? 'var(--teal)' : 'var(--slate)', marginBottom: '14px' } },
@@ -18124,11 +18198,11 @@
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Time in'),
-              e('input', { type: 'time', value: form.timeIn, onChange: function(ev){ update('timeIn', snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: form.timeIn, onChange: function(v){ update('timeIn', v); } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time out'),
-              e('input', { type: 'time', value: form.timeOut, onChange: function(ev){ update('timeOut', snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: form.timeOut, onChange: function(v){ update('timeOut', v); } })
             )
           ),
           (form.timeIn && form.timeOut) && e('div', { style: { fontSize: '12px', color: 'var(--teal)', marginBottom: '12px', marginTop: '-6px' } },
@@ -19380,7 +19454,7 @@
 
      all_day:
        ON  - date range only (start/end dates), times locked to 00:00 / 23:59
-       OFF - date+time pickers; time inputs use snapTime15 from Sprint K
+       OFF - date+time pickers; time inputs use TimePicker from Sprint K.5
 
      Save constructs ISO timestamps from the date+time inputs (local time
      interpretation; the timestamptz column persists with TZ offset). For
@@ -19635,7 +19709,7 @@
             ),
             !allDay && e('div', { className: 'field' },
               e('label', null, 'Start time'),
-              e('input', { type: 'time', value: startTime, onChange: function(ev){ setStartTime(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: startTime, onChange: setStartTime })
             )
           ),
           e('div', { className: 'row2' },
@@ -19645,7 +19719,7 @@
             ),
             !allDay && e('div', { className: 'field' },
               e('label', null, 'End time'),
-              e('input', { type: 'time', value: endTime, onChange: function(ev){ setEndTime(snapTime15(ev.target.value)); } })
+              e(TimePicker, { value: endTime, onChange: setEndTime })
             )
           ),
           e('div', { className: 'field' },
