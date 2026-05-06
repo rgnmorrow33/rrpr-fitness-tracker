@@ -2565,6 +2565,27 @@
     var h12 = h % 12; if (h12 === 0) h12 = 12;
     return h12 + ':' + m + ' ' + ampm;
   }
+  /* Snap an HH:MM time string to the nearest 15-minute increment. Wired
+     into onChange handlers on every <input type="time"> so new entries
+     and edits land on :00 / :15 / :30 / :45 only. CSV imports do not
+     route through this - off-quarter times from RecTrac and the schedule
+     CSV pass through unchanged by design. Empty / malformed inputs pass
+     through unchanged so a clearing edit doesn't turn into '00:00'. */
+  function snapTime15(value){
+    if (!value || typeof value !== 'string') return value;
+    var m = value.match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return value;
+    var h = parseInt(m[1], 10);
+    var min = parseInt(m[2], 10);
+    if (isNaN(h) || isNaN(min)) return value;
+    var total = h * 60 + min;
+    var snapped = Math.round(total / 15) * 15;
+    if (snapped >= 24 * 60) snapped = 23 * 60 + 45;
+    if (snapped < 0) snapped = 0;
+    var sh = Math.floor(snapped / 60);
+    var sm = snapped % 60;
+    return (sh < 10 ? '0' : '') + sh + ':' + (sm < 10 ? '0' : '') + sm;
+  }
   function minutesBetween(start, end){
     if (!start || !end) return 0;
     var s = start.split(':'); var e = end.split(':');
@@ -9813,7 +9834,7 @@
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time'),
-              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(ev.target.value); } })
+              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
             )
           ),
           e('div', { className: 'field' },
@@ -10204,7 +10225,7 @@
           ),
           e('div', { className: 'field' },
             e('label', null, 'Time'),
-            e('input', { type: 'time', value: time, onChange: function(ev){ setTime(ev.target.value); } })
+            e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
           )
         ),
         /* v2.1: session duration picker (only relevant for attended sessions) */
@@ -11158,11 +11179,11 @@
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Start Time'),
-              e('input', { type: 'time', value: form.startTime, onChange: function(ev){ update('startTime', ev.target.value); } })
+              e('input', { type: 'time', value: form.startTime, onChange: function(ev){ update('startTime', snapTime15(ev.target.value)); } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'End Time'),
-              e('input', { type: 'time', value: form.endTime, onChange: function(ev){ update('endTime', ev.target.value); } })
+              e('input', { type: 'time', value: form.endTime, onChange: function(ev){ update('endTime', snapTime15(ev.target.value)); } })
             )
           ),
           e('div', { className: 'row2' },
@@ -11364,7 +11385,7 @@
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time'),
-              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(ev.target.value); } })
+              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(snapTime15(ev.target.value)); } })
             )
           ),
           e('div', { className: 'field' },
@@ -11750,11 +11771,11 @@
           e('div', { style: { display: 'flex', gap: '10px' } },
             e('div', { className: 'field', style: { flex: 1 } },
               e('label', null, 'Time in'),
-              e('input', { type: 'time', value: timeIn, onChange: function(ev){ changeTimeIn(ev.target.value); } })
+              e('input', { type: 'time', value: timeIn, onChange: function(ev){ changeTimeIn(snapTime15(ev.target.value)); } })
             ),
             e('div', { className: 'field', style: { flex: 1 } },
               e('label', null, 'Time out'),
-              e('input', { type: 'time', value: timeOut, onChange: function(ev){ setTimeOut(ev.target.value); } })
+              e('input', { type: 'time', value: timeOut, onChange: function(ev){ setTimeOut(snapTime15(ev.target.value)); } })
             )
           ),
           e('div', { style: { fontSize: '13px', color: hours > 0 ? 'var(--teal)' : 'var(--slate)', marginBottom: '14px' } },
@@ -17803,11 +17824,11 @@
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Time in'),
-              e('input', { type: 'time', value: form.timeIn, onChange: function(ev){ update('timeIn', ev.target.value); } })
+              e('input', { type: 'time', value: form.timeIn, onChange: function(ev){ update('timeIn', snapTime15(ev.target.value)); } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time out'),
-              e('input', { type: 'time', value: form.timeOut, onChange: function(ev){ update('timeOut', ev.target.value); } })
+              e('input', { type: 'time', value: form.timeOut, onChange: function(ev){ update('timeOut', snapTime15(ev.target.value)); } })
             )
           ),
           (form.timeIn && form.timeOut) && e('div', { style: { fontSize: '12px', color: 'var(--teal)', marginBottom: '12px', marginTop: '-6px' } },
