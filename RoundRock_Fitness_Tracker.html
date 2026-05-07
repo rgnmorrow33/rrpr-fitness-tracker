@@ -2708,6 +2708,20 @@
     'Premium': 'var(--amber)'
   };
 
+  /* Phase 3b-A2.1: 4-bucket facility+activity color scheme used by the
+     cross-team grid (AllTrainersGridView). PT-CMRC = brass-soft, PT-Baca =
+     brick, GX-CMRC = teal, GX-Baca = moss. WRO and admin items don't fit
+     the bucket scheme and keep their existing colors at the call sites.
+     Case-folds facility so legacy 'CMRC' / 'cmrc' / 'Cmrc' all resolve. */
+  function getSessionColor(kind, facility){
+    var f = String(facility || '').toLowerCase();
+    if (kind === 'pt' && f === 'cmrc') return 'var(--brass-soft)';
+    if (kind === 'pt' && f === 'baca') return 'var(--brick)';
+    if (kind === 'gx' && f === 'cmrc') return 'var(--teal)';
+    if (kind === 'gx' && f === 'baca') return 'var(--moss)';
+    return 'var(--slate)';
+  }
+
   /* WRO pre-orientation intake (member fills out before the session). The full
      informed-consent / liability waiver is signed AT the orientation in person.
      This form is the request to schedule and the conversation prep. */
@@ -8383,7 +8397,8 @@
           kind: 'gx',
           start: cls.startTime || '00:00',
           end: cls.endTime || cls.startTime || '00:00',
-          color: CLASS_TYPE_COLOR[cls.classType] || 'var(--teal)',
+          /* Phase 3b-A2.1: 4-bucket facility+activity color (was per-classtype). */
+          color: getSessionColor('gx', cls.location),
           label: cls.name || 'Class',
           location: cls.location || '',
           onClick: function(){
@@ -8409,7 +8424,9 @@
             kind: 'pt',
             start: startTime,
             end: endTime,
-            color: 'var(--teal)',
+            /* Phase 3b-A2.1: facility comes from the client (PT sessions don't
+               carry their own location). PT was previously flat teal. */
+            color: getSessionColor('pt', client.location),
             label: client.name,
             location: client.location || '',
             onClick: function(){
@@ -8617,17 +8634,22 @@
         label
       );
     }
+    /* Phase 3b-A2.1: legend reflects the new 4-bucket facility+activity
+       scheme. WRO and Admin keep their existing colors (don't fit the
+       bucket scheme; left as-is at the call sites). */
     var legend = e('div', {
       style: {
         display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '10px',
         fontSize: '11px', color: 'var(--slate)'
       }
     },
-      legendChip('var(--teal)', 'PT'),
+      legendChip('var(--brass-soft)', 'PT · CMRC'),
+      legendChip('var(--brick)', 'PT · Baca'),
+      legendChip('var(--teal)', 'GX · CMRC'),
+      legendChip('var(--moss)', 'GX · Baca'),
       legendChip('var(--gold)', 'WRO'),
       legendChip('var(--slate)', 'Admin'),
-      legendChip('var(--timeoff)', 'Time Off'),
-      legendChip('#a63d9e', 'GX (by class type)')
+      legendChip('var(--timeoff)', 'Time Off')
     );
 
     var todayYMD = todayStr();
@@ -9147,7 +9169,7 @@
     var roleTier = ctx.session.role_tier || ctx.session.role || 'trainer';
     var roleLabel = roleTier === 'lead' ? 'Lead' : (roleTier === 'admin' ? 'Admin' : 'Trainer');
     var trainerTabs = [
-      { id: 'today',     label: 'My day' },
+      { id: 'today',     label: 'Today' },
       { id: 'schedule',  label: 'Schedule' },
       { id: 'pt',        label: 'PT' },
       { id: 'gx',        label: 'GX' },
@@ -16476,12 +16498,6 @@
       return e(ClassDetail, { ctx: ctx, cls: clz, onBack: function(){ setClassDetailId(null); }, canEdit: true });
     }
 
-    /* Stats */
-    var totalSessions = ctx.clients.reduce(function(s,c){ return s + (c.sessions || []).length; }, 0);
-    var revenue = ctx.clients.reduce(function(s,c){ return s + (c.amountPaid || 0); }, 0);
-    var needRenewal = ctx.clients.filter(function(c){ return sessionsRemaining(c) <= 2; }).length;
-    var gxSessions = ctx.classes.reduce(function(s,c){ return s + (c.attendance || []).length; }, 0);
-
     /* Hoisted navigation helper. Used by AdminOverview's "see all"
        links, by Cleanup-A fold links rendered inside ConsultQueueView /
        AdminAllClients / AdminTimeView, and by AdminSettingsLanding. */
@@ -16708,35 +16724,12 @@
           }, 'Sign out')
         }),
         e('div', { className: 'content' },
-          e('div', { className: 'stats-grid' },
-            e('div', { className: 'stat-card' },
-              e('div', { className: 'label' }, 'Total PT Clients'),
-              e('div', { className: 'value' }, ctx.clients.length)
-            ),
-            e('div', { className: 'stat-card' },
-              e('div', { className: 'label' }, 'PT Sessions Logged'),
-              e('div', { className: 'value' }, totalSessions)
-            ),
-            e('div', { className: 'stat-card' },
-              e('div', { className: 'label' }, 'Total Revenue'),
-              e('div', { className: 'value' }, formatMoney(revenue))
-            ),
-            e('div', { className: 'stat-card' + (needRenewal > 0 ? ' warn' : '') },
-              e('div', { className: 'label' }, 'Need Renewal'),
-              e('div', { className: 'value' }, needRenewal)
-            ),
-            e('div', { className: 'stat-card' },
-              e('div', { className: 'label' }, 'Group Classes'),
-              e('div', { className: 'value' }, ctx.classes.length)
-            ),
-            e('div', { className: 'stat-card' },
-              e('div', { className: 'label' }, 'GX Sessions Logged'),
-              e('div', { className: 'value' }, gxSessions)
-            )
-          ),
           /* Cleanup-B: domain pills + admin tab strip removed. Sidebar
              drives all admin nav now; AdminOverview's "today details"
-             link is the sole entry point to TodayView. */
+             link is the sole entry point to TodayView.
+             Phase 3b-A2.1: legacy 6-card KPI strip removed - it rendered
+             on every admin tab (not just dashboard) and duplicated the
+             Phase 2 strip inside AdminOverview. */
           tabView
         )
       )
