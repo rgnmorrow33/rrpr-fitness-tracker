@@ -1360,6 +1360,171 @@
     text-transform: lowercase;
     color: var(--slate);
   }
+
+  /* ===== Phase 2: admin overview body ===== */
+
+  /* KPI strip */
+  .kpi-strip {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr 1fr;
+    gap: 0;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    margin-bottom: 18px;
+    overflow: hidden;
+  }
+  .kpi {
+    padding: 16px 18px 14px;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: relative;
+    min-width: 0;
+  }
+  .kpi:last-child { border-right: none; }
+  .kpi .label {
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: lowercase;
+    color: var(--slate);
+  }
+  .kpi .value {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 30px;
+    color: var(--ink);
+    line-height: 1;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .kpi.hero .value { font-size: 44px; }
+  .kpi .value .unit {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--slate);
+    font-weight: 400;
+  }
+
+  /* two-column layout */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1.35fr 1fr;
+    gap: 16px;
+  }
+
+  /* panel */
+  .panel {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-head {
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .panel-head h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 16px;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  .panel-head .lbl {
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: lowercase;
+    color: var(--slate);
+  }
+  .panel-head a, .panel-head .link {
+    font-size: 11px;
+    color: var(--slate);
+    text-decoration: none;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .panel-body { padding: 0; }
+  .panel-empty {
+    padding: 22px 16px;
+    color: var(--slate-soft);
+    font-size: 12.5px;
+    font-style: italic;
+    text-align: center;
+  }
+
+  /* needs attention rows */
+  .attn-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--rule-soft);
+    font-size: 12.5px;
+  }
+  .attn-row:last-child { border-bottom: none; }
+  .attn-row .title { font-weight: 500; color: var(--ink); }
+  .attn-row .sub { font-size: 11px; color: var(--slate); margin-top: 1px; font-family: var(--mono); letter-spacing: 0.02em; }
+  .attn-row .cta {
+    font-size: 11px;
+    color: var(--ink);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+  }
+  .attn-row.urgent {
+    background: linear-gradient(90deg, rgba(168,65,42,0.04), transparent 60%);
+    border-left: 2px solid var(--brick);
+    padding-left: 14px;
+  }
+  .attn-row.urgent .cta { color: var(--brick); }
+
+  /* upcoming (next 2 hours) rows */
+  .up-row {
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    gap: 14px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--rule-soft);
+    align-items: center;
+    font-size: 13.5px;
+  }
+  .up-row:last-child { border-bottom: none; }
+  .up-row.clickable { cursor: pointer; }
+  .up-row.clickable:hover { background: var(--paper-2); }
+  .up-row .when {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .up-row .when .rel {
+    display: block;
+    font-size: 10px;
+    color: var(--slate);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 2px;
+    font-weight: 400;
+  }
+  .up-row .who { font-weight: 500; }
+  .up-row .meta { font-size: 11.5px; color: var(--slate); margin-top: 2px; }
+  .up-row .right { text-align: right; }
+  .up-row.alert {
+    background: linear-gradient(90deg, rgba(168,65,42,0.05), transparent 70%);
+    border-left: 2px solid var(--brick);
+    padding-left: 14px;
+  }
 </style>
 </head>
 <body>
@@ -15867,7 +16032,19 @@
 
     /* Today view in PT or GX domain shows a domain-filtered version. */
     var tabView;
-    if (tab === 'today') {
+    if (tab === 'overview') {
+      /* Phase 2: sidebar Dashboard renders the new at-a-glance overview.
+         tab-strip Today still renders TodayView below, untouched. */
+      tabView = e(AdminOverview, {
+        ctx: ctx,
+        navigate: function(newTab, newDomain){
+          if (newDomain) setDomain(newDomain);
+          setTab(newTab);
+        },
+        onClientClick: function(id){ setClientDetailId(id); },
+        onClassClick: function(id){ setClassDetailId(id); }
+      });
+    } else if (tab === 'today') {
       tabView = e(TodayView, {
         ctx: ctx,
         domain: domain,  /* v2.1: 'pt' hides GX, 'gx' hides PT, 'both' shows all */
@@ -15948,7 +16125,7 @@
        breaks; redundancy gets cleaned up in a later phase once the
        sidebar pattern is validated on iPad. */
     var SIDEBAR_TO_STATE = {
-      dashboard: { domain: 'pt',   tab: 'today' },
+      dashboard: { domain: 'pt',   tab: 'overview' },
       clients:   { domain: 'pt',   tab: 'clients' },
       schedule:  { domain: 'both', tab: 'schedule' },
       queue:     { domain: 'gx',   tab: 'sub_approvals' },
@@ -15957,8 +16134,11 @@
       audit:     { domain: 'both', tab: 'audit' },
       team:      { domain: 'both', tab: 'instructors' }
     };
+    /* Phase 2: tab='overview' -> sidebar Dashboard. tab='today' is now
+       only reachable through the still-present admin tab strip and does
+       not light up the sidebar (TodayView is a parallel deep view). */
     var SIDEBAR_ACTIVE_FOR_TAB = {
-      today: 'dashboard',
+      overview: 'dashboard',
       clients: 'clients',
       schedule: 'schedule',
       sub_approvals: 'queue',
@@ -16098,86 +16278,307 @@
     );
   }
 
-  /* ============ ADMIN: Trainer Overview ============ */
+  /* ============ PHASE 2: ADMIN OVERVIEW + HELPERS ============
+     New at-a-glance dashboard rendered when sidebar "Dashboard" is active
+     (tab === 'overview'). The legacy tab-strip "Today" continues to render
+     TodayView untouched. The dead AdminOverview that previously lived here
+     (trainer roster chip layout, never referenced) was removed in Phase 2.
+
+     Helpers below are local to this file's React-createElement style
+     (no JSX), used only by AdminOverview for now. */
+
+  function KPI(props){
+    return e('div', {
+      className: 'kpi' + (props.hero ? ' hero' : ''),
+      title: props.title || undefined
+    },
+      e('div', { className: 'label' }, props.label),
+      e('div', { className: 'value' },
+        e('span', null, props.value),
+        props.unit ? e('span', { className: 'unit' }, props.unit) : null
+      )
+    );
+  }
+
+  function Panel(props){
+    var hasHead = props.title || props.action;
+    return e('div', { className: 'panel' },
+      hasHead ? e('div', { className: 'panel-head' },
+        e('div', null,
+          props.kicker ? e('div', { className: 'lbl' }, props.kicker) : null,
+          props.title ? e('h2', null, props.title) : null
+        ),
+        props.action ? e('span', { className: 'link', onClick: props.onAction }, props.action) : null
+      ) : null,
+      e('div', { className: 'panel-body' }, props.children)
+    );
+  }
+
+  function AttnRow(props){
+    return e('div', { className: 'attn-row' + (props.urgent ? ' urgent' : '') },
+      e('div', null,
+        e('div', { className: 'title' }, props.title),
+        props.sub ? e('div', { className: 'sub' }, props.sub) : null
+      ),
+      e('div', { className: 'cta', onClick: props.onClick }, props.cta + ' \u2192')
+    );
+  }
+
+  function UpRow(props){
+    var rightContent = props.alert
+      ? e('span', { className: 'cta', onClick: props.onClick, style: { color: 'var(--brick)', cursor: 'pointer', fontWeight: 500 } }, (props.status || 'review') + ' \u2192')
+      : e('span', { className: 'smallcaps' }, props.status || '');
+    return e('div', {
+      className: 'up-row' + (props.alert ? ' alert' : '') + (props.onClick && !props.alert ? ' clickable' : ''),
+      onClick: !props.alert ? props.onClick : undefined
+    },
+      e('div', { className: 'when' },
+        props.time,
+        e('span', { className: 'rel' }, props.relative)
+      ),
+      e('div', null,
+        e('div', { className: 'who' }, props.who),
+        props.meta ? e('div', { className: 'meta' }, props.meta) : null
+      ),
+      e('div', { className: 'right' }, rightContent)
+    );
+  }
+
+  /* ============ ADMIN OVERVIEW ============
+     Rendered when tab === 'overview' (sidebar Dashboard). Pulls real data
+     where available, marked placeholder where not. Cost recovery KPI is
+     intentionally a placeholder - data not yet wired to the tracker. */
   function AdminOverview(props){
     var ctx = props.ctx;
-    /* v2: PT-to-wellness pipeline count for Rick reporting.
-       Counts clients whose referralSource is 'pt_discharge'. */
-    var pipelineCount = (ctx.clients || []).filter(function(c){ return c.referralSource === 'pt_discharge'; }).length;
-    var wroSourceCount = (ctx.clients || []).filter(function(c){ return c.referralSource === 'wro'; }).length;
-    var totalReferralSourced = (ctx.clients || []).filter(function(c){ return c.referralSource; }).length;
+    var navigate = props.navigate || function(){};
+    var onClientClick = props.onClientClick || function(){};
+    var onClassClick = props.onClassClick || function(){};
 
+    var todayYMD = todayStr();
+    var todayDate = parseYMD(todayYMD);
+    var now = new Date();
+    var nowMin = now.getHours() * 60 + now.getMinutes();
+    var maxMin = nowMin + 120;
+
+    function timeToMin(t){
+      if (!t) return null;
+      var p = String(t).split(':');
+      var h = parseInt(p[0], 10);
+      var m = parseInt(p[1] || '0', 10);
+      if (isNaN(h) || isNaN(m)) return null;
+      return h * 60 + m;
+    }
+    function relLabel(deltaMin){
+      if (deltaMin <= 0) return 'now';
+      if (deltaMin < 60) return 'in ' + deltaMin + 'm';
+      var h = Math.floor(deltaMin / 60);
+      var m = deltaMin % 60;
+      return 'in ' + h + 'h' + (m ? ' ' + m + 'm' : '');
+    }
+
+    /* === KPI computations === */
+    var ptToday = 0;
+    ctx.clients.forEach(function(c){
+      (c.sessions || []).forEach(function(s){
+        if (s.date === todayYMD) ptToday++;
+      });
+    });
+
+    var todayOccs = occurrencesInWindow(ctx.classes, todayDate, todayDate, ctx.closures);
+    var gxToday = todayOccs.filter(function(o){ return !o.isCancelled && !o.isClosed; }).length;
+
+    var renewalsClients = ctx.clients.filter(function(c){ return sessionsRemaining(c) <= 2; });
+    var overdueCount = renewalsClients.filter(function(c){ return sessionsRemaining(c) <= 0; }).length;
+
+    /* === Needs Attention items (priority order) === */
+    var attention = [];
+    var queue = ctx.queue || [];
+
+    var agedLeads = queue.filter(isQueueLeadAged);
+    if (agedLeads.length > 0) {
+      attention.push({
+        title: agedLeads.length + ' aged lead' + (agedLeads.length === 1 ? '' : 's'),
+        sub: 'past followup date',
+        cta: 'review',
+        urgent: true,
+        onClick: function(){ navigate('pipeline', 'pt'); }
+      });
+    }
+
+    var pendingSubs = 0;
+    ctx.classes.forEach(function(c){
+      (c.subAssignments || []).forEach(function(s){
+        if (subStatus(s) === 'claimed') pendingSubs++;
+      });
+    });
+    if (pendingSubs > 0) {
+      attention.push({
+        title: pendingSubs + ' sub approval' + (pendingSubs === 1 ? '' : 's') + ' pending',
+        sub: 'awaiting admin sign-off',
+        cta: 'approve',
+        urgent: pendingSubs >= 3,
+        onClick: function(){ navigate('sub_approvals', 'gx'); }
+      });
+    }
+
+    var openReferrals = (ctx.referrals || []).filter(function(r){
+      return r.status === 'pending' || r.status === 'contacted';
+    });
+    if (openReferrals.length > 0) {
+      attention.push({
+        title: openReferrals.length + ' open PT referral' + (openReferrals.length === 1 ? '' : 's'),
+        sub: 'pending or contacted',
+        cta: 'open',
+        urgent: openReferrals.some(function(r){ return r.urgency === 'urgent'; }),
+        onClick: function(){ navigate('referrals', 'pt'); }
+      });
+    }
+
+    var dischargeStrikes = ctx.clients.filter(function(c){ return clientStrikeStatus(c) === 'discharge'; });
+    var warningStrikes = ctx.clients.filter(function(c){ return clientStrikeStatus(c) === 'warning'; });
+    var totalStrikes = dischargeStrikes.length + warningStrikes.length;
+    if (totalStrikes > 0) {
+      attention.push({
+        title: totalStrikes + ' client' + (totalStrikes === 1 ? '' : 's') + ' on strike watch',
+        sub: dischargeStrikes.length > 0
+          ? dischargeStrikes.length + ' discharge candidate' + (dischargeStrikes.length === 1 ? '' : 's')
+          : 'late cancels / no-shows',
+        cta: 'review',
+        urgent: dischargeStrikes.length > 0,
+        onClick: function(){ navigate('clients', 'pt'); }
+      });
+    }
+
+    var coldClients = ctx.clients.filter(function(c){ return isClientCold(c); });
+    if (coldClients.length > 0) {
+      attention.push({
+        title: coldClients.length + ' cold PT client' + (coldClients.length === 1 ? '' : 's'),
+        sub: '21+ days since last visit',
+        cta: 'view',
+        urgent: false,
+        onClick: function(){ navigate('clients', 'pt'); }
+      });
+    }
+
+    if (renewalsClients.length > 0) {
+      attention.push({
+        title: renewalsClients.length + ' near renewal',
+        sub: '\u22642 sessions remaining' + (overdueCount > 0 ? ' (' + overdueCount + ' overdue)' : ''),
+        cta: 'open',
+        urgent: false,
+        onClick: function(){ navigate('clients', 'pt'); }
+      });
+    }
+
+    /* === Next 2 Hours - PT sessions + GX occurrences === */
+    var upcoming = [];
+    ctx.clients.forEach(function(c){
+      (c.sessions || []).forEach(function(s){
+        if (s.date !== todayYMD) return;
+        var sm = timeToMin(s.time);
+        if (sm == null || sm < nowMin || sm > maxMin) return;
+        upcoming.push({
+          kind: 'pt',
+          timeMin: sm,
+          time: formatTime12(s.time),
+          relative: relLabel(sm - nowMin),
+          who: c.name,
+          meta: 'PT \u00b7 with ' + (c.trainerName || 'unassigned'),
+          status: s.status === 'attended' ? 'logged' : (s.status ? s.status : 'scheduled'),
+          alert: false,
+          onClick: function(){ onClientClick(c.id); }
+        });
+      });
+    });
+    todayOccs.forEach(function(o){
+      var sm = timeToMin(o.cls.startTime);
+      if (sm == null || sm < nowMin || sm > maxMin) return;
+      if (o.isCancelled || o.isClosed) return;
+      upcoming.push({
+        kind: 'gx',
+        timeMin: sm,
+        time: formatTime12(o.cls.startTime),
+        relative: relLabel(sm - nowMin),
+        who: o.cls.name,
+        meta: 'GX \u00b7 ' + (o.actualInstructor || o.scheduledInstructor || o.cls.instructor) +
+              (o.cls.location ? (' \u00b7 ' + o.cls.location) : ''),
+        status: o.logged ? 'logged' : 'pending',
+        alert: false,
+        onClick: function(){ onClassClick(o.cls.id); }
+      });
+    });
+    upcoming.sort(function(a, b){ return a.timeMin - b.timeMin; });
+
+    /* === Render === */
     return e('div', null,
-      /* Pipeline impact banner: surfaces the "X patients moved from PT to wellness" stat */
-      e('div', {
-        style: {
-          background: 'linear-gradient(135deg, var(--cream-2), #fff)',
-          border: '1.5px solid var(--gold)',
-          borderRadius: '12px',
-          padding: '14px 18px',
-          marginBottom: '18px'
-        }
-      },
-        e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--gold)', fontWeight: 700, marginBottom: '6px' } },
-          'PT-to-Wellness Pipeline'
-        ),
-        e('div', { style: { display: 'flex', gap: '24px', flexWrap: 'wrap' } },
-          e('div', null,
-            e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '32px', color: 'var(--navy)', lineHeight: 1 } }, pipelineCount),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } }, 'PT discharges \u2192 PT clients')
-          ),
-          e('div', null,
-            e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '32px', color: 'var(--navy)', lineHeight: 1 } }, wroSourceCount),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } }, 'WRO conversions \u2192 PT clients')
-          ),
-          e('div', null,
-            e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '32px', color: 'var(--slate)', lineHeight: 1 } }, totalReferralSourced),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '4px' } }, 'Total with referral source tagged')
-          )
-        )
+      e('div', { className: 'kpi-strip' },
+        e(KPI, {
+          label: 'PT sessions today',
+          value: ptToday,
+          unit: ptToday === 1 ? 'session' : 'sessions',
+          hero: true
+        }),
+        e(KPI, {
+          label: 'GX classes today',
+          value: gxToday,
+          unit: gxToday === 1 ? 'class' : 'classes'
+        }),
+        e(KPI, {
+          label: 'renewals \u00b7 \u22642 sessions',
+          value: renewalsClients.length,
+          unit: overdueCount > 0 ? (overdueCount + ' overdue') : 'this period'
+        }),
+        e(KPI, {
+          label: 'cost recovery \u00b7 QTD',
+          value: '\u2014',
+          unit: 'data not yet wired',
+          title: 'cost recovery data is not yet wired into the tracker. metric will populate when financial data integrates.'
+        })
       ),
-      ctx.trainers.map(function(name){
-        var myClients = ctx.clients.filter(function(c){ return c.trainerName === name; });
-        var myClasses = ctx.classes.filter(function(c){ return c.instructor === name; });
-        return e('div', { className: 'trainer-block', key: name },
-          e('div', { className: 'tb-head' },
-            e('div', null,
-              e('div', { className: 'tb-name' }, name),
-              e('div', { className: 'tb-meta' }, myClients.length + ' clients \u00b7 ' + myClasses.length + ' classes')
-            )
-          ),
-          myClients.length > 0 && e('div', { className: 'chip-row' },
-            e('div', { className: 'row-label' }, 'PT Clients'),
-            myClients.map(function(c){
-              var color = remainingColor(c);
-              return e('button', {
-                key: c.id,
-                className: 'chip ' + color,
-                onClick: function(){ props.onClientClick(c.id); }
-              },
-                c.name,
-                e('span', { className: 'chip-count' }, '\u00b7 ' + sessionsRemaining(c))
-              );
-            })
-          ),
-          myClasses.length > 0 && e('div', { className: 'chip-row' },
-            e('div', { className: 'row-label' }, 'GX Classes'),
-            myClasses.map(function(cl){
-              return e('button', {
-                key: cl.id,
-                className: 'chip teal',
-                onClick: function(){ props.onClassClick(cl.id); }
-              },
-                cl.name,
-                e('span', { className: 'chip-count' }, '\u00b7 ' + (cl.attendance || []).length)
-              );
-            })
-          ),
-          myClients.length === 0 && myClasses.length === 0 && e('div', { style: { fontSize: '13px', color: 'var(--slate-soft)', fontStyle: 'italic' } },
-            'No clients or classes assigned.'
-          )
-        );
-      })
+
+      e('div', { className: 'two-col' },
+        e(Panel, {
+          title: 'Needs attention',
+          kicker: attention.length + (attention.length === 1 ? ' open' : ' open'),
+          action: 'all',
+          onAction: function(){ navigate('pipeline', 'pt'); }
+        },
+          attention.length === 0
+            ? e('div', { className: 'panel-empty' }, 'all clear \u2713')
+            : attention.map(function(it, i){
+                return e(AttnRow, {
+                  key: i,
+                  title: it.title,
+                  sub: it.sub,
+                  cta: it.cta,
+                  urgent: it.urgent,
+                  onClick: it.onClick
+                });
+              })
+        ),
+
+        e(Panel, {
+          title: 'Next 2 hours',
+          kicker: upcoming.length + (upcoming.length === 1 ? ' session' : ' sessions'),
+          action: 'full schedule',
+          onAction: function(){ navigate('schedule', 'both'); }
+        },
+          upcoming.length === 0
+            ? e('div', { className: 'panel-empty' }, 'nothing scheduled')
+            : upcoming.map(function(s, i){
+                return e(UpRow, {
+                  key: i,
+                  time: s.time,
+                  relative: s.relative,
+                  who: s.who,
+                  meta: s.meta,
+                  status: s.status,
+                  alert: s.alert,
+                  onClick: s.onClick
+                });
+              })
+        )
+      )
     );
   }
 
