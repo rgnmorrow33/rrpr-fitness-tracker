@@ -1452,6 +1452,121 @@
     color: var(--navy);
   }
 
+  /* ===== Phase 3b-A2: TEAM HOURS / PAYROLL REVIEW ===== */
+  .team-hours {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 4px 0;
+  }
+  .team-hours-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .team-hours-header h2 {
+    font-family: var(--serif);
+    font-size: 20px;
+    font-weight: 500;
+    margin: 0;
+    color: var(--ink);
+  }
+  .team-hours-period {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .team-hours-period .period-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--slate);
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .team-hours-period .pill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    cursor: pointer;
+    color: var(--slate);
+    font-family: var(--mono);
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
+  .team-hours-period .pill.active {
+    background: var(--ink);
+    color: #fff;
+    border-color: var(--ink);
+  }
+  .team-hours-row {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 16px;
+    align-items: center;
+    cursor: pointer;
+  }
+  .team-hours-row:hover {
+    background: var(--paper-2);
+  }
+  .team-hours-row .name {
+    font-family: var(--serif);
+    font-size: 16px;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .team-hours-row .breakdown {
+    font-size: 11.5px;
+    color: var(--slate);
+    margin-top: 3px;
+    font-family: var(--mono);
+    letter-spacing: 0.02em;
+  }
+  .team-hours-row .hours {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--ink);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .team-hours-row .chevron {
+    color: var(--slate);
+    font-size: 14px;
+  }
+  .team-hours-totals {
+    margin-top: 8px;
+    padding: 14px 16px;
+    border-top: 2px solid var(--ink);
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 16px;
+    align-items: center;
+  }
+  .team-hours-totals .label {
+    font-family: var(--serif);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .team-hours-totals .total {
+    font-family: var(--mono);
+    font-size: 20px;
+    color: var(--ink);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
@@ -2502,7 +2617,10 @@
       canEditTrainer: false,
       canSetPINs: false,
       canBulkImport: false,
-      canViewAllTimeCards: false,
+      /* Phase 3b-A2: lead can read other trainers' time cards via the
+         payroll review surface (TeamHoursView). Read-only - lead can't
+         edit other trainers' admin items. */
+      canViewAllTimeCards: true,
       canViewAnyTrainerSchedule: true,
       canDeleteSession: true,
       /* Lead expansions (unscoped this cycle) */
@@ -8918,8 +9036,18 @@
     var timeOffOpenTuple = useState(false);
     var timeOffOpen = timeOffOpenTuple[0]; var setTimeOffOpen = timeOffOpenTuple[1];
 
+    /* Phase 3b-A2: team-hours master-detail. selectedTrainerForTeamHours
+       names the trainer whose card is open via TeamHoursView drill-down.
+       Cleared on every navigate() call so re-tapping the tab returns to
+       the list, and tab-switching to a different surface doesn't leave
+       the detail dangling. */
+    var selectedTrainerForTeamHoursTuple = useState(null);
+    var selectedTrainerForTeamHours = selectedTrainerForTeamHoursTuple[0];
+    var setSelectedTrainerForTeamHours = selectedTrainerForTeamHoursTuple[1];
+
     function navigate(t, opts){
       setHeaderContext(null);
+      setSelectedTrainerForTeamHours(null);
       setTabFilter((opts && opts.filter) || null);
       setTab(t);
       setNavGen(function(g){ return g + 1; });
@@ -8988,10 +9116,34 @@
     else if (tab === 'gx') content = e(TrainerGX, { key: contentKey, ctx: ctx, setHeaderContext: setHeaderContext, initialFilter: tabFilter });
     else if (tab === 'leads') content = e(TrainerLeadsView, { key: contentKey, ctx: ctx });
     else if (tab === 'time_card') content = e(TimeCardView, { key: contentKey, ctx: ctx });
+    else if (tab === 'team_hours') {
+      /* Phase 3b-A2: payroll review master-detail. List by default; drilling
+         in renders TimeCardView in read-only mode and pushes a headerContext
+         so the existing .trainer-detail-bar breadcrumb appears. */
+      if (selectedTrainerForTeamHours) {
+        content = e(TimeCardView, { key: contentKey, ctx: ctx, trainerName: selectedTrainerForTeamHours });
+      } else {
+        content = e(TeamHoursView, {
+          key: contentKey,
+          ctx: ctx,
+          onTrainerSelect: function(name){
+            setSelectedTrainerForTeamHours(name);
+            setHeaderContext({
+              title: name + ' · time card',
+              sub: 'Team hours',
+              onBack: function(){
+                setSelectedTrainerForTeamHours(null);
+                setHeaderContext(null);
+              }
+            });
+          }
+        });
+      }
+    }
 
     /* Phase 3b-A: tabs array driven from existing tab IDs so the
        dispatcher above keeps working unchanged. Only labels change.
-       Lead-tier extras (Team) deferred to Phase 3b-C. */
+       Phase 3b-A2: Team hours appended for lead/admin via canViewAllTimeCards. */
     var roleTier = ctx.session.role_tier || ctx.session.role || 'trainer';
     var roleLabel = roleTier === 'lead' ? 'Lead' : (roleTier === 'admin' ? 'Admin' : 'Trainer');
     var trainerTabs = [
@@ -9002,6 +9154,9 @@
       { id: 'leads',     label: 'Leads', badge: leadBadge > 0 ? leadBadge : null },
       { id: 'time_card', label: 'Time card' }
     ];
+    if (ctx.can('canViewAllTimeCards')) {
+      trainerTabs.push({ id: 'team_hours', label: 'Team hours' });
+    }
 
     return e('div', null,
       e(TrainerBar, {
@@ -13489,7 +13644,12 @@
      numbers before payroll. */
   function TimeCardView(props){
     var ctx = props.ctx;
-    var trainerName = ctx.session.name;
+    /* Phase 3b-A2: trainerName accepted as prop so the payroll review
+       surface (TeamHoursView) can drill in to any trainer's card.
+       isReadOnly fires when the prop names someone other than the signed-in
+       user - banner shows, write surfaces disable. */
+    var trainerName = props.trainerName || (ctx.session && ctx.session.name) || '';
+    var isReadOnly = !!(props.trainerName && props.trainerName !== (ctx.session && ctx.session.name));
 
     /* 0 = current period, -1 = previous (just closed), +1 = next */
     var offsetTuple = useState(0);
@@ -13601,6 +13761,20 @@
     }
 
     return e('div', null,
+      /* Phase 3b-A2: read-only banner when viewing another trainer's card
+         via TeamHoursView drill-down. Self mode hides this. */
+      isReadOnly && e('div', {
+        style: {
+          fontSize: '12px',
+          color: 'var(--slate)',
+          padding: '8px 12px',
+          marginBottom: '10px',
+          background: 'var(--paper-2)',
+          border: '1px solid var(--rule)',
+          borderRadius: '6px',
+          letterSpacing: '0.02em'
+        }
+      }, 'Viewing time card for ' + trainerName + '. Read-only.'),
       /* Weekly hours dashboard - same component used on the Today tab.
          Always anchors to the current Sun-Sat regardless of which pay
          period is selected below. */
@@ -13783,10 +13957,10 @@
           : manualRolling.map(function(it){
               return e('div', {
                 key: it.id,
-                onClick: function(){ setModal(it); },
+                onClick: isReadOnly ? null : function(){ setModal(it); },
                 style: {
                   padding: '10px 14px', borderBottom: '1px solid var(--border)',
-                  cursor: 'pointer'
+                  cursor: isReadOnly ? 'default' : 'pointer'
                 }
               },
                 e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' } },
@@ -13805,7 +13979,7 @@
                 )
               );
             }),
-        e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)' } },
+        !isReadOnly && e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)' } },
           e('button', {
             className: 'btn btn-teal btn-sm',
             style: { width: '100%' },
@@ -14204,6 +14378,103 @@
         client: sourceDetail.client,
         onClose: function(){ setSourceDetail(null); }
       })
+    );
+  }
+
+  /* ============ TEAM HOURS VIEW (Phase 3b-A2) ============
+     Payroll review surface. Same component for admin (sidebar Payroll) and
+     lead (top-tab Team hours). Lists active trainers with current pay-period
+     hours total + small breakdown. Click a trainer -> drill into read-only
+     TimeCardView (parent owns selection state and the breadcrumb). */
+  function TeamHoursView(props){
+    var ctx = props.ctx;
+    var onTrainerSelect = props.onTrainerSelect;
+
+    /* Three-pill period offset matches TimeCardView's pattern.
+       -1 = previous (just closed), 0 = current, 1 = next */
+    var offsetTuple = useState(0);
+    var offset = offsetTuple[0]; var setOffset = offsetTuple[1];
+
+    /* ctx.trainers is already filtered to active, non-deleted (line ~6190).
+       Sort alphabetically for stable presentation. */
+    var trainerNames = (ctx.trainers || []).slice().sort(function(a, b){
+      return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
+    });
+
+    var rows = trainerNames.map(function(name){
+      var card = calcTrainerHours(
+        name, offset,
+        ctx.clients, ctx.classes,
+        ctx.items || [], ctx.wros || [], ctx.contacts || []
+      );
+      /* Orientations roll into the PT category per Selisa's pattern,
+         so they're counted in ptCount alongside 1:1 sessions. */
+      var ptCount = (card.forwardFacing.ptSessions || []).length
+                  + (card.forwardFacing.orientations || []).length;
+      var gxCount = (card.forwardFacing.gxClasses || []).length;
+      return {
+        name: name,
+        hours: card.grandTotal || 0,
+        ptCount: ptCount,
+        gxCount: gxCount,
+        adminHours: (card.manualAdmin && card.manualAdmin.hours) || 0
+      };
+    });
+
+    var totalHours = rows.reduce(function(s, r){ return s + r.hours; }, 0);
+
+    /* Period label sourced via the same helpers TimeCardView uses
+       internally - no third date-formatting pattern. */
+    var periodForLabel = payPeriodByIndex(payPeriodForDate(new Date()).index + offset);
+    var periodLabel = payPeriodLabel(periodForLabel);
+
+    function pill(value, label){
+      return e('span', {
+        className: 'pill' + (offset === value ? ' active' : ''),
+        onClick: function(){ setOffset(value); }
+      }, label);
+    }
+
+    return e('div', { className: 'team-hours' },
+      e('div', { className: 'team-hours-header' },
+        e('h2', null, 'Team hours'),
+        e('div', { className: 'team-hours-period' },
+          e('span', { className: 'period-label' }, 'pay period ' + periodLabel),
+          pill(-1, 'Previous'),
+          pill(0, 'Current'),
+          pill(1, 'Next')
+        )
+      ),
+      rows.length === 0
+        ? e('div', {
+            style: {
+              padding: '20px', textAlign: 'center', color: 'var(--slate)',
+              fontStyle: 'italic', background: 'var(--paper)',
+              border: '1px solid var(--rule)', borderRadius: '6px'
+            }
+          }, 'No active trainers.')
+        : rows.map(function(r){
+            return e('div', {
+              key: r.name,
+              className: 'team-hours-row',
+              onClick: function(){ onTrainerSelect && onTrainerSelect(r.name); }
+            },
+              e('div', null,
+                e('div', { className: 'name' }, r.name),
+                e('div', { className: 'breakdown' },
+                  r.ptCount + ' pt · ' + r.gxCount + ' gx · ' +
+                  r.adminHours.toFixed(1) + ' admin'
+                )
+              ),
+              e('div', { className: 'hours' }, r.hours.toFixed(1) + ' hrs'),
+              e('div', { className: 'chevron' }, '→')
+            );
+          }),
+      rows.length > 0 && e('div', { className: 'team-hours-totals' },
+        e('div', { className: 'label' }, 'Team total'),
+        e('div', null, ''),
+        e('div', { className: 'total' }, totalHours.toFixed(1) + ' hrs')
+      )
     );
   }
 
@@ -16043,6 +16314,7 @@
     queue:     '↪',
     leads:     '✶',
     reports:   '◔',
+    payroll:   '▤',
     audit:     '⌗',
     team:      '☰',
     classes:   '◇',
@@ -16178,6 +16450,17 @@
     var classDetailId = classDetailTuple[0];
     var setClassDetailId = classDetailTuple[1];
 
+    /* Phase 3b-A2: payroll master-detail. selectedTrainerForPayroll names
+       the trainer whose card is open via TeamHoursView drill-down. Cleared
+       when the user navigates to a different sidebar tab (effect below) so
+       returning to Payroll lands on the list, not a stale detail. */
+    var selectedTrainerForPayrollTuple = useState(null);
+    var selectedTrainerForPayroll = selectedTrainerForPayrollTuple[0];
+    var setSelectedTrainerForPayroll = selectedTrainerForPayrollTuple[1];
+    useEffect(function(){
+      if (tab !== 'payroll') setSelectedTrainerForPayroll(null);
+    }, [tab]);
+
     /* Cleanup-B: DOMAIN_TABS + changeDomain removed with the pill row
        and admin tab strip. Sidebar items now drive (domain, tab)
        transitions directly via SIDEBAR_TO_STATE / navigateTab below. */
@@ -16250,6 +16533,32 @@
         isAdmin: true,
         onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Fill Rate */
       });
+    } else if (tab === 'payroll') {
+      /* Phase 3b-A2: payroll master-detail. List view by default; drilling
+         in via onTrainerSelect renders TimeCardView in read-only mode with
+         a small breadcrumb (reuses Phase 3b-A's .trainer-detail-bar primitive,
+         which is surface-neutral). */
+      if (selectedTrainerForPayroll) {
+        tabView = e('div', null,
+          e('div', { className: 'trainer-detail-bar' },
+            e('button', {
+              className: 'back',
+              onClick: function(){ setSelectedTrainerForPayroll(null); },
+              'aria-label': 'Back to Payroll'
+            }, '←'),
+            e('div', { style: { minWidth: 0, flex: 1 } },
+              e('div', { className: 'crumb' }, 'Payroll'),
+              e('div', { className: 'title' }, selectedTrainerForPayroll + ' · time card')
+            )
+          ),
+          e(TimeCardView, { ctx: ctx, trainerName: selectedTrainerForPayroll })
+        );
+      } else {
+        tabView = e(TeamHoursView, {
+          ctx: ctx,
+          onTrainerSelect: function(name){ setSelectedTrainerForPayroll(name); }
+        });
+      }
     } else if (tab === 'contacts') {
       tabView = e(AdminContactsView, { ctx: ctx });
     } else if (tab === 'schedule_versions') {
@@ -16312,6 +16621,7 @@
       referrals: { domain: 'pt',   tab: 'referrals' },
       wros:      { domain: 'pt',   tab: 'wros' },
       reports:   { domain: 'both', tab: 'admin_time' },
+      payroll:   { domain: 'both', tab: 'payroll' },
       audit:     { domain: 'both', tab: 'audit' },
       team:      { domain: 'both', tab: 'instructors' },
       settings:  { domain: 'both', tab: 'settings' }
@@ -16335,6 +16645,7 @@
       wros: 'wros',
       admin_time: 'reports',
       fill_rate: 'reports',
+      payroll: 'payroll',
       audit: 'audit',
       instructors: 'team',
       settings: 'settings',
@@ -16363,11 +16674,18 @@
     var sidebarSecondary = [
       { id: 'referrals', icon: 'leads',   label: 'Referrals' },
       { id: 'wros',      icon: 'audit',   label: 'WROs' },
-      { id: 'reports',   icon: 'reports', label: 'Reports' },
+      { id: 'reports',   icon: 'reports', label: 'Reports' }
+    ];
+    /* Phase 3b-A2: Payroll surface gated on canViewAllTimeCards
+       (admin always; lead after the perm flip). */
+    if (ctx.can('canViewAllTimeCards')) {
+      sidebarSecondary.push({ id: 'payroll', icon: 'payroll', label: 'Payroll' });
+    }
+    sidebarSecondary.push(
       { id: 'audit',     icon: 'audit',   label: 'Audit log' },
       { id: 'team',      icon: 'team',    label: 'Team' },
       { id: 'settings',  icon: 'settings', label: 'Settings' }
-    ];
+    );
 
     return e('div', { style: { display: 'flex', minHeight: '100vh' } },
       e(Sidebar, {
