@@ -2610,10 +2610,10 @@
       canRequestSub: true,
       canClaimSub: true,
       canAddClient: true,
-      canAddPackage: false,
-      canEditClient: false,
-      canEditPackage: false,
-      canDeletePackage: false,
+      canAddPackage: true,
+      canEditClient: true,
+      canEditPackage: true,
+      canDeletePackage: true,
       canEditTrainer: false,
       canSetPINs: false,
       canBulkImport: false,
@@ -13398,6 +13398,10 @@
     var aged = isQueueLeadAged(lead);
     var ageDays = queueLeadAgeDays(lead);
     var isAdmin = ctx.session && ctx.session.role === 'admin';
+    /* Phase 3b-A4: lead-tier shares the assign/reassign branches below with
+       admin (trainer-picker on Assign/Claim, Reassign button visible). Delete
+       stays admin-only - lead does NOT get the destructive lead-removal action. */
+    var isLead = ctx.session && ctx.session.role === 'lead';
     var canViewAuditHistory = ctx.can('canViewAuditHistory');
 
     var auditOpenTuple = useState(false);
@@ -13421,9 +13425,9 @@
 
     function handleAction(s){
       if (s === 'assigned') {
-        /* Admin must assign to a trainer, not pick up the lead themselves.
+        /* Admin and lead assign to a trainer, not pick up the lead themselves.
            Open the trainer picker (same UI as Reassign) instead of self-claim. */
-        if (isAdmin) {
+        if (isAdmin || isLead) {
           setReassignOpen(true);
           return;
         }
@@ -13513,7 +13517,7 @@
                 onClick: function(){ handleAction(s); }
               }, actionLabel(s));
             }),
-            isAdmin && lead.status !== 'converted' && lead.status !== 'lost' && lead.assignedTo && e('button', {
+            (isAdmin || isLead) && lead.status !== 'converted' && lead.status !== 'lost' && lead.assignedTo && e('button', {
               className: 'btn btn-sm btn-outline',
               onClick: function(){ setReassignOpen(true); }
             }, 'Reassign')
