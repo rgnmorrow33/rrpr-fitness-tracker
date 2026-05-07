@@ -2609,7 +2609,7 @@
       canLogSession: true,
       canRequestSub: true,
       canClaimSub: true,
-      canAddClient: false,
+      canAddClient: true,
       canAddPackage: false,
       canEditClient: false,
       canEditPackage: false,
@@ -9371,6 +9371,12 @@
     var detailId = detailTuple[0];
     var setDetailId = detailTuple[1];
 
+    /* Phase 3b-A3: lead-tier can add new clients from the PT tab. Reuses
+       NewClientModal; gated below by ctx.can('canAddClient'). */
+    var newOpenTuple = useState(false);
+    var newOpen = newOpenTuple[0];
+    var setNewOpen = newOpenTuple[1];
+
     var myClients = useMemo(function(){
       return ctx.clients.filter(function(c){ return c.trainerName === trainerName; });
     }, [ctx.clients, trainerName]);
@@ -9497,9 +9503,9 @@
               );
             })
       ),
-      /* Add Client is admin-only as of the team-management changes.
-         Trainers see their assigned clients but creation goes through
-         admin > Clients now. */
+      /* Phase 3b-A3: lead-tier sees a "+ New client" affordance here via
+         canAddClient. Trainers do not (perm stays false). Admin still has
+         their own surface in AdminAllClients. */
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'My Clients'),
@@ -9509,7 +9515,11 @@
               : (myClients.length + ' active · ' + myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0) + ' sessions remaining')
             )
           )
-        )
+        ),
+        ctx.can('canAddClient') && e('button', {
+          className: 'btn btn-gold',
+          onClick: function(){ setNewOpen(true); }
+        }, '+ New client')
       ),
       visibleClients.length === 0
         ? e('div', { className: 'empty' },
@@ -9528,7 +9538,16 @@
                 });
               }
             });
-          })
+          }),
+      newOpen && e(NewClientModal, {
+        ctx: ctx,
+        onClose: function(){ setNewOpen(false); },
+        onCreate: function(c){
+          ctx.auditedUpsertClient(c, 'create');
+          setNewOpen(false);
+          ctx.toast('Client created ✓');
+        }
+      })
     );
   }
 
