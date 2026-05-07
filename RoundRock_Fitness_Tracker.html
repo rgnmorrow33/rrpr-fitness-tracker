@@ -1338,6 +1338,120 @@
     background: var(--paper-2);
   }
 
+  /* ===== Phase 3b-A: TRAINER VIEW SHELL =====
+     Top-tab chrome that replaces TrainerView's old bottom-nav.
+     Chrome only - .btn / .btn-ghost / .tstat / .t-session / .tbl rules
+     come in Phase 3b-B (content migration). */
+  .trainer-bar {
+    background: var(--side-bg);
+    color: #fff;
+    padding: 14px 22px 0;
+    padding-top: calc(14px + env(safe-area-inset-top));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 40;
+  }
+  .trainer-bar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .trainer-bar .greet {
+    font-family: var(--serif);
+    font-size: 22px;
+    font-weight: 500;
+    color: #fff;
+    line-height: 1.2;
+  }
+  .trainer-bar .greet em {
+    font-style: italic;
+    color: var(--side-brand);
+    font-weight: 400;
+  }
+  .trainer-bar .clock {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--side-text);
+    letter-spacing: 0.06em;
+    margin-top: 2px;
+  }
+  .trainer-tabs {
+    display: flex;
+    gap: 0;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .trainer-tabs .tab {
+    padding: 12px 20px 14px;
+    font-size: 13px;
+    color: var(--side-text);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    position: relative;
+    letter-spacing: 0.01em;
+    user-select: none;
+  }
+  .trainer-tabs .tab.active {
+    color: #fff;
+    border-bottom-color: var(--side-brand);
+    font-weight: 500;
+  }
+  .trainer-tabs .tab:hover {
+    color: #fff;
+  }
+  .trainer-tabs .tab .badge {
+    background: var(--brick);
+    color: #fff;
+    font-size: 10px;
+    border-radius: 999px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    font-weight: 600;
+  }
+  .trainer-content {
+    flex: 1;
+    background: var(--bg);
+    padding: 18px 22px;
+    padding-bottom: 100px;
+    overflow: auto;
+  }
+  .trainer-detail-bar {
+    background: var(--paper, #fff);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 22px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 39;
+  }
+  .trainer-detail-bar .back {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--navy);
+    font-size: 22px;
+    line-height: 1;
+    padding: 0 4px 0 0;
+  }
+  .trainer-detail-bar .crumb {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--slate);
+  }
+  .trainer-detail-bar .title {
+    font-family: 'DM Serif Display', Georgia, serif;
+    font-size: 18px;
+    color: var(--navy);
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
@@ -8684,6 +8798,85 @@
     );
   }
 
+  /* ============ TRAINER BAR (Phase 3b-A) ============
+     Top-tab chrome that sits above .trainer-content. Renders greeting,
+     clock, tab strip, user chip, notifications, and sign out. Replaces
+     the old .header + .bottom-nav pair on the trainer/lead surface.
+     Admin still uses .topbar (Phase 1) - this component is trainer/lead
+     only. Facility is intentionally optional (session payload doesn't
+     carry it yet; clock omits it gracefully when absent). */
+  function TrainerBar(props){
+    var userName = props.userName || '';
+    var firstName = props.firstName || userName.split(' ')[0] || '';
+    var roleLabel = props.roleLabel || 'Trainer';
+    var facility = props.facility || null;
+    var tabs = props.tabs || [];
+    var activeTabId = props.activeTabId;
+    var onTabSelect = props.onTabSelect;
+    var notificationsNode = props.notificationsNode;
+    var signOutNode = props.signOutNode;
+
+    var initials = userName.split(' ').map(function(p){ return p && p[0]; }).filter(Boolean).slice(0, 2).join('');
+    var now = new Date();
+    var hour = now.getHours();
+    var greetingPrefix = hour < 12 ? 'good morning' : (hour < 18 ? 'good afternoon' : 'good evening');
+    /* en-US "short" locale sample: "Wed, May 7, 10:42 AM". Lowercased to
+       match the redesign tone. */
+    var dateText = now.toLocaleString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true
+    }).toLowerCase();
+    var clockText = facility ? (dateText + ' · ' + facility) : dateText;
+
+    return e('div', { className: 'trainer-bar' },
+      e('div', { className: 'trainer-bar-top' },
+        e('div', { className: 'row', style: { gap: 14 } },
+          e(ShieldMark, { size: 32 }),
+          e('div', null,
+            e('div', { className: 'greet' },
+              greetingPrefix + ', ',
+              e('em', null, firstName)
+            ),
+            e('div', { className: 'clock' }, clockText)
+          )
+        ),
+        e('div', { className: 'row', style: { gap: 12 } },
+          notificationsNode || null,
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: '#fff', fontSize: 12 } },
+            e('span', {
+              style: {
+                width: 24, height: 24, borderRadius: '50%',
+                background: 'rgba(255,255,255,0.1)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontFamily: 'var(--serif)', fontSize: 10
+              }
+            }, initials),
+            e('span', { style: { color: '#fff', fontWeight: 500 } }, userName),
+            e('span', {
+              style: {
+                color: 'var(--side-text)', fontSize: 10,
+                letterSpacing: '0.14em', textTransform: 'uppercase'
+              }
+            }, roleLabel)
+          ),
+          signOutNode || null
+        )
+      ),
+      e('div', { className: 'trainer-tabs' },
+        tabs.map(function(t){
+          return e('div', {
+            key: t.id,
+            className: 'tab' + (t.id === activeTabId ? ' active' : ''),
+            onClick: function(){ if (onTabSelect) onTabSelect(t.id); }
+          },
+            t.label,
+            t.badge ? e('span', { className: 'badge' }, t.badge) : null
+          );
+        })
+      )
+    );
+  }
+
   /* ============ TRAINER VIEW (PT + GX toggle) ============ */
   function TrainerView(props){
     var ctx = props.ctx;
@@ -8796,40 +8989,52 @@
     else if (tab === 'leads') content = e(TrainerLeadsView, { key: contentKey, ctx: ctx });
     else if (tab === 'time_card') content = e(TimeCardView, { key: contentKey, ctx: ctx });
 
+    /* Phase 3b-A: tabs array driven from existing tab IDs so the
+       dispatcher above keeps working unchanged. Only labels change.
+       Lead-tier extras (Team) deferred to Phase 3b-C. */
+    var roleTier = ctx.session.role_tier || ctx.session.role || 'trainer';
+    var roleLabel = roleTier === 'lead' ? 'Lead' : (roleTier === 'admin' ? 'Admin' : 'Trainer');
+    var trainerTabs = [
+      { id: 'today',     label: 'My day' },
+      { id: 'schedule',  label: 'Schedule' },
+      { id: 'pt',        label: 'PT' },
+      { id: 'gx',        label: 'GX' },
+      { id: 'leads',     label: 'Leads', badge: leadBadge > 0 ? leadBadge : null },
+      { id: 'time_card', label: 'Time card' }
+    ];
+
     return e('div', null,
-      e('div', { className: 'header' },
-        /* Back chevron when in detail mode. Calls the onBack supplied by
-           the tab that pushed the headerContext (which clears its detail
-           state and the headerContext itself). */
-        headerContext && headerContext.onBack && e('button', {
+      e(TrainerBar, {
+        userName: ctx.session.name,
+        firstName: (ctx.session.name || '').split(' ')[0] || '',
+        roleLabel: roleLabel,
+        facility: null, /* TODO: surface from session payload once added */
+        tabs: trainerTabs,
+        activeTabId: tab,
+        onTabSelect: function(id){ navigate(id); },
+        notificationsNode: e(NotificationsBell, { ctx: ctx }),
+        signOutNode: e('button', {
+          className: 'logout-btn',
+          onClick: function(){ ctx.setSession(null); }
+        }, 'Sign out')
+      }),
+      /* Detail-mode breadcrumb. Renders only when a tab has pushed
+         headerContext (drilled into ClientDetail / ClassDetail / etc.).
+         Preserves the back-chevron behavior the old .header provided. */
+      headerContext && e('div', { className: 'trainer-detail-bar' },
+        headerContext.onBack && e('button', {
+          className: 'back',
           onClick: headerContext.onBack,
-          'aria-label': 'Back',
-          style: {
-            background: 'transparent', border: 'none', cursor: 'pointer',
-            color: 'var(--navy)', fontSize: '24px', lineHeight: 1,
-            padding: '0 8px 0 0', marginRight: '4px', flexShrink: 0
-          }
+          'aria-label': 'Back'
         }, '←'),
         e('div', { style: { minWidth: 0, flex: 1 } },
-          headerContext
-            ? [
-                e('div', {
-                  key: 'sub-h',
-                  style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate)', marginBottom: '2px' }
-                }, ctx.session.name + (headerContext.sub ? (' · ' + headerContext.sub) : '')),
-                e('h1', { key: 'title-h' }, headerContext.title)
-              ]
-            : [
-                e('h1', { key: 'title-h' }, ctx.session.name),
-                e('div', { key: 'sub-h', className: 'sub' }, subLabel[tab] || 'Today')
-              ]
-        ),
-        e('div', { className: 'header-right' },
-          e(NotificationsBell, { ctx: ctx }),
-          e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
+          e('div', { className: 'crumb' },
+            ctx.session.name + (headerContext.sub ? (' · ' + headerContext.sub) : '')
+          ),
+          e('div', { className: 'title' }, headerContext.title)
         )
       ),
-      e('div', { className: 'content', style: { paddingBottom: '90px' } },
+      e('div', { className: 'trainer-content' },
         /* v2.6: Notification bar shows on every tab except time_card.
            Surfaces available pickups across categories. */
         tab !== 'time_card' && e(TrainerNotificationBar, {
@@ -8936,15 +9141,17 @@
         content
       ),
 
-      /* v2.4: floating + Contact button. Sits above the bottom nav, reachable
-         from any tab in one tap. Designed for ranger-style fast logging. */
+      /* v2.4: floating + Contact button. Reachable from any tab in one
+         tap. Designed for ranger-style fast logging. Phase 3b-A: bottom
+         offset dropped from 88px (which cleared the old bottom-nav) to
+         24px now that the bottom-nav is gone. */
       e('button', {
         onClick: function(){ setContactOpen(true); },
         title: 'Log a member contact',
         style: {
           position: 'fixed',
           right: '16px',
-          bottom: '88px',
+          bottom: '24px',
           background: 'var(--gold)',
           color: '#fff',
           border: 'none',
@@ -8963,52 +9170,6 @@
       },
         e('span', { style: { fontSize: '20px', lineHeight: 1 } }, '\u2795'),
         e('span', null, 'Contact')
-      ),
-
-      e('div', { className: 'bottom-nav' },
-        e('button', {
-          className: tab === 'today' ? 'active' : '',
-          onClick: function(){ navigate('today'); }
-        },
-          e('span', { className: 'icon' }, '\ud83d\udcc5'),
-          e('span', null, 'Today')
-        ),
-        e('button', {
-          className: tab === 'schedule' ? 'active' : '',
-          onClick: function(){ navigate('schedule'); }
-        },
-          e('span', { className: 'icon' }, '\ud83d\udcc6'),
-          e('span', null, 'Schedule')
-        ),
-        e('button', {
-          className: tab === 'pt' ? 'active' : '',
-          onClick: function(){ navigate('pt'); }
-        },
-          e('span', { className: 'icon' }, '\ud83c\udfcb\ufe0f'),
-          e('span', null, 'PT')
-        ),
-        e('button', {
-          className: 'gx ' + (tab === 'gx' ? 'active' : ''),
-          onClick: function(){ navigate('gx'); }
-        },
-          e('span', { className: 'icon' }, '\ud83c\udfc3'),
-          e('span', null, 'GX')
-        ),
-        e('button', {
-          className: tab === 'leads' ? 'active' : '',
-          onClick: function(){ navigate('leads'); },
-          style: { position: 'relative' }
-        },
-          e('span', { className: 'icon' }, '\ud83d\udce5'),
-          e('span', null, 'Leads' + (leadBadge > 0 ? ' (' + leadBadge + ')' : ''))
-        ),
-        e('button', {
-          className: tab === 'time_card' ? 'active' : '',
-          onClick: function(){ navigate('time_card'); }
-        },
-          e('span', { className: 'icon' }, '\ud83d\udcb0'),
-          e('span', null, 'Time Card')
-        )
       ),
 
       /* v2.4: contact modal mounts here */
