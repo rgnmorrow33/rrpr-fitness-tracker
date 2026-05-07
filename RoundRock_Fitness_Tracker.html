@@ -1085,6 +1085,268 @@
     .bottom-nav .icon { font-size: 18px; }
     .section-head h2 { font-size: 20px; }
   }
+
+  /* ===== Phase 1: redesign chrome (sidebar + topbar) =====
+     Additive only. Co-exists with the existing .header / .bottom-nav
+     above. .topbar / .sidebar are wired only into AdminDashboard for
+     now; trainer view, kiosk, and detail views keep .header. */
+
+  /* shield mark */
+  .shield {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .shield-mark {
+    width: 28px;
+    height: 32px;
+    background: var(--side-brand);
+    color: var(--side-bg);
+    clip-path: polygon(0 0, 100% 0, 100% 70%, 50% 100%, 0 70%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+    padding-bottom: 4px;
+  }
+
+  /* sidebar */
+  .sidebar {
+    width: 168px;
+    flex-shrink: 0;
+    background: var(--side-bg);
+    color: var(--side-text);
+    padding: 18px 0 14px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .sidebar::after {
+    content: '';
+    position: absolute;
+    inset: 14px 0 14px auto;
+    width: 1px;
+    background: rgba(255,255,255,0.06);
+  }
+  .sidebar-brand {
+    padding: 0 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    margin-bottom: 10px;
+  }
+  .sidebar-brand .name {
+    font-family: var(--serif);
+    font-size: 17px;
+    color: #fff;
+    line-height: 1.05;
+    font-weight: 500;
+  }
+  .sidebar-brand .sub {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 11px;
+    color: var(--side-text);
+    margin-top: 2px;
+  }
+  .sidebar-section {
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--side-text);
+    opacity: 0.55;
+    padding: 14px 18px 6px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 18px;
+    font-size: 12.5px;
+    color: var(--side-text);
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    letter-spacing: 0.005em;
+  }
+  .nav-item:hover { color: #fff; }
+  .nav-item.active {
+    color: var(--side-active);
+    border-left-color: var(--side-active-rule);
+    background: rgba(255, 255, 255, 0.04);
+    font-weight: 500;
+  }
+  .nav-item .badge {
+    background: var(--brick);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 1px 6px;
+    min-width: 16px;
+    text-align: center;
+    line-height: 1.4;
+  }
+  .nav-item .dot {
+    width: 6px;
+    height: 6px;
+    background: var(--brick);
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .user-chip {
+    margin-top: auto;
+    padding: 12px 18px 4px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .user-chip .ini {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--serif);
+  }
+  .user-chip .name {
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .user-chip .role {
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--side-text);
+    opacity: 0.7;
+  }
+
+  /* topbar */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 22px 12px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper);
+  }
+  .topbar h1 {
+    font-family: var(--serif);
+    font-size: 22px;
+    font-weight: 500;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  .topbar .meta {
+    font-size: 11px;
+    color: var(--slate);
+    letter-spacing: 0.06em;
+    text-transform: lowercase;
+    margin-top: 2px;
+    font-family: var(--mono);
+  }
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--slate);
+    width: 220px;
+  }
+  .search input {
+    border: none;
+    background: transparent;
+    font-size: 12px;
+    color: var(--ink);
+    flex: 1;
+    outline: none;
+    font-family: inherit;
+  }
+  .search .kbd {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--slate-soft);
+    border: 1px solid var(--rule);
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+  .iconbtn {
+    width: 30px;
+    height: 30px;
+    border-radius: 4px;
+    border: 1px solid var(--rule);
+    background: var(--paper);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--slate);
+    position: relative;
+    cursor: pointer;
+  }
+  .iconbtn .ping {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    background: var(--brick);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 600;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px solid var(--paper);
+  }
+
+  /* sub-queue badge */
+  .subq-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .subq-badge .count {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--brick);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* utility helpers */
+  .row { display: flex; align-items: center; gap: 8px; }
+  .smallcaps {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: lowercase;
+    color: var(--slate);
+  }
 </style>
 </head>
 <body>
@@ -15392,6 +15654,127 @@
     );
   }
 
+  /* ============ PHASE 1 CHROME: Sidebar + TopBar ============
+     Wired only into AdminDashboard for now. Trainer view, kiosk, and
+     detail headers are unchanged. TopBar accepts a notificationsNode
+     override (so the existing NotificationsBell dropdown is preserved
+     for admin) and an actions slot (for Sign out etc.). */
+  var SIDEBAR_ICONS = {
+    dashboard: '⌂',
+    clients:   '◯',
+    trainers:  '⚑',
+    schedule:  '▦',
+    queue:     '↪',
+    leads:     '✶',
+    reports:   '◔',
+    audit:     '⌗',
+    team:      '☰'
+  };
+
+  function ShieldMark(props){
+    var size = (props && props.size) || 28;
+    return e('span', {
+      className: 'shield-mark',
+      style: { width: size, height: Math.round(size * 32 / 28) }
+    }, 'RR');
+  }
+
+  function Sidebar(props){
+    var role = props.role;
+    var active = props.active;
+    var items = props.items || [];
+    var secondary = props.secondary || [];
+    var onSelect = props.onSelect;
+    var name = props.name || '';
+
+    function renderItem(it, isSecondary){
+      var className = 'nav-item' + (isSecondary ? ' secondary' : '') + (it.id === active ? ' active' : '');
+      return e('div', {
+        key: it.id,
+        className: className,
+        onClick: function(){ if (onSelect) onSelect(it.id); }
+      },
+        e('span', null,
+          e('span', {
+            style: { display: 'inline-block', width: 18, color: 'inherit', opacity: isSecondary ? 0.6 : 0.7 }
+          }, SIDEBAR_ICONS[it.icon] || '·'),
+          it.label
+        ),
+        it.badge
+          ? (it.badgeKind === 'dot'
+              ? e('span', { className: 'subq-badge' },
+                  e('span', { className: 'dot' }),
+                  e('span', { className: 'count' }, it.badge)
+                )
+              : e('span', { className: 'badge' }, it.badge))
+          : null
+      );
+    }
+
+    var initials = (name || '').split(' ').map(function(p){ return p && p[0]; }).filter(Boolean).slice(0, 2).join('');
+    var hasSecondary = secondary && secondary.length > 0;
+
+    return e('aside', { className: 'sidebar' },
+      e('div', { className: 'sidebar-brand' },
+        e('div', { className: 'row', style: { gap: 10, alignItems: 'flex-start' } },
+          e(ShieldMark, null),
+          e('div', null,
+            e('div', { className: 'name' }, 'Round Rock'),
+            e('div', { className: 'sub' }, 'Fitness')
+          )
+        )
+      ),
+      e('div', { className: 'sidebar-section' }, 'Primary'),
+      e('nav', null, items.map(function(it){ return renderItem(it, false); })),
+      hasSecondary ? e('div', { className: 'sidebar-section' }, 'More') : null,
+      hasSecondary ? e('nav', null, secondary.map(function(it){ return renderItem(it, true); })) : null,
+      e('div', { className: 'user-chip' },
+        e('div', { className: 'ini' }, initials),
+        e('div', null,
+          e('div', { className: 'name' }, name),
+          e('div', { className: 'role' }, role)
+        )
+      )
+    );
+  }
+
+  function TopBar(props){
+    var title = props.title;
+    var kicker = props.kicker;
+    var dateText = props.dateText;
+    var notificationCount = props.notificationCount || 0;
+    var notificationsNode = props.notificationsNode;
+    var actions = props.actions;
+
+    /* Use the provided notifications node (e.g., real NotificationsBell)
+       when given; otherwise render the spec's decorative bell. */
+    var bell = notificationsNode || e('div', { className: 'iconbtn', title: 'Notifications' },
+      e('span', { style: { fontSize: 14 } }, '◌'),
+      notificationCount > 0 ? e('span', { className: 'ping' }, notificationCount) : null
+    );
+
+    return e('div', { className: 'topbar' },
+      e('div', null,
+        e('h1', null, title),
+        e('div', { className: 'meta' }, kicker || dateText || '')
+      ),
+      e('div', { className: 'topbar-right' },
+        e('div', { className: 'search' },
+          e('span', { style: { fontSize: 12 } }, '⌕'),
+          /* TODO Phase 1: search field is decoration only. Wire to a
+             real global search in a later phase. */
+          e('input', { placeholder: 'search clients, classes, leads…', defaultValue: '' }),
+          e('span', { className: 'kbd' }, '⌘K')
+        ),
+        bell,
+        e('div', { className: 'iconbtn', title: 'Help' },
+          e('span', { style: { fontSize: 12, fontFamily: 'var(--serif)' } }, '?')
+        ),
+        actions || null
+      )
+    );
+  }
+
   /* ============ ADMIN DASHBOARD ============ */
   function AdminDashboard(props){
     var ctx = props.ctx;
@@ -15546,19 +15929,77 @@
       headerActorName = 'Unknown';
     }
 
-    return e('div', null,
-      e('div', { className: 'header' },
-        e('div', null,
-          e('h1', null, headerActorName),
-          e('div', { className: 'sub' }, 'Round Rock Parks and Recreation')
-        ),
-        e('div', { className: 'header-right' },
-          e(NotificationsBell, { ctx: ctx }),
-          e('span', { className: 'header-pill' }, 'Admin'),
-          e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
-        )
-      ),
-      e('div', { className: 'content' },
+    /* Sidebar primary nav. Each id maps to (domain, tab) below. The
+       sidebar lives alongside the existing domain pills + admin-tabs
+       inside .content - both nav surfaces stay wired so no admin flow
+       breaks; redundancy gets cleaned up in a later phase once the
+       sidebar pattern is validated on iPad. */
+    var SIDEBAR_TO_STATE = {
+      dashboard: { domain: 'pt',   tab: 'today' },
+      clients:   { domain: 'pt',   tab: 'clients' },
+      schedule:  { domain: 'both', tab: 'schedule' },
+      queue:     { domain: 'gx',   tab: 'sub_approvals' },
+      leads:     { domain: 'pt',   tab: 'queue' },
+      reports:   { domain: 'both', tab: 'admin_time' },
+      audit:     { domain: 'both', tab: 'audit' },
+      team:      { domain: 'both', tab: 'instructors' }
+    };
+    var SIDEBAR_ACTIVE_FOR_TAB = {
+      today: 'dashboard',
+      clients: 'clients',
+      schedule: 'schedule',
+      sub_approvals: 'queue',
+      queue: 'leads',
+      pipeline: 'leads',
+      admin_time: 'reports',
+      audit: 'audit',
+      instructors: 'team'
+    };
+    var sidebarActive = SIDEBAR_ACTIVE_FOR_TAB[tab] || null;
+    function selectSidebar(id){
+      var dest = SIDEBAR_TO_STATE[id];
+      if (!dest) return;
+      setDomain(dest.domain);
+      setTab(dest.tab);
+    }
+    var sidebarItems = [
+      { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
+      { id: 'clients',   icon: 'clients',   label: 'Clients' },
+      { id: 'schedule',  icon: 'schedule',  label: 'Schedule' }
+    ];
+    sidebarItems.push(pendingSubCount > 0
+      ? { id: 'queue', icon: 'queue', label: 'Sub Coverage', badge: pendingSubCount, badgeKind: 'dot' }
+      : { id: 'queue', icon: 'queue', label: 'Sub Coverage' });
+    sidebarItems.push(queueWaiting > 0
+      ? { id: 'leads', icon: 'leads', label: 'Leads', badge: queueWaiting }
+      : { id: 'leads', icon: 'leads', label: 'Leads' });
+    var sidebarSecondary = [
+      { id: 'reports', icon: 'reports', label: 'Reports' },
+      { id: 'audit',   icon: 'audit',   label: 'Audit' },
+      { id: 'team',    icon: 'team',    label: 'Team' }
+    ];
+
+    return e('div', { style: { display: 'flex', minHeight: '100vh' } },
+      e(Sidebar, {
+        role: 'admin',
+        active: sidebarActive,
+        items: sidebarItems,
+        secondary: sidebarSecondary,
+        onSelect: selectSidebar,
+        name: headerActorName
+      }),
+      e('div', { className: 'main' },
+        e(TopBar, {
+          title: headerActorName,
+          kicker: 'all facilities',
+          notificationCount: ctx.unreadCount || 0,
+          notificationsNode: e(NotificationsBell, { ctx: ctx }),
+          actions: e('button', {
+            className: 'logout-btn',
+            onClick: function(){ ctx.setSession(null); }
+          }, 'Sign out')
+        }),
+        e('div', { className: 'content' },
         e('div', { className: 'stats-grid' },
           e('div', { className: 'stat-card' },
             e('div', { className: 'label' }, 'Total PT Clients'),
@@ -15639,6 +16080,7 @@
           })
         ),
         tabView
+        )
       )
     );
   }
