@@ -1567,6 +1567,162 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* ===== Phase 3b-B: TRAINER CONTENT PRIMITIVES =====
+     .tstat / .t-session / .tbl - all strictly scoped under .trainer-content
+     to avoid collision with global .btn / .section-head / .client-card / etc.
+     consumed by admin views. Status stripes use --stripe-color custom prop
+     set inline from existing JS, not modifier classes. */
+  .trainer-content .tstats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .trainer-content .tstat {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .trainer-content .tstat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--slate);
+    font-weight: 600;
+  }
+  .trainer-content .tstat-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--navy);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  .trainer-content .tstat-sub {
+    font-size: 12px;
+    color: var(--slate);
+  }
+
+  .trainer-content .t-session {
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--stripe-color, var(--slate));
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: pointer;
+  }
+  .trainer-content .t-session.is-aged {
+    border-color: var(--brick);
+    border-left-color: var(--brick);
+  }
+  .trainer-content .t-session-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .trainer-content .t-session-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--navy);
+    flex: 1;
+    min-width: 0;
+  }
+  .trainer-content .t-session-time {
+    font-size: 13px;
+    color: var(--slate);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .trainer-content .t-session-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--slate);
+    align-items: center;
+  }
+  .trainer-content .t-session-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+
+  .trainer-content .tbl-wrap {
+    overflow-x: auto;
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    margin-bottom: 14px;
+  }
+  .trainer-content .tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .trainer-content .tbl th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--slate);
+    font-weight: 600;
+    text-align: left;
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-2);
+  }
+  .trainer-content .tbl th.num,
+  .trainer-content .tbl td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .trainer-content .tbl td {
+    padding: 10px;
+    border-bottom: 1px solid var(--rule);
+    color: var(--navy);
+  }
+  .trainer-content .tbl tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .trainer-content .tbl tbody tr:hover {
+    background: var(--paper);
+  }
+  .trainer-content .tbl tbody tr.tbl-empty:hover {
+    background: transparent;
+  }
+  .trainer-content .tbl-empty td {
+    color: var(--slate-soft);
+    font-style: italic;
+  }
+  .trainer-content .tbl-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 10px 12px;
+    background: var(--paper-2);
+    border-bottom: 1px solid var(--rule);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--navy);
+  }
+
+  @media (max-width: 600px) {
+    .trainer-content .tstats { grid-template-columns: repeat(2, 1fr); }
+    .trainer-content .tstat-value { font-size: 19px; }
+    .trainer-content .t-session-title { font-size: 13.5px; }
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
@@ -7576,58 +7732,37 @@
     }
 
     return e('div', null,
-      /* Today header - emphasizes the actual date. Suppressed in compact
-         mode (stacked "All trainers" view) so it doesn't repeat per
-         trainer. */
-      !compact && e('div', {
-        style: {
-          background: 'linear-gradient(135deg, var(--navy), #2a4a73)',
-          color: '#fff',
-          borderRadius: '12px',
-          padding: '16px 18px',
-          marginBottom: '14px'
-        }
-      },
-        e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.08em', opacity: 0.85, marginBottom: '4px' } }, 'Today'),
-        e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '26px', lineHeight: 1.1 } },
+      /* Phase 3b-B: simplified date headline (gradient hero retired).
+         Suppressed in compact mode (stacked "All trainers" view). */
+      !compact && e('div', { style: { marginBottom: '14px' } },
+        e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate)', fontWeight: 600 } }, 'Today'),
+        e('div', { style: { fontFamily: 'var(--serif)', fontSize: '24px', color: 'var(--navy)', lineHeight: 1.15, marginTop: '2px' } },
           todayDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
-        ),
-        e('div', { style: { fontSize: '13px', opacity: 0.8, marginTop: '6px' } },
-          todayCount === 0 ? 'Nothing scheduled for you today' :
-            todayCount + ' item' + (todayCount === 1 ? '' : 's') + ' on your schedule'
         )
       ),
 
-      /* Pay-period chip (compact). Hidden in stacked compact mode. */
-      !compact && e('div', {
-        style: {
-          background: 'var(--cream-2)',
-          border: '1.5px solid var(--border)',
-          borderRadius: '10px',
-          padding: '10px 14px',
-          marginBottom: '14px',
-          fontSize: '12px',
-          color: 'var(--slate)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '10px',
-          flexWrap: 'wrap'
-        }
-      },
-        e('div', null,
-          e('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate-soft)', marginBottom: '2px' } },
-            'Pay period \u00b7 ' + summary.payPeriod.label
-          ),
-          e('div', { style: { color: 'var(--navy)', fontWeight: 500 } },
-            displayHrs(summary.forwardFacing.total) + ' fwd + ' +
-            displayHrs(summary.autoAdmin.hours) + ' auto + ' +
-            displayHrs(summary.manualAdmin.hours) + ' manual + ' +
-            displayHrs((summary.serviceRecovery && summary.serviceRecovery.hours) || 0) + ' recovery'
-          )
+      /* Phase 3b-B: .tstats strip derived from existing summary. Pay-period
+         label + grand total + scheduled-item count. Hidden in compact mode. */
+      !compact && e('div', { className: 'tstats' },
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'On schedule'),
+          e('div', { className: 'tstat-value' }, todayCount),
+          e('div', { className: 'tstat-sub' }, todayCount === 1 ? 'item today' : 'items today')
         ),
-        e('div', { style: { fontFamily: "'DM Serif Display', serif", fontSize: '22px', color: 'var(--teal)' } },
-          displayHrs(summary.grandTotal) + ' hr'
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'Pay period'),
+          e('div', { className: 'tstat-value' }, displayHrs(summary.grandTotal) + ' hr'),
+          e('div', { className: 'tstat-sub' }, summary.payPeriod.label)
+        ),
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'Forward + admin'),
+          e('div', { className: 'tstat-value' },
+            displayHrs(summary.forwardFacing.total) + ' / ' +
+            displayHrs(summary.autoAdmin.hours + summary.manualAdmin.hours)
+          ),
+          e('div', { className: 'tstat-sub' },
+            displayHrs((summary.serviceRecovery && summary.serviceRecovery.hours) || 0) + ' hr recovery'
+          )
         )
       ),
 
@@ -7643,37 +7778,33 @@
         myClassesToday.map(function(o){
           var c = o.cls;
           var logged = !!o.logged;
+          /* Stripe: attended -> moss; otherwise the pre-Field-Manual purple
+             magic hex preserved per spec ("reuse existing JS"). Retoken
+             flagged on the deferred pile. */
+          var stripeColor = logged ? 'var(--moss)' : '#7B68B6';
           return e('div', {
             key: c.id + ':' + o.date,
+            className: 't-session',
+            style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg)' : '#fff' },
             onClick: function(){
               setClassDetailId(c.id);
               setHeaderContext({
                 title: c.name, sub: c.location,
                 onBack: function(){ setClassDetailId(null); setHeaderContext(null); }
               });
-            },
-            style: {
-              background: logged ? 'var(--green-bg)' : '#fff',
-              border: '1.5px solid var(--border)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '8px',
-              borderLeft: '4px solid ' + (logged ? 'var(--green)' : '#7B68B6'),
-              cursor: 'pointer'
             }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
-              e('div', { style: { flex: 1, minWidth: '160px' } },
-                e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
-                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, c ? c.name : 'Unknown class'),
-                  logged && e('span', { style: { color: 'var(--green)', fontSize: '14px', fontWeight: 700 } }, '\u2713')
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  (o.time || c.time || '') + ' \u00b7 ' + (c ? c.location : '')
-                ),
-                logged && e('div', { style: { fontSize: '12px', color: 'var(--green)', marginTop: '4px', fontWeight: 600 } },
-                  'Attendance recorded' + (o.headcount != null ? (' \u00b7 ' + o.headcount) : '')
-                )
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' },
+                (c ? c.name : 'Unknown class') + (logged ? ' \u2713' : '')
+              ),
+              e('div', { className: 't-session-time' }, o.time || c.time || '')
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, c ? c.location : ''),
+              logged && e('span', null, '\u00b7'),
+              logged && e('span', { style: { color: 'var(--moss)', fontWeight: 600 } },
+                'Attendance recorded' + (o.headcount != null ? (' \u00b7 ' + o.headcount) : '')
               )
             )
           );
@@ -7703,6 +7834,8 @@
             : isScheduled ? 'Scheduled' : null;
           return e('div', {
             key: item.client.id + ':' + (sess.id || sess.date + sess.time),
+            className: 't-session',
+            style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg)' : '#fff' },
             onClick: function(){
               if (isScheduled) {
                 /* Direct sign-off: skip the ClientDetail intermediate. */
@@ -7713,51 +7846,37 @@
                    client page. */
                 setSessionDetail({ client: item.client, session: sess });
               }
-            },
-            style: {
-              background: isSignedAttended ? 'var(--green-bg)' : '#fff',
-              border: '1.5px solid var(--border)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '8px',
-              borderLeft: '4px solid ' + stripeColor,
-              cursor: 'pointer'
             }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
-              e('div', { style: { flex: 1, minWidth: '160px' } },
-                e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, item.client.name),
-                  isSignedAttended && e('span', { style: { color: 'var(--green)', fontSize: '14px', fontWeight: 700 } }, '\u2713'),
-                  pillText && e('span', {
-                    style: {
-                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                      background: stripeColor, color: '#fff',
-                      fontWeight: 700, letterSpacing: '0.04em'
-                    }
-                  }, pillText)
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  (isScheduled
-                    ? (formatShort(parseYMD(sess.date)) + (sess.time ? (' \u00b7 ' + formatTime12(sess.time)) : ''))
-                    : (sess.time ? formatTime12(sess.time) : '')
-                  )
-                ),
-                isSignedAttended && e('div', { style: { fontSize: '12px', color: 'var(--green)', marginTop: '4px', fontWeight: 600 } },
-                  'Signed off'
-                )
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' },
+                item.client.name + (isSignedAttended ? ' \u2713' : '')
               ),
-              /* Explicit Sign-off action on scheduled cards. Whole-card
-                 click also routes here, but the pill makes the action
-                 discoverable. Stop propagation so we only fire once. */
-              isScheduled && e('button', {
+              e('div', { className: 't-session-time' },
+                isScheduled
+                  ? (formatShort(parseYMD(sess.date)) + (sess.time ? (' \u00b7 ' + formatTime12(sess.time)) : ''))
+                  : (sess.time ? formatTime12(sess.time) : '')
+              )
+            ),
+            (pillText || isSignedAttended) && e('div', { className: 't-session-meta' },
+              pillText && e('span', {
+                style: {
+                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                  background: stripeColor, color: '#fff',
+                  fontWeight: 700, letterSpacing: '0.04em'
+                }
+              }, pillText),
+              isSignedAttended && e('span', { style: { color: 'var(--moss)', fontWeight: 600 } }, 'Signed off')
+            ),
+            /* Explicit Sign-off action on scheduled cards. */
+            isScheduled && e('div', { className: 't-session-actions' },
+              e('button', {
                 type: 'button',
                 onClick: function(ev){
                   ev.stopPropagation();
                   setSignOff({ client: item.client, session: sess });
                 },
-                className: 'btn btn-sm btn-primary',
-                style: { whiteSpace: 'nowrap' }
+                className: 'btn btn-sm btn-primary'
               }, 'Sign off')
             )
           );
@@ -7771,35 +7890,27 @@
         ),
         myWrosToday.map(function(w){
           var state = wroState(w);
+          /* Spec: WRO -> brass-soft. WRO_STATE_COLOR keeps its legacy hex for
+             the badge bg (different visual element); retoken queued in
+             deferred pile since it's also consumed by AdminWROsView. */
           return e('div', {
             key: w.id,
-            onClick: function(){ setWroOpen(w); },
-            style: {
-              background: '#fff',
-              border: '1.5px solid var(--border)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '8px',
-              borderLeft: '4px solid ' + WRO_STATE_COLOR[state],
-              cursor: 'pointer'
-            }
+            className: 't-session',
+            style: { '--stripe-color': 'var(--brass-soft)' },
+            onClick: function(){ setWroOpen(w); }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
-              e('div', { style: { flex: 1, minWidth: '160px' } },
-                e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, w.participantName),
-                  e('span', {
-                    style: {
-                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                      background: WRO_STATE_COLOR[state], color: '#fff',
-                      fontWeight: 700, letterSpacing: '0.04em'
-                    }
-                  }, WRO_STATE_BADGE[state])
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  (w.location || 'CMRC')
-                )
-              )
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, w.participantName),
+              e('span', {
+                style: {
+                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                  background: WRO_STATE_COLOR[state], color: '#fff',
+                  fontWeight: 700, letterSpacing: '0.04em'
+                }
+              }, WRO_STATE_BADGE[state])
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, w.location || 'CMRC')
             )
           );
         })
@@ -8019,9 +8130,11 @@
     function gxCard(o){
       var c = o.cls;
       var logged = !!o.logged;
-      var stripeColor = logged ? 'var(--green)' : (CLASS_TYPE_COLOR[c.classType] || 'var(--teal)');
+      var stripeColor = logged ? 'var(--moss)' : (CLASS_TYPE_COLOR[c.classType] || 'var(--teal)');
       return e('div', {
         key: 'gx-' + c.id + ':' + o.date,
+        className: 't-session',
+        style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg)' : '#fff' },
         onClick: function(){
           if (props.onOpenClass) {
             /* Admin: delegate detail nav up so admin's outer single-header
@@ -8034,28 +8147,18 @@
             title: c.name, sub: c.location,
             onBack: function(){ setClassDetailId(null); setHeaderContext(null); }
           });
-        },
-        style: {
-          background: logged ? 'var(--green-bg)' : '#fff',
-          border: '1.5px solid var(--border)',
-          borderLeft: '4px solid ' + stripeColor,
-          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
-          cursor: 'pointer', fontSize: '13px'
         }
       },
-        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-          e('div', { style: { flex: 1, minWidth: 0 } },
-            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } },
-              c.name,
-              logged && e('span', { style: { color: 'var(--green)', marginLeft: '6px', fontWeight: 700 } }, '✓')
-            ),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
-              (c.startTime ? formatTime12(c.startTime) : '') +
-              ' · ' + (c.location || '—') +
-              (c.room ? (' · ' + c.room) : '')
-            )
-          ),
-          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'GX')
+        e('div', { className: 't-session-row' },
+          e('div', { className: 't-session-title' }, c.name + (logged ? ' ✓' : '')),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, 'GX')
+        ),
+        e('div', { className: 't-session-meta' },
+          e('span', null, c.startTime ? formatTime12(c.startTime) : ''),
+          e('span', null, '·'),
+          e('span', null, c.location || '—'),
+          c.room && e('span', null, '·'),
+          c.room && e('span', null, c.room)
         )
       );
     }
@@ -8068,13 +8171,12 @@
       var stLabel = SESSION_STATUS_LABEL[status] || status;
       var isScheduled = status === 'scheduled';
       var isOverdueScheduled = isScheduled && sess.date < todayYMD;
-      var stripeColor = isOverdueScheduled ? 'var(--red)' : (isScheduled ? 'var(--gold)' : stColor);
-      /* Mirrors the attended-class card treatment: green-bg + checkmark
-         when the session has been signed off as attended. Stripe is
-         already green for 'attended' via SESSION_STATUS_COLOR. */
+      var stripeColor = isOverdueScheduled ? 'var(--brick)' : (isScheduled ? 'var(--brass-soft)' : stColor);
       var isSignedAttended = status === 'attended';
       return e('div', {
         key: 'pt-' + sess.id,
+        className: 't-session',
+        style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg)' : '#fff' },
         onClick: function(){
           if (isScheduled && allowDirectSignOff) {
             setSignOff({ client: client, session: sess });
@@ -8089,26 +8191,16 @@
             title: client.name, sub: client.location,
             onBack: function(){ setClientDetailId(null); setHeaderContext(null); }
           });
-        },
-        style: {
-          background: isSignedAttended ? 'var(--green-bg)' : '#fff',
-          border: '1.5px solid var(--border)',
-          borderLeft: '4px solid ' + stripeColor,
-          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
-          cursor: 'pointer', fontSize: '13px'
         }
       },
-        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-          e('div', { style: { flex: 1, minWidth: 0 } },
-            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } },
-              client.name,
-              isSignedAttended && e('span', { style: { color: 'var(--green)', marginLeft: '6px', fontWeight: 700 } }, '✓')
-            ),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
-              (sess.time ? formatTime12(sess.time) : '—') + ' · ' + stLabel
-            )
-          ),
-          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'PT')
+        e('div', { className: 't-session-row' },
+          e('div', { className: 't-session-title' }, client.name + (isSignedAttended ? ' ✓' : '')),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, 'PT')
+        ),
+        e('div', { className: 't-session-meta' },
+          e('span', null, sess.time ? formatTime12(sess.time) : '—'),
+          e('span', null, '·'),
+          e('span', null, stLabel)
         )
       );
     }
@@ -8116,23 +8208,18 @@
     function wroCard(w){
       return e('div', {
         key: 'wro-' + w.id,
-        onClick: function(){ setWroOpen(w); },
-        style: {
-          background: '#fff',
-          border: '1.5px solid var(--border)',
-          borderLeft: '4px solid var(--gold)',
-          borderRadius: '10px', padding: '8px 12px', marginBottom: '6px',
-          cursor: 'pointer', fontSize: '13px'
-        }
+        className: 't-session',
+        style: { '--stripe-color': 'var(--brass-soft)' },
+        onClick: function(){ setWroOpen(w); }
       },
-        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-          e('div', { style: { flex: 1, minWidth: 0 } },
-            e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, w.participantName || 'WRO'),
-            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
-              ((w.post && w.post.timeIn) ? formatTime12(w.post.timeIn) : '—') + ' · ' + (w.location || 'CMRC')
-            )
-          ),
-          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--cream-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, 'WRO')
+        e('div', { className: 't-session-row' },
+          e('div', { className: 't-session-title' }, w.participantName || 'WRO'),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, 'WRO')
+        ),
+        e('div', { className: 't-session-meta' },
+          e('span', null, (w.post && w.post.timeIn) ? formatTime12(w.post.timeIn) : '—'),
+          e('span', null, '·'),
+          e('span', null, w.location || 'CMRC')
         )
       );
     }
@@ -9448,7 +9535,7 @@
               var client = item.client;
               var isOverdue = sess.date < todayYMD;
               var isToday = sess.date === todayYMD;
-              var stripeColor = isOverdue ? 'var(--red)' : (isToday ? 'var(--gold)' : 'var(--teal)');
+              var stripeColor = isOverdue ? 'var(--brick)' : (isToday ? 'var(--brass-soft)' : 'var(--teal)');
               var daysOverdue = isOverdue
                 ? Math.floor((parseYMD(todayYMD).getTime() - parseYMD(sess.date).getTime()) / 86400000)
                 : 0;
@@ -9458,48 +9545,37 @@
               var remaining = sessionsRemaining(client);
               return e('div', {
                 key: client.id + ':' + sess.id,
+                className: 't-session',
+                style: { '--stripe-color': stripeColor },
                 onClick: function(){
                   setDetailId(client.id);
                   setHeaderContext({
                     title: client.name, sub: client.location,
                     onBack: function(){ setDetailId(null); setHeaderContext(null); }
                   });
-                },
-                style: {
-                  background: '#fff',
-                  border: '1.5px solid var(--border)',
-                  borderLeft: '4px solid ' + stripeColor,
-                  borderRadius: '12px',
-                  padding: '10px 14px',
-                  marginBottom: '8px',
-                  cursor: 'pointer',
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  gap: '10px', flexWrap: 'wrap'
                 }
               },
-                e('div', { style: { flex: 1, minWidth: '160px' } },
-                  e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                    e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, client.name),
-                    pillText && e('span', {
-                      style: {
-                        fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                        background: stripeColor, color: '#fff',
-                        fontWeight: 700, letterSpacing: '0.04em'
-                      }
-                    }, pillText)
-                  ),
-                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
-                    formatShort(parseYMD(sess.date)) + (sess.time ? (' · ' + formatTime12(sess.time)) : '')
-                  )
+                e('div', { className: 't-session-row' },
+                  e('div', { className: 't-session-title' }, client.name),
+                  e('span', {
+                    style: {
+                      fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
+                      background: remaining === 0 ? 'var(--brick)' : (remaining <= 2 ? 'var(--ochre)' : 'var(--teal-bg)'),
+                      color: remaining <= 2 ? '#fff' : 'var(--teal)',
+                      fontWeight: 700, whiteSpace: 'nowrap'
+                    }
+                  }, remaining + ' left')
                 ),
-                e('span', {
-                  style: {
-                    fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
-                    background: remaining === 0 ? 'var(--red)' : (remaining <= 2 ? 'var(--amber)' : 'var(--teal-bg)'),
-                    color: remaining <= 2 ? '#fff' : 'var(--teal)',
-                    fontWeight: 700, fontSize: '11px', whiteSpace: 'nowrap'
-                  }
-                }, remaining + ' left')
+                e('div', { className: 't-session-meta' },
+                  pillText && e('span', {
+                    style: {
+                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                      background: stripeColor, color: '#fff',
+                      fontWeight: 700, letterSpacing: '0.04em'
+                    }
+                  }, pillText),
+                  e('span', null, formatShort(parseYMD(sess.date)) + (sess.time ? (' · ' + formatTime12(sess.time)) : ''))
+                )
               );
             })
       ),
@@ -11640,22 +11716,25 @@
               var c = item.cls; var s = item.sub;
               return e('div', {
                 key: s.id,
-                className: 'class-card',
-                style: { borderLeftColor: 'var(--gold)' }
+                className: 't-session',
+                style: { '--stripe-color': 'var(--brass-soft)', cursor: 'default' }
               },
-                e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
-                  e('div', { style: { flex: 1, minWidth: '200px' } },
-                    e('div', { className: 'name', style: { color: 'var(--gold)' } }, c.name),
-                    e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                      formatShort(parseYMD(s.date)) +
-                      (c.startTime ? (' · ' + formatTime12(c.startTime) + (c.endTime ? ('–' + formatTime12(c.endTime)) : '')) : '') +
-                      ' · ' + (c.location || '—')
-                    ),
-                    e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } },
-                      'Asked by ' + (s.requestedBy || s.originalInstructor) +
-                      (s.note ? ' · ' + s.note : '')
-                    )
-                  ),
+                e('div', { className: 't-session-row' },
+                  e('div', { className: 't-session-title' }, c.name),
+                  e('div', { className: 't-session-time' },
+                    c.startTime ? (formatTime12(c.startTime) + (c.endTime ? ('–' + formatTime12(c.endTime)) : '')) : ''
+                  )
+                ),
+                e('div', { className: 't-session-meta' },
+                  e('span', null, formatShort(parseYMD(s.date))),
+                  e('span', null, '·'),
+                  e('span', null, c.location || '—'),
+                  e('span', null, '·'),
+                  e('span', null, 'Asked by ' + (s.requestedBy || s.originalInstructor)),
+                  s.note && e('span', null, '·'),
+                  s.note && e('span', null, s.note)
+                ),
+                e('div', { className: 't-session-actions' },
                   e('button', {
                     className: 'btn btn-amber btn-sm',
                     onClick: function(){ claim(item); }
@@ -11680,8 +11759,8 @@
           var s = item.assignment;
           return e('div', {
             key: s.id,
-            className: 'class-card',
-            style: { borderLeftColor: 'var(--amber)', cursor: 'pointer' },
+            className: 't-session',
+            style: { '--stripe-color': 'var(--ochre)' },
             onClick: function(){
               setDetailId(c.id);
               setHeaderContext({
@@ -11690,18 +11769,18 @@
               });
             }
           },
-            e('div', { style: { display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:'10px' } },
-              e('div', null,
-                e('div', { className: 'name', style: { color: 'var(--amber)' } }, c.name),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  formatShort(parseYMD(s.date)) + ' · ' + formatTime12(c.startTime) + '–' + formatTime12(c.endTime)
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '2px' } },
-                  'Covering for ' + s.originalInstructor +
-                  (s.note ? ' · ' + s.note : '')
-                )
-              ),
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, c.name),
               e('span', { className: 'pill pill-' + (c.location === 'CMRC' ? 'cmrc' : 'baca') }, c.location)
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, formatShort(parseYMD(s.date))),
+              e('span', null, '·'),
+              e('span', null, formatTime12(c.startTime) + '–' + formatTime12(c.endTime)),
+              e('span', null, '·'),
+              e('span', null, 'Covering for ' + s.originalInstructor),
+              s.note && e('span', null, '·'),
+              s.note && e('span', null, s.note)
             )
           );
         })
@@ -13726,33 +13805,6 @@
       return (a.timeIn || '') < (b.timeIn || '') ? -1 : 1;
     });
 
-    /* Helper to render one entry row with rolling-total tracking. */
-    function entryRow(opts){
-      return e('div', {
-        key: opts.key,
-        onClick: opts.onClick || null,
-        style: {
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          padding: '10px 14px',
-          borderBottom: '1px solid var(--border)',
-          fontSize: '13px',
-          cursor: opts.onClick ? 'pointer' : 'default',
-          background: opts.onClick ? '#fff' : 'transparent'
-        }
-      },
-        e('div', { style: { flex: 1 } },
-          e('div', { style: { fontWeight: 500, color: 'var(--navy)' } }, opts.title),
-          opts.subtitle && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } }, opts.subtitle)
-        ),
-        e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '12px' } },
-          e('div', { style: { fontWeight: 600, color: 'var(--teal)', fontSize: '14px' } }, '+' + opts.hours.toFixed(2)),
-          e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', minWidth: '52px', textAlign: 'right' } }, '= ' + opts.running.toFixed(2))
-        )
-      );
-    }
-
     /* Compute a rolling running-total per entry within each section. */
     function withRunning(entries){
       var running = 0;
@@ -13766,42 +13818,44 @@
     var subRolling = withRunning(subs);
     var manualRolling = withRunning(manual);
 
+    /* Phase 3b-B: each section is a .tbl with a heading row + entry rows.
+       The heading row uses .tbl-section-head for the title + total. */
     function section(heading, rolling, emptyMsg, totalLabel, totalValue, headingColor){
       headingColor = headingColor || 'var(--navy)';
-      return e('div', {
-        style: {
-          background: '#fff',
-          border: '1.5px solid var(--border)',
-          borderRadius: '12px',
-          marginBottom: '14px',
-          overflow: 'hidden'
-        }
-      },
-        e('div', {
-          style: {
-            padding: '10px 14px',
-            background: 'var(--cream-2)',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'baseline'
-          }
-        },
-          e('h3', { style: { fontSize: '14px', margin: 0, color: headingColor, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, heading),
-          e('div', { style: { fontSize: '13px', color: headingColor, fontWeight: 700 } }, totalLabel + ': ' + displayHrs(totalValue) + ' hr')
+      return e('div', { className: 'tbl-wrap' },
+        e('div', { className: 'tbl-section-head', style: { color: headingColor } },
+          e('span', null, heading),
+          e('span', null, totalLabel + ': ' + displayHrs(totalValue) + ' hr')
         ),
-        rolling.length === 0
-          ? e('div', { style: { padding: '14px', fontStyle: 'italic', color: 'var(--slate-soft)', fontSize: '13px' } }, emptyMsg)
-          : rolling.map(function(en, i){
-              return entryRow({
-                key: en.key || i,
-                title: en.title,
-                subtitle: en.subtitle,
-                hours: en.hours,
-                running: en.running,
-                onClick: en.onClick
-              });
-            })
+        e('table', { className: 'tbl' },
+          e('thead', null,
+            e('tr', null,
+              e('th', null, 'Entry'),
+              e('th', { className: 'num' }, 'Hours'),
+              e('th', { className: 'num' }, 'Running')
+            )
+          ),
+          e('tbody', null,
+            rolling.length === 0
+              ? e('tr', { className: 'tbl-empty' },
+                  e('td', { colSpan: 3 }, emptyMsg)
+                )
+              : rolling.map(function(en, i){
+                  return e('tr', {
+                    key: en.key || i,
+                    onClick: en.onClick || null,
+                    style: { cursor: en.onClick ? 'pointer' : 'default' }
+                  },
+                    e('td', null,
+                      e('div', { style: { fontWeight: 500 } }, en.title),
+                      en.subtitle && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } }, en.subtitle)
+                    ),
+                    e('td', { className: 'num', style: { color: 'var(--teal)', fontWeight: 600 } }, '+' + en.hours.toFixed(2)),
+                    e('td', { className: 'num', style: { color: 'var(--slate-soft)' } }, '= ' + en.running.toFixed(2))
+                  );
+                })
+          )
+        )
       );
     }
 
@@ -16030,64 +16084,58 @@
     function leadRow(q, opts){
       opts = opts || {};
       var aged = isQueueLeadAged(q);
+      var stripeColor = opts.stripeColor || 'var(--brass-soft)';
+      var inlineStyle = { '--stripe-color': stripeColor };
+      if (opts.background) inlineStyle.background = opts.background;
       return e('div', {
         key: q.id,
-        onClick: function(){ setLeadDetail(q); },
-        style: {
-          background: opts.background || '#fff',
-          border: '1.5px solid ' + (aged ? 'var(--red)' : (opts.border || 'var(--gold)')),
-          borderRadius: '12px',
-          padding: '12px 14px',
-          marginBottom: '8px',
-          cursor: 'pointer'
-        }
+        className: 't-session' + (aged ? ' is-aged' : ''),
+        style: inlineStyle,
+        onClick: function(){ setLeadDetail(q); }
       },
-        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' } },
-          e('div', { style: { flex: 1 } },
-            e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-              e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, q.name),
-              q.status && q.status !== 'waiting' && e('span', {
-                style: {
-                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                  background: QUEUE_STATUS_COLOR[q.status], color: '#fff',
-                  fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
-                }
-              }, QUEUE_STATUS_LABEL[q.status]),
-              /* v2.5: assigned-trainer chip when an active status owns it */
-              q.assignedTo && (q.status === 'assigned' || q.status === 'contacted' || q.status === 'consult_scheduled') && e('span', {
-                style: {
-                  fontSize: '11px', padding: '2px 9px', borderRadius: '999px',
-                  background: 'var(--teal-bg)', color: 'var(--teal)',
-                  fontWeight: 700, border: '1.5px solid var(--teal)'
-                }
-              }, '\ud83d\udc64 ' + q.assignedTo),
-              q.source && e('span', {
-                style: {
-                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                  background: 'var(--cream-2)', color: 'var(--slate)',
-                  fontWeight: 600, border: '1px solid var(--border)'
-                }
-              }, QUEUE_SOURCE_SHORT[q.source] || q.source),
-              aged && e('span', {
-                style: {
-                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                  background: 'var(--red)', color: '#fff', fontWeight: 700
-                }
-              }, '\u26a0 AGED')
-            ),
-            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-              (q.phone || 'No phone') + (q.email ? (' \u00b7 ' + q.email) : '')
-            ),
-            q.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '6px', fontStyle: 'italic' } }, '\u201c' + q.note + '\u201d'),
-            q.followUpBy && e('div', { style: { fontSize: '11px', color: aged ? 'var(--red)' : 'var(--slate-soft)', marginTop: '6px' } },
-              'Follow up by ' + formatShort(parseYMD(q.followUpBy))
-            ),
-            q.packageInfo && e('div', { style: { fontSize: '12px', color: 'var(--teal)', marginTop: '4px', fontWeight: 600 } },
-              'Pre-paid: ' + q.packageInfo.sessions + '-session ' + q.packageInfo.type
-            )
-          ),
-          opts.button
-        )
+        e('div', { className: 't-session-row' },
+          e('div', { className: 't-session-title' }, q.name),
+          aged && e('span', {
+            style: {
+              fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+              background: 'var(--brick)', color: '#fff', fontWeight: 700
+            }
+          }, '\u26a0 AGED')
+        ),
+        e('div', { className: 't-session-meta' },
+          q.status && q.status !== 'waiting' && e('span', {
+            style: {
+              fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+              background: QUEUE_STATUS_COLOR[q.status], color: '#fff',
+              fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
+            }
+          }, QUEUE_STATUS_LABEL[q.status]),
+          q.assignedTo && (q.status === 'assigned' || q.status === 'contacted' || q.status === 'consult_scheduled') && e('span', {
+            style: {
+              fontSize: '11px', padding: '2px 9px', borderRadius: '999px',
+              background: 'var(--teal-bg)', color: 'var(--teal)',
+              fontWeight: 700, border: '1.5px solid var(--teal)'
+            }
+          }, '\ud83d\udc64 ' + q.assignedTo),
+          q.source && e('span', {
+            style: {
+              fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+              background: 'var(--paper-2)', color: 'var(--slate)',
+              fontWeight: 600, border: '1px solid var(--rule)'
+            }
+          }, QUEUE_SOURCE_SHORT[q.source] || q.source),
+          e('span', null, q.phone || 'No phone'),
+          q.email && e('span', null, '\u00b7'),
+          q.email && e('span', null, q.email)
+        ),
+        q.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', fontStyle: 'italic', marginTop: '4px' } }, '"' + q.note + '"'),
+        q.followUpBy && e('div', { style: { fontSize: '11px', color: aged ? 'var(--brick)' : 'var(--slate-soft)', marginTop: '4px' } },
+          'Follow up by ' + formatShort(parseYMD(q.followUpBy))
+        ),
+        q.packageInfo && e('div', { style: { fontSize: '12px', color: 'var(--teal)', marginTop: '4px', fontWeight: 600 } },
+          'Pre-paid: ' + q.packageInfo.sessions + '-session ' + q.packageInfo.type
+        ),
+        opts.button && e('div', { className: 't-session-actions' }, opts.button)
       );
     }
 
@@ -16107,7 +16155,7 @@
       /* My queue assignments (now spanning all open statuses) */
       mine.length > 0 && e('div', { style: { marginBottom: '20px' } },
         e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } }, 'My pipeline (assigned, contacted, scheduled)'),
-        mine.map(function(q){ return leadRow(q, { background: 'var(--teal-bg)', border: 'var(--teal)' }); })
+        mine.map(function(q){ return leadRow(q, { background: 'var(--teal-bg)', stripeColor: 'var(--teal)' }); })
       ),
 
       /* WROs - three sections by state (v2.5) */
@@ -16124,47 +16172,41 @@
         availableWros.map(function(w){
           return e('div', {
             key: w.id,
-            style: {
-              background: '#fff',
-              border: '1.5px solid var(--gold)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '8px'
-            }
+            className: 't-session',
+            style: { '--stripe-color': 'var(--brass-soft)', cursor: 'default' }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
-              e('div', { style: { flex: 1, minWidth: '180px' } },
-                e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, w.participantName),
-                  e('span', {
-                    style: {
-                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                      background: WRO_STATE_COLOR.pending, color: '#fff',
-                      fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
-                    }
-                  }, WRO_STATE_BADGE.pending)
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  formatShort(parseYMD(w.date)) + ' \u00b7 ' + (w.location || 'CMRC') +
-                  (w.phone ? (' \u00b7 ' + w.phone) : '')
-                ),
-                (w.goals && w.goals.length > 0) && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
-                  'Goals: ' + w.goals.join(', ') + (w.goalsOther ? ', ' + w.goalsOther : '')
-                ),
-                (w.healthFlags && w.healthFlags.trim()) && e('div', { style: { fontSize: '12px', color: 'var(--amber)', marginTop: '4px', fontWeight: 600 } },
-                  '\u26a0 Health flags noted'
-                )
-              ),
-              e('div', { style: { display: 'flex', gap: '6px', flexShrink: 0, flexWrap: 'wrap' } },
-                e('button', {
-                  className: 'btn btn-outline btn-sm',
-                  onClick: function(){ ctx.claimWRO(w.id, trainerName); ctx.toast && ctx.toast('Claimed for ' + trainerName, 'success'); }
-                }, 'I\'ll take it'),
-                e('button', {
-                  className: 'btn btn-gold btn-sm',
-                  onClick: function(){ setWroOpen(w); }
-                }, 'Complete')
-              )
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, w.participantName),
+              e('span', {
+                style: {
+                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                  background: WRO_STATE_COLOR.pending, color: '#fff',
+                  fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
+                }
+              }, WRO_STATE_BADGE.pending)
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, formatShort(parseYMD(w.date))),
+              e('span', null, '\u00b7'),
+              e('span', null, w.location || 'CMRC'),
+              w.phone && e('span', null, '\u00b7'),
+              w.phone && e('span', null, w.phone)
+            ),
+            (w.goals && w.goals.length > 0) && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+              'Goals: ' + w.goals.join(', ') + (w.goalsOther ? ', ' + w.goalsOther : '')
+            ),
+            (w.healthFlags && w.healthFlags.trim()) && e('div', { style: { fontSize: '12px', color: 'var(--ochre)', marginTop: '2px', fontWeight: 600 } },
+              '\u26a0 Health flags noted'
+            ),
+            e('div', { className: 't-session-actions' },
+              e('button', {
+                className: 'btn btn-outline btn-sm',
+                onClick: function(){ ctx.claimWRO(w.id, trainerName); ctx.toast && ctx.toast('Claimed for ' + trainerName, 'success'); }
+              }, 'I\'ll take it'),
+              e('button', {
+                className: 'btn btn-gold btn-sm',
+                onClick: function(){ setWroOpen(w); }
+              }, 'Complete')
             )
           );
         })
@@ -16183,50 +16225,44 @@
         myInProgressWros.map(function(w){
           return e('div', {
             key: w.id,
-            style: {
-              background: 'var(--teal-bg)',
-              border: '1.5px solid var(--teal)',
-              borderRadius: '12px',
-              padding: '12px 14px',
-              marginBottom: '8px'
-            }
+            className: 't-session',
+            style: { '--stripe-color': 'var(--teal)', background: 'var(--teal-bg)', cursor: 'default' }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
-              e('div', { style: { flex: 1, minWidth: '180px' } },
-                e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                  e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, w.participantName),
-                  e('span', {
-                    style: {
-                      fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                      background: WRO_STATE_COLOR.in_progress, color: '#fff',
-                      fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
-                    }
-                  }, WRO_STATE_BADGE.in_progress)
-                ),
-                e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '4px' } },
-                  formatShort(parseYMD(w.date)) + ' \u00b7 ' + (w.location || 'CMRC') +
-                  (w.phone ? (' \u00b7 ' + w.phone) : '')
-                ),
-                e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px', fontStyle: 'italic' } },
-                  'Claimed ' + (w.claimedAt ? new Date(w.claimedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
-                )
-              ),
-              e('div', { style: { display: 'flex', gap: '6px', flexShrink: 0, flexWrap: 'wrap' } },
-                e('button', {
-                  className: 'btn btn-outline btn-sm',
-                  onClick: function(ev){
-                    ev.stopPropagation();
-                    if (window.confirm('Release this WRO back to the available pool?')) {
-                      ctx.unclaimWRO(w.id);
-                      ctx.toast && ctx.toast('Released', 'info');
-                    }
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, w.participantName),
+              e('span', {
+                style: {
+                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                  background: WRO_STATE_COLOR.in_progress, color: '#fff',
+                  fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
+                }
+              }, WRO_STATE_BADGE.in_progress)
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, formatShort(parseYMD(w.date))),
+              e('span', null, '\u00b7'),
+              e('span', null, w.location || 'CMRC'),
+              w.phone && e('span', null, '\u00b7'),
+              w.phone && e('span', null, w.phone)
+            ),
+            e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px', fontStyle: 'italic' } },
+              'Claimed ' + (w.claimedAt ? new Date(w.claimedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
+            ),
+            e('div', { className: 't-session-actions' },
+              e('button', {
+                className: 'btn btn-outline btn-sm',
+                onClick: function(ev){
+                  ev.stopPropagation();
+                  if (window.confirm('Release this WRO back to the available pool?')) {
+                    ctx.unclaimWRO(w.id);
+                    ctx.toast && ctx.toast('Released', 'info');
                   }
-                }, 'Release'),
-                e('button', {
-                  className: 'btn btn-teal btn-sm',
-                  onClick: function(){ setWroOpen(w); }
-                }, 'Complete')
-              )
+                }
+              }, 'Release'),
+              e('button', {
+                className: 'btn btn-teal btn-sm',
+                onClick: function(){ setWroOpen(w); }
+              }, 'Complete')
             )
           );
         })
@@ -16245,27 +16281,11 @@
         othersInProgressWros.map(function(w){
           return e('div', {
             key: w.id,
-            style: {
-              background: 'var(--cream-2)',
-              border: '1px solid var(--border)',
-              borderRadius: '12px',
-              padding: '10px 14px',
-              marginBottom: '6px',
-              opacity: 0.85
-            }
+            className: 't-session',
+            style: { '--stripe-color': 'var(--slate)', background: 'var(--paper-2)', opacity: 0.85, cursor: 'default' }
           },
-            e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
-              e('div', null,
-                e('div', { style: { fontWeight: 600, color: 'var(--navy)', fontSize: '14px' } },
-                  w.participantName
-                ),
-                e('div', { style: { fontSize: '12px', color: 'var(--teal)', marginTop: '2px', fontWeight: 600 } },
-                  '\u2192 ' + w.claimedBy + ' is on it'
-                ),
-                e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } },
-                  formatShort(parseYMD(w.date)) + ' \u00b7 ' + (w.location || 'CMRC')
-                )
-              ),
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, w.participantName),
               e('span', {
                 style: {
                   fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
@@ -16273,6 +16293,14 @@
                   fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
                 }
               }, WRO_STATE_BADGE.in_progress)
+            ),
+            e('div', { style: { fontSize: '12px', color: 'var(--teal)', fontWeight: 600 } },
+              '\u2192 ' + w.claimedBy + ' is on it'
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, formatShort(parseYMD(w.date))),
+              e('span', null, '\u00b7'),
+              e('span', null, w.location || 'CMRC')
             )
           );
         })
@@ -16285,27 +16313,19 @@
           var hrs = (w.post && w.post.durationHours) || 1;
           return e('div', {
             key: w.id,
-            onClick: function(){ setWroOpen(w); },
-            style: {
-              background: 'var(--cream-2)',
-              border: '1.5px solid var(--border)',
-              borderRadius: '12px',
-              padding: '10px 14px',
-              marginBottom: '6px',
-              cursor: 'pointer',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }
+            className: 't-session',
+            style: { '--stripe-color': 'var(--moss)', background: 'var(--paper-2)' },
+            onClick: function(){ setWroOpen(w); }
           },
-            e('div', null,
-              e('div', { style: { fontWeight: 600, color: 'var(--navy)', fontSize: '14px' } }, w.participantName),
-              e('div', { style: { fontSize: '11px', color: 'var(--slate)', marginTop: '2px' } },
-                formatShort(parseYMD(w.post.orientationDate || w.date)) +
-                (w.post.timeIn ? (' \u00b7 ' + formatTime12(w.post.timeIn) + '\u2013' + formatTime12(w.post.timeOut)) : '')
-              )
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, w.participantName),
+              e('div', { style: { color: 'var(--teal)', fontSize: '14px', fontWeight: 600 } }, '+' + hrs.toFixed(2) + ' hr')
             ),
-            e('div', { style: { color: 'var(--teal)', fontSize: '14px', fontWeight: 600 } }, '+' + hrs.toFixed(2) + ' hr')
+            e('div', { className: 't-session-meta' },
+              e('span', null, formatShort(parseYMD(w.post.orientationDate || w.date))),
+              w.post.timeIn && e('span', null, '\u00b7'),
+              w.post.timeIn && e('span', null, formatTime12(w.post.timeIn) + '\u2013' + formatTime12(w.post.timeOut))
+            )
           );
         })
       ),
@@ -16321,7 +16341,7 @@
       /* v2.3: Recently closed (last 14 days) */
       myRecentClosed.length > 0 && e('div', { style: { marginTop: '20px' } },
         e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } }, 'Recently closed (last 14 days)'),
-        myRecentClosed.map(function(q){ return leadRow(q, { background: 'var(--cream-2)', border: 'var(--border)' }); })
+        myRecentClosed.map(function(q){ return leadRow(q, { background: 'var(--paper-2)', stripeColor: 'var(--slate)' }); })
       ),
 
       newOpen && e(NewQueueEntryModal, {
