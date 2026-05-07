@@ -16000,86 +16000,86 @@
           }, 'Sign out')
         }),
         e('div', { className: 'content' },
-        e('div', { className: 'stats-grid' },
-          e('div', { className: 'stat-card' },
-            e('div', { className: 'label' }, 'Total PT Clients'),
-            e('div', { className: 'value' }, ctx.clients.length)
+          e('div', { className: 'stats-grid' },
+            e('div', { className: 'stat-card' },
+              e('div', { className: 'label' }, 'Total PT Clients'),
+              e('div', { className: 'value' }, ctx.clients.length)
+            ),
+            e('div', { className: 'stat-card' },
+              e('div', { className: 'label' }, 'PT Sessions Logged'),
+              e('div', { className: 'value' }, totalSessions)
+            ),
+            e('div', { className: 'stat-card' },
+              e('div', { className: 'label' }, 'Total Revenue'),
+              e('div', { className: 'value' }, formatMoney(revenue))
+            ),
+            e('div', { className: 'stat-card' + (needRenewal > 0 ? ' warn' : '') },
+              e('div', { className: 'label' }, 'Need Renewal'),
+              e('div', { className: 'value' }, needRenewal)
+            ),
+            e('div', { className: 'stat-card' },
+              e('div', { className: 'label' }, 'Group Classes'),
+              e('div', { className: 'value' }, ctx.classes.length)
+            ),
+            e('div', { className: 'stat-card' },
+              e('div', { className: 'label' }, 'GX Sessions Logged'),
+              e('div', { className: 'value' }, gxSessions)
+            )
           ),
-          e('div', { className: 'stat-card' },
-            e('div', { className: 'label' }, 'PT Sessions Logged'),
-            e('div', { className: 'value' }, totalSessions)
+          /* Top-level domain filter (PT / GX / Both) */
+          e('div', {
+            style: {
+              display: 'flex',
+              gap: '6px',
+              padding: '4px',
+              background: 'var(--cream-2)',
+              borderRadius: '999px',
+              marginBottom: '10px'
+            }
+          },
+            [
+              { id: 'pt',   label: '\ud83c\udfcb\ufe0f Personal Training', sub: 'PT clients, queue, referrals' },
+              { id: 'gx',   label: '\ud83c\udfc3 Group Exercise',       sub: 'classes, sub approvals' },
+              { id: 'both', label: '\u2696\ufe0f Operations',           sub: 'audit, admin time, WROs, team' }
+            ].map(function(d){
+              var active = domain === d.id;
+              /* Aggregate badges for the domain */
+              var badge = 0;
+              if (d.id === 'pt') badge = queueWaiting + pendingReferrals + agedLeadsCount;
+              if (d.id === 'gx') badge = pendingSubCount;
+              return e('button', {
+                key: d.id,
+                type: 'button',
+                onClick: function(){ changeDomain(d.id); },
+                title: d.sub,
+                style: {
+                  flex: 1,
+                  padding: '12px 14px',
+                  borderRadius: '999px',
+                  border: 'none',
+                  background: active ? 'var(--navy)' : 'transparent',
+                  color: active ? '#fff' : 'var(--slate)',
+                  fontWeight: active ? 700 : 600,
+                  fontSize: '14px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  position: 'relative'
+                }
+              }, d.label + (badge > 0 ? ' (' + badge + ')' : ''));
+            })
           ),
-          e('div', { className: 'stat-card' },
-            e('div', { className: 'label' }, 'Total Revenue'),
-            e('div', { className: 'value' }, formatMoney(revenue))
+          /* Subtabs filtered to the active domain */
+          e('div', { className: 'admin-tabs' },
+            DOMAIN_TABS[domain].map(function(t){
+              var badge = TAB_BADGES[t.id] || 0;
+              return e('button', {
+                key: t.id,
+                className: tab === t.id ? 'active' : '',
+                onClick: function(){ setTab(t.id); }
+              }, t.label + (badge > 0 ? ' (' + badge + ')' : ''));
+            })
           ),
-          e('div', { className: 'stat-card' + (needRenewal > 0 ? ' warn' : '') },
-            e('div', { className: 'label' }, 'Need Renewal'),
-            e('div', { className: 'value' }, needRenewal)
-          ),
-          e('div', { className: 'stat-card' },
-            e('div', { className: 'label' }, 'Group Classes'),
-            e('div', { className: 'value' }, ctx.classes.length)
-          ),
-          e('div', { className: 'stat-card' },
-            e('div', { className: 'label' }, 'GX Sessions Logged'),
-            e('div', { className: 'value' }, gxSessions)
-          )
-        ),
-        /* Top-level domain filter (PT / GX / Both) */
-        e('div', {
-          style: {
-            display: 'flex',
-            gap: '6px',
-            padding: '4px',
-            background: 'var(--cream-2)',
-            borderRadius: '999px',
-            marginBottom: '10px'
-          }
-        },
-          [
-            { id: 'pt',   label: '\ud83c\udfcb\ufe0f Personal Training', sub: 'PT clients, queue, referrals' },
-            { id: 'gx',   label: '\ud83c\udfc3 Group Exercise',       sub: 'classes, sub approvals' },
-            { id: 'both', label: '\u2696\ufe0f Operations',           sub: 'audit, admin time, WROs, team' }
-          ].map(function(d){
-            var active = domain === d.id;
-            /* Aggregate badges for the domain */
-            var badge = 0;
-            if (d.id === 'pt') badge = queueWaiting + pendingReferrals + agedLeadsCount;
-            if (d.id === 'gx') badge = pendingSubCount;
-            return e('button', {
-              key: d.id,
-              type: 'button',
-              onClick: function(){ changeDomain(d.id); },
-              title: d.sub,
-              style: {
-                flex: 1,
-                padding: '12px 14px',
-                borderRadius: '999px',
-                border: 'none',
-                background: active ? 'var(--navy)' : 'transparent',
-                color: active ? '#fff' : 'var(--slate)',
-                fontWeight: active ? 700 : 600,
-                fontSize: '14px',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                position: 'relative'
-              }
-            }, d.label + (badge > 0 ? ' (' + badge + ')' : ''));
-          })
-        ),
-        /* Subtabs filtered to the active domain */
-        e('div', { className: 'admin-tabs' },
-          DOMAIN_TABS[domain].map(function(t){
-            var badge = TAB_BADGES[t.id] || 0;
-            return e('button', {
-              key: t.id,
-              className: tab === t.id ? 'active' : '',
-              onClick: function(){ setTab(t.id); }
-            }, t.label + (badge > 0 ? ' (' + badge + ')' : ''));
-          })
-        ),
-        tabView
+          tabView
         )
       )
     );
