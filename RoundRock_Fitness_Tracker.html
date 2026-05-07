@@ -15884,7 +15884,8 @@
     reports:   '◔',
     audit:     '⌗',
     team:      '☰',
-    classes:   '◇'
+    classes:   '◇',
+    settings:  '⚙'
   };
 
   function ShieldMark(props){
@@ -15996,12 +15997,15 @@
     var ctx = props.ctx;
     /* v2.1: two-level navigation. domain is the top-level filter
        (pt | gx | both); tab is the specific view inside that domain.
-       Default: PT domain, Today view (most common landing). */
+       Cleanup-B: pills + admin tab strip removed; sidebar drives nav.
+       Default landing is the new at-a-glance Dashboard (tab='overview').
+       'domain' state is preserved because some sidebar items still set
+       it and some downstream views (TodayView's drill-down) read it. */
     var domainTuple = useState('pt');
     var domain = domainTuple[0];
     var setDomain = domainTuple[1];
 
-    var tabTuple = useState('today');
+    var tabTuple = useState('overview');
     var tab = tabTuple[0];
     var setTab = tabTuple[1];
 
@@ -16013,43 +16017,9 @@
     var classDetailId = classDetailTuple[0];
     var setClassDetailId = classDetailTuple[1];
 
-    /* Tab definitions per domain. Order matters: first item in each list
-       is the default landing tab when the domain switches. */
-    var DOMAIN_TABS = {
-      pt: [
-        { id: 'today',     label: 'Today' },
-        { id: 'pipeline',  label: 'Pipeline' },
-        { id: 'clients',   label: 'PT Clients' },
-        { id: 'queue',     label: 'Queue' },
-        { id: 'wros',      label: 'WROs' },
-        { id: 'referrals', label: 'Referrals' }
-      ],
-      gx: [
-        { id: 'today',           label: 'Today' },
-        { id: 'classes',         label: 'Group Classes' },
-        { id: 'fill_rate',       label: 'Fill Rate' },
-        { id: 'schedule_versions', label: 'Schedule Versions' },
-        { id: 'sub_approvals',   label: 'Sub Approvals' }
-      ],
-      both: [
-        { id: 'audit',       label: 'Audit' },
-        { id: 'schedule',    label: 'Schedule' },
-        { id: 'admin_time',  label: 'Admin Time' },
-        { id: 'contacts',    label: 'Contacts' },
-        { id: 'instructors', label: 'Manage Team' },
-        { id: 'maintenance', label: 'Maintenance' }
-      ]
-    };
-
-    /* When the domain changes, snap tab to the first valid tab for that
-       domain unless the current tab is also valid in the new domain. */
-    function changeDomain(newDomain){
-      setDomain(newDomain);
-      var validTabs = DOMAIN_TABS[newDomain].map(function(t){ return t.id; });
-      if (validTabs.indexOf(tab) === -1) {
-        setTab(validTabs[0]);
-      }
-    }
+    /* Cleanup-B: DOMAIN_TABS + changeDomain removed with the pill row
+       and admin tab strip. Sidebar items now drive (domain, tab)
+       transitions directly via SIDEBAR_TO_STATE / navigateTab below. */
 
     if (clientDetailId) {
       var cl = ctx.clients.find(function(c){ return c.id === clientDetailId; });
@@ -16144,23 +16114,14 @@
       tabView = e(AdminManageInstructors, { ctx: ctx });
     }
 
-    /* Badges */
+    /* Sidebar badges. Cleanup-B trimmed agedLeadsCount, pendingReferrals,
+       and TAB_BADGES with the admin tab strip - they were only consumed
+       by the strip's per-tab badge column and the pills' aggregate counts. */
     var queueWaiting = (ctx.queue || []).filter(function(q){ return q.status === 'waiting'; }).length;
-    /* v2.3: aged leads bubble up as a pipeline alert */
-    var agedLeadsCount = (ctx.queue || []).filter(isQueueLeadAged).length;
     var pendingSubCount = 0;
     ctx.classes.forEach(function(c){
       (c.subAssignments || []).forEach(function(s){ if (subStatus(s) === 'claimed') pendingSubCount++; });
     });
-    var pendingReferrals = (ctx.referrals || []).filter(function(r){ return r.status === 'pending'; }).length;
-
-    /* Per-tab badge counts */
-    var TAB_BADGES = {
-      queue: queueWaiting,
-      pipeline: agedLeadsCount,
-      sub_approvals: pendingSubCount,
-      referrals: pendingReferrals
-    };
 
     /* Per-user PIN sessions carry trainer_id + name; the legacy 1111 admin
        session has trainer_id=null and trainer_name='Front Desk'. */
@@ -16176,11 +16137,10 @@
       headerActorName = 'Unknown';
     }
 
-    /* Sidebar primary nav. Each id maps to (domain, tab) below. The
-       sidebar lives alongside the existing domain pills + admin-tabs
-       inside .content - both nav surfaces stay wired so no admin flow
-       breaks; redundancy gets cleaned up in a later phase once the
-       sidebar pattern is validated on iPad. */
+    /* Sidebar primary nav. Each id maps to (domain, tab) below. After
+       Cleanup-B the sidebar is the only admin nav surface - the domain
+       pills and admin tab strip that previously sat above .content are
+       gone. */
     var SIDEBAR_TO_STATE = {
       dashboard: { domain: 'pt',   tab: 'overview' },
       clients:   { domain: 'pt',   tab: 'clients' },
@@ -16195,15 +16155,14 @@
       team:      { domain: 'both', tab: 'instructors' },
       settings:  { domain: 'both', tab: 'settings' }
     };
-    /* Cleanup-A: every admin tab now resolves to a sidebar item.
-       Folded mappings light up a parent when a fold-target tab is active:
-       contacts -> clients, pipeline -> leads, fill_rate -> reports,
-       maintenance/schedule_versions -> settings. tab='today' is reached
-       only through the still-present admin tab strip and does not light
-       up the sidebar (TodayView is a parallel deep view, removed when
-       Cleanup-B drops the strip). */
+    /* Cleanup-B: every admin tab resolves to a sidebar item. Folded
+       mappings light up a parent when a fold-target tab is active:
+       today -> dashboard (drill-down from AdminOverview), contacts ->
+       clients, pipeline -> leads, fill_rate -> reports, maintenance /
+       schedule_versions -> settings. */
     var SIDEBAR_ACTIVE_FOR_TAB = {
       overview: 'dashboard',
+      today: 'dashboard',
       clients: 'clients',
       contacts: 'clients',
       schedule: 'schedule',
@@ -16246,7 +16205,7 @@
       { id: 'reports',   icon: 'reports', label: 'Reports' },
       { id: 'audit',     icon: 'audit',   label: 'Audit log' },
       { id: 'team',      icon: 'team',    label: 'Team' },
-      { id: 'settings',  icon: 'audit',   label: 'Settings' }
+      { id: 'settings',  icon: 'settings', label: 'Settings' }
     ];
 
     return e('div', { style: { display: 'flex', minHeight: '100vh' } },
@@ -16296,59 +16255,9 @@
               e('div', { className: 'value' }, gxSessions)
             )
           ),
-          /* Top-level domain filter (PT / GX / Both) */
-          e('div', {
-            style: {
-              display: 'flex',
-              gap: '6px',
-              padding: '4px',
-              background: 'var(--cream-2)',
-              borderRadius: '999px',
-              marginBottom: '10px'
-            }
-          },
-            [
-              { id: 'pt',   label: '\ud83c\udfcb\ufe0f Personal Training', sub: 'PT clients, queue, referrals' },
-              { id: 'gx',   label: '\ud83c\udfc3 Group Exercise',       sub: 'classes, sub approvals' },
-              { id: 'both', label: '\u2696\ufe0f Operations',           sub: 'audit, admin time, WROs, team' }
-            ].map(function(d){
-              var active = domain === d.id;
-              /* Aggregate badges for the domain */
-              var badge = 0;
-              if (d.id === 'pt') badge = queueWaiting + pendingReferrals + agedLeadsCount;
-              if (d.id === 'gx') badge = pendingSubCount;
-              return e('button', {
-                key: d.id,
-                type: 'button',
-                onClick: function(){ changeDomain(d.id); },
-                title: d.sub,
-                style: {
-                  flex: 1,
-                  padding: '12px 14px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: active ? 'var(--navy)' : 'transparent',
-                  color: active ? '#fff' : 'var(--slate)',
-                  fontWeight: active ? 700 : 600,
-                  fontSize: '14px',
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap',
-                  position: 'relative'
-                }
-              }, d.label + (badge > 0 ? ' (' + badge + ')' : ''));
-            })
-          ),
-          /* Subtabs filtered to the active domain */
-          e('div', { className: 'admin-tabs' },
-            DOMAIN_TABS[domain].map(function(t){
-              var badge = TAB_BADGES[t.id] || 0;
-              return e('button', {
-                key: t.id,
-                className: tab === t.id ? 'active' : '',
-                onClick: function(){ setTab(t.id); }
-              }, t.label + (badge > 0 ? ' (' + badge + ')' : ''));
-            })
-          ),
+          /* Cleanup-B: domain pills + admin tab strip removed. Sidebar
+             drives all admin nav now; AdminOverview's "today details"
+             link is the sole entry point to TodayView. */
           tabView
         )
       )
@@ -16356,10 +16265,14 @@
   }
 
   /* ============ PHASE 2: ADMIN OVERVIEW + HELPERS ============
-     New at-a-glance dashboard rendered when sidebar "Dashboard" is active
-     (tab === 'overview'). The legacy tab-strip "Today" continues to render
-     TodayView untouched. The dead AdminOverview that previously lived here
-     (trainer roster chip layout, never referenced) was removed in Phase 2.
+     At-a-glance dashboard rendered when sidebar "Dashboard" is active
+     (tab === 'overview'). After Cleanup-B this is the admin landing -
+     domain pills and the admin tab strip are gone, the sidebar drives
+     all nav, and TodayView is reachable only via this overview's
+     "today details" drill-down link.
+
+     The dead AdminOverview that previously lived here (trainer roster
+     chip layout, never referenced) was removed in Phase 2.
 
      Helpers below are local to this file's React-createElement style
      (no JSX), used only by AdminOverview for now. */
@@ -16587,7 +16500,26 @@
     upcoming.sort(function(a, b){ return a.timeMin - b.timeMin; });
 
     /* === Render === */
+    /* Cleanup-B: drill-down link to TodayView. Mirrors the fold-link
+       banner pattern from Cleanup-A (ConsultQueueView, AdminAllClients,
+       AdminTimeView). TodayView is reachable only through this link
+       now that the admin tab strip is gone. */
+    var drillLink = navigate ? e('div', {
+      style: {
+        display: 'flex', gap: '8px', alignItems: 'center',
+        fontSize: '12px', color: 'var(--slate)',
+        marginBottom: '10px'
+      }
+    },
+      e('span', null, 'Related:'),
+      e('button', {
+        className: 'btn btn-ghost btn-sm',
+        onClick: function(){ navigate('today', 'pt'); }
+      }, 'today details →')
+    ) : null;
+
     return e('div', null,
+      drillLink,
       e('div', { className: 'kpi-strip' },
         e(KPI, {
           label: 'PT sessions today',
