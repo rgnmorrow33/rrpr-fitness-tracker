@@ -11,28 +11,64 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,500;1,400;1,500&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Caveat:wght@400;500&display=swap" rel="stylesheet" />
 <style>
   :root {
-    --navy: #1a2e4a;
-    --navy-soft: #223a5c;
-    --gold: #c9a84c;
-    --gold-soft: #e0c578;
-    --cream: #faf8f3;
-    --cream-2: #f3efe4;
-    --slate: #4a5568;
-    --slate-soft: #718096;
-    --green: #2d6a4f;
-    --green-bg: #e5f1ea;
-    --amber: #b45309;
-    --amber-bg: #fdf3e3;
-    --red: #b91c1c;
-    --red-bg: #fde7e7;
-    --teal: #0d7377;
-    --teal-bg: #e2f1f2;
+    /* === Field Manual tokens === */
+
+    /* Surfaces */
+    --bg: #f6f3ec;
+    --paper: #fbfaf6;
+    --paper-2: #f1ede2;
+    --ink: #15243a;
+    --ink-2: #2a3651;
+    --slate: #5b6679;
+    --slate-soft: #8a8f9c;
+    --rule: #d9d2c2;
+    --rule-soft: #e8e2d3;
+
+    /* Accents */
+    --brass: #9c7a3a;
+    --brass-soft: #c8a972;
+    --brick: #a8412a;
+    --brick-soft: #e58a73;
+    --moss: #506b3a;
+    --moss-bg: #e7ecdd;
+    --ochre: #c89548;
+    --ochre-bg: #f4e9d3;
+    --brick-bg: #f2dcd5;
+
+    /* Sidebar */
+    --side-bg: #15243a;
+    --side-text: #8c95a8;
+    --side-active: #ffffff;
+    --side-active-rule: #c8a972;
+    --side-brand: #c8a972;
+
+    /* Type */
+    --serif: 'Source Serif 4', 'Tiempos', Georgia, serif;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+
+    /* === Aliases for downstream compatibility === */
+    --navy: var(--ink);
+    --navy-soft: var(--ink-2);
+    --gold: var(--brass-soft);
+    --gold-soft: #e0c578;       /* keep verbatim - no clean new-palette mapping */
+    --cream: var(--paper);
+    --cream-2: var(--paper-2);
+    --green: var(--moss);
+    --green-bg: var(--moss-bg);
+    --amber: var(--ochre);
+    --amber-bg: var(--ochre-bg);
+    --red: var(--brick);
+    --red-bg: var(--brick-bg);
+    --teal: #0d7377;            /* keep verbatim - sage/green rebrand stays in its own commit */
+    --teal-bg: #e2f1f2;         /* keep verbatim - same reason */
     /* Sprint L: time-off block color. Muted neutral gray, distinct from
        --slate. Reads as 'absent' on the schedule grid. */
     --timeoff: #7A8088;
-    --border: #e5ddc8;
+    --border: var(--rule);
     --shadow: 0 2px 8px rgba(26,46,74,0.08);
     --shadow-lg: 0 8px 32px rgba(26,46,74,0.18);
   }
