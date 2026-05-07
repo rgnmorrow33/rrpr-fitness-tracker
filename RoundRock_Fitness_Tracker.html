@@ -13913,7 +13913,26 @@
 
     var totalHours = visibleItems.reduce(function(s, it){ return s + (it.hours || 0); }, 0);
 
+    /* Cleanup-A: fold link to Fill Rate (the orphaned tab folded under
+       sidebar Reports - admin_time is the placeholder home for Reports
+       until Phase 6 builds a proper Reports surface). Only renders when
+       navigation is wired in. */
+    var foldLinks = props.onNavigate ? e('div', {
+      style: {
+        display: 'flex', gap: '8px', alignItems: 'center',
+        fontSize: '12px', color: 'var(--slate)',
+        marginBottom: '10px'
+      }
+    },
+      e('span', null, 'Related:'),
+      e('button', {
+        className: 'btn btn-ghost btn-sm',
+        onClick: function(){ props.onNavigate('fill_rate', 'gx'); }
+      }, 'View fill rate \u2192')
+    ) : null;
+
     return e('div', null,
+      foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'Admin Time' + (isAdmin ? '' : ' (My Items)')),
@@ -15058,7 +15077,25 @@
       aged: stats.aged
     };
 
+    /* Cleanup-A: fold link to Pipeline (the orphaned tab folded under
+       sidebar Leads). Only renders when a navigation callback is wired
+       in (i.e., when launched from the admin tab dispatcher). */
+    var foldLinks = props.onNavigate ? e('div', {
+      style: {
+        display: 'flex', gap: '8px', alignItems: 'center',
+        fontSize: '12px', color: 'var(--slate)',
+        marginBottom: '10px'
+      }
+    },
+      e('span', null, 'Related:'),
+      e('button', {
+        className: 'btn btn-ghost btn-sm',
+        onClick: function(){ props.onNavigate('pipeline', 'pt'); }
+      }, 'View pipeline \u2192')
+    ) : null;
+
     return e('div', null,
+      foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'Consult Queue'),
@@ -15846,7 +15883,8 @@
     leads:     '✶',
     reports:   '◔',
     audit:     '⌗',
-    team:      '☰'
+    team:      '☰',
+    classes:   '◇'
   };
 
   function ShieldMark(props){
@@ -16030,6 +16068,14 @@
     var needRenewal = ctx.clients.filter(function(c){ return sessionsRemaining(c) <= 2; }).length;
     var gxSessions = ctx.classes.reduce(function(s,c){ return s + (c.attendance || []).length; }, 0);
 
+    /* Hoisted navigation helper. Used by AdminOverview's "see all"
+       links, by Cleanup-A fold links rendered inside ConsultQueueView /
+       AdminAllClients / AdminTimeView, and by AdminSettingsLanding. */
+    function navigateTab(newTab, newDomain){
+      if (newDomain) setDomain(newDomain);
+      setTab(newTab);
+    }
+
     /* Today view in PT or GX domain shows a domain-filtered version. */
     var tabView;
     if (tab === 'overview') {
@@ -16037,10 +16083,7 @@
          tab-strip Today still renders TodayView below, untouched. */
       tabView = e(AdminOverview, {
         ctx: ctx,
-        navigate: function(newTab, newDomain){
-          if (newDomain) setDomain(newDomain);
-          setTab(newTab);
-        },
+        navigate: navigateTab,
         onClientClick: function(id){ setClientDetailId(id); },
         onClassClick: function(id){ setClassDetailId(id); }
       });
@@ -16052,7 +16095,11 @@
         onClassClick: function(id){ setClassDetailId(id); }
       });
     } else if (tab === 'clients') {
-      tabView = e(AdminAllClients, { ctx: ctx, onClientClick: function(id){ setClientDetailId(id); } });
+      tabView = e(AdminAllClients, {
+        ctx: ctx,
+        onClientClick: function(id){ setClientDetailId(id); },
+        onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Contacts */
+      });
     } else if (tab === 'classes') {
       tabView = e(AdminAllClasses, { ctx: ctx, onClassClick: function(id){ setClassDetailId(id); } });
     } else if (tab === 'wros') {
@@ -16060,11 +16107,18 @@
     } else if (tab === 'referrals') {
       tabView = e(AdminReferralsView, { ctx: ctx, onClientClick: function(id){ setClientDetailId(id); } });
     } else if (tab === 'queue') {
-      tabView = e(ConsultQueueView, { ctx: ctx });
+      tabView = e(ConsultQueueView, {
+        ctx: ctx,
+        onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Pipeline */
+      });
     } else if (tab === 'pipeline') {
       tabView = e(PipelineView, { ctx: ctx });
     } else if (tab === 'admin_time') {
-      tabView = e(AdminTimeView, { ctx: ctx, isAdmin: true });
+      tabView = e(AdminTimeView, {
+        ctx: ctx,
+        isAdmin: true,
+        onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Fill Rate */
+      });
     } else if (tab === 'contacts') {
       tabView = e(AdminContactsView, { ctx: ctx });
     } else if (tab === 'schedule_versions') {
@@ -16083,6 +16137,9 @@
       tabView = e(AdminGXFillRate, { ctx: ctx });
     } else if (tab === 'maintenance') {
       tabView = e(AdminMaintenance, { ctx: ctx });
+    } else if (tab === 'settings') {
+      /* Cleanup-A: sidebar Settings landing - bundles Maintenance + Schedule Versions. */
+      tabView = e(AdminSettingsLanding, { onNavigate: navigateTab });
     } else {
       tabView = e(AdminManageInstructors, { ctx: ctx });
     }
@@ -16128,25 +16185,41 @@
       dashboard: { domain: 'pt',   tab: 'overview' },
       clients:   { domain: 'pt',   tab: 'clients' },
       schedule:  { domain: 'both', tab: 'schedule' },
+      classes:   { domain: 'gx',   tab: 'classes' },
       queue:     { domain: 'gx',   tab: 'sub_approvals' },
       leads:     { domain: 'pt',   tab: 'queue' },
+      referrals: { domain: 'pt',   tab: 'referrals' },
+      wros:      { domain: 'pt',   tab: 'wros' },
       reports:   { domain: 'both', tab: 'admin_time' },
       audit:     { domain: 'both', tab: 'audit' },
-      team:      { domain: 'both', tab: 'instructors' }
+      team:      { domain: 'both', tab: 'instructors' },
+      settings:  { domain: 'both', tab: 'settings' }
     };
-    /* Phase 2: tab='overview' -> sidebar Dashboard. tab='today' is now
-       only reachable through the still-present admin tab strip and does
-       not light up the sidebar (TodayView is a parallel deep view). */
+    /* Cleanup-A: every admin tab now resolves to a sidebar item.
+       Folded mappings light up a parent when a fold-target tab is active:
+       contacts -> clients, pipeline -> leads, fill_rate -> reports,
+       maintenance/schedule_versions -> settings. tab='today' is reached
+       only through the still-present admin tab strip and does not light
+       up the sidebar (TodayView is a parallel deep view, removed when
+       Cleanup-B drops the strip). */
     var SIDEBAR_ACTIVE_FOR_TAB = {
       overview: 'dashboard',
       clients: 'clients',
+      contacts: 'clients',
       schedule: 'schedule',
+      classes: 'classes',
       sub_approvals: 'queue',
       queue: 'leads',
       pipeline: 'leads',
+      referrals: 'referrals',
+      wros: 'wros',
       admin_time: 'reports',
+      fill_rate: 'reports',
       audit: 'audit',
-      instructors: 'team'
+      instructors: 'team',
+      settings: 'settings',
+      maintenance: 'settings',
+      schedule_versions: 'settings'
     };
     var sidebarActive = SIDEBAR_ACTIVE_FOR_TAB[tab] || null;
     function selectSidebar(id){
@@ -16158,7 +16231,8 @@
     var sidebarItems = [
       { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
       { id: 'clients',   icon: 'clients',   label: 'Clients' },
-      { id: 'schedule',  icon: 'schedule',  label: 'Schedule' }
+      { id: 'schedule',  icon: 'schedule',  label: 'Schedule' },
+      { id: 'classes',   icon: 'classes',   label: 'Classes' }
     ];
     sidebarItems.push(pendingSubCount > 0
       ? { id: 'queue', icon: 'queue', label: 'Sub Coverage', badge: pendingSubCount, badgeKind: 'dot' }
@@ -16167,9 +16241,12 @@
       ? { id: 'leads', icon: 'leads', label: 'Leads', badge: queueWaiting }
       : { id: 'leads', icon: 'leads', label: 'Leads' });
     var sidebarSecondary = [
-      { id: 'reports', icon: 'reports', label: 'Reports' },
-      { id: 'audit',   icon: 'audit',   label: 'Audit' },
-      { id: 'team',    icon: 'team',    label: 'Team' }
+      { id: 'referrals', icon: 'leads',   label: 'Referrals' },
+      { id: 'wros',      icon: 'audit',   label: 'WROs' },
+      { id: 'reports',   icon: 'reports', label: 'Reports' },
+      { id: 'audit',     icon: 'audit',   label: 'Audit log' },
+      { id: 'team',      icon: 'team',    label: 'Team' },
+      { id: 'settings',  icon: 'audit',   label: 'Settings' }
     ];
 
     return e('div', { style: { display: 'flex', minHeight: '100vh' } },
@@ -16582,6 +16659,69 @@
     );
   }
 
+  /* ============ ADMIN SETTINGS LANDING (Cleanup-A) ============
+     Lands when sidebar Settings is clicked. Bundles two existing tabs
+     (maintenance, schedule_versions) under one sidebar entry to keep
+     the sidebar's More section short. Renders two simple cards that
+     route to the existing tab views via the navigateTab callback. */
+  function AdminSettingsLanding(props){
+    var nav = props.onNavigate || function(){};
+    function card(label, sub, tab){
+      return e('button', {
+        type: 'button',
+        onClick: function(){ nav(tab, 'both'); },
+        style: {
+          display: 'block',
+          textAlign: 'left',
+          width: '100%',
+          padding: '18px 20px',
+          background: 'var(--paper)',
+          border: '1px solid var(--rule)',
+          borderRadius: '6px',
+          cursor: 'pointer',
+          fontFamily: 'inherit'
+        }
+      },
+        e('div', {
+          style: {
+            fontFamily: 'var(--serif)',
+            fontSize: '17px',
+            fontWeight: 500,
+            color: 'var(--ink)',
+            marginBottom: '4px'
+          }
+        }, label),
+        e('div', {
+          style: {
+            fontSize: '12px',
+            color: 'var(--slate)',
+            fontFamily: 'var(--mono)',
+            letterSpacing: '0.02em'
+          }
+        }, sub)
+      );
+    }
+    return e('div', null,
+      e('div', { className: 'section-head' },
+        e('div', null,
+          e('h2', null, 'Settings'),
+          e('div', { className: 'meta' }, 'maintenance and schedule versions')
+        )
+      ),
+      e('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '12px',
+          marginTop: '12px'
+        }
+      },
+        card('Maintenance', 'app maintenance, data ops, debug tools', 'maintenance'),
+        card('Schedule Versions', 'class schedule version history', 'schedule_versions')
+      )
+    );
+  }
+
   /* ============ ADMIN: All Clients ============ */
   function AdminAllClients(props){
     var ctx = props.ctx;
@@ -16723,7 +16863,24 @@
       ctx.toast('Sessions CSV exported ✓');
     }
 
+    /* Cleanup-A: fold link to Contacts (the orphaned tab folded under
+       sidebar Clients). Only renders when navigation is wired in. */
+    var foldLinks = props.onNavigate ? e('div', {
+      style: {
+        display: 'flex', gap: '8px', alignItems: 'center',
+        fontSize: '12px', color: 'var(--slate)',
+        marginBottom: '10px'
+      }
+    },
+      e('span', null, 'Related:'),
+      e('button', {
+        className: 'btn btn-ghost btn-sm',
+        onClick: function(){ props.onNavigate('contacts', 'both'); }
+      }, 'View contacts →')
+    ) : null;
+
     return e('div', null,
+      foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'All Clients'),
