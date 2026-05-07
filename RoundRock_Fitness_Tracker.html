@@ -1325,6 +1325,19 @@
     border: 1.5px solid var(--paper);
   }
 
+  /* Sign-out variant for the light topbar surface. The shared .logout-btn
+     above is tuned for dark navy .header (cream-on-translucent-white).
+     On the new .topbar (paper background) that combo is invisible, so
+     scope a contrasting variant when nested under .topbar. */
+  .topbar .logout-btn {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--rule);
+  }
+  .topbar .logout-btn:hover {
+    background: var(--paper-2);
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
