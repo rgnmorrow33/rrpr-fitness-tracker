@@ -6281,10 +6281,26 @@
       });
     }
 
+    /* Patch: direct Supabase upsert of one time-off row. Used by the
+       request/decide flows so the success toast and notification fan-out
+       can sequence after the actual write. localStorage mode is a no-op
+       so the existing save useEffect handles persistence as before. */
+    function persistTimeOffRow(stamped){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.timeOff.toSupabase(stamped);
+      return supabaseClient.from('trainer_time_off')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+
     /* Spec 1 (B): trainer-facing time-off REQUEST. Always status='pending';
        fans out a 'time_off_requested' notification to every active lead
        and admin (excluding the requester). Distinct from upsertTimeOff
-       which is the lead/admin direct-write path. */
+       which is the lead/admin direct-write path.
+
+       Patch: returns a Promise. Persist resolves first, then state +
+       fan-out fire. On reject, both are suppressed and the caller's
+       .catch shows a surface-specific error toast. */
     function requestTimeOff(record){
       var actor = ctxCurrentUserName() || 'unknown';
       var withMeta = Object.assign({ id: uid() }, record, {
@@ -6298,9 +6314,7 @@
         before: null,
         after: withMeta
       });
-      setTimeOff(function(list){ return list.concat([stamped]); });
 
-      /* Fan-out to lead + admin, excluding the requester. */
       var requesterId = withMeta.trainerId;
       var rows = (trainerProfiles || [])
         .filter(function(p){
@@ -6324,17 +6338,33 @@
             }
           };
         });
-      if (rows.length > 0) storage.notifications.emitMany(rows);
-      return stamped;
+
+      return persistTimeOffRow(stamped).then(function(){
+        setTimeOff(function(list){
+          var next = list.concat([stamped]);
+          /* Suppress the redundant save useEffect: the row is already
+             persisted by persistTimeOffRow, so the dirty-check ref needs
+             to advance to the post-write state. */
+          timeOffRef.current = next;
+          return next;
+        });
+        if (rows.length > 0) storage.notifications.emitMany(rows);
+        return stamped;
+      });
     }
 
     /* Spec 1 (B): lead/admin decision on a pending request. Writes
        status + decided_by/at + optional decision_note, then notifies
-       the requester. */
+       the requester.
+
+       Patch: returns a Promise. Same sequencing pattern as
+       requestTimeOff - persist first, then state + fan-out. */
     function decideTimeOffRequest(id, decision, decisionNote){
       var before = (timeOff || []).find(function(x){ return x.id === id; });
-      if (!before) return;
-      if (decision !== 'approved' && decision !== 'denied') return;
+      if (!before) return Promise.reject(new Error('Time off record not found'));
+      if (decision !== 'approved' && decision !== 'denied') {
+        return Promise.reject(new Error('Invalid decision: ' + decision));
+      }
       var actor = ctxCurrentUserName() || 'unknown';
       var nowIso = new Date().toISOString();
       var after = Object.assign({}, before, {
@@ -6351,21 +6381,26 @@
           before: before,
           after: after
         });
-      setTimeOff(function(list){
-        return list.map(function(x){ return x.id === id ? stamped : x; });
-      });
-      if (before.trainerId) {
-        storage.notifications.emit(before.trainerId, 'time_off_decided', {
-          timeOffId: id,
-          decision: decision,
-          decidedBy: actor,
-          startAt: before.startAt,
-          endAt: before.endAt,
-          kind: before.kind,
-          decisionNote: decisionNote || null
+
+      return persistTimeOffRow(stamped).then(function(){
+        setTimeOff(function(list){
+          var next = list.map(function(x){ return x.id === id ? stamped : x; });
+          timeOffRef.current = next;
+          return next;
         });
-      }
-      return stamped;
+        if (before.trainerId) {
+          storage.notifications.emit(before.trainerId, 'time_off_decided', {
+            timeOffId: id,
+            decision: decision,
+            decidedBy: actor,
+            startAt: before.startAt,
+            endAt: before.endAt,
+            kind: before.kind,
+            decisionNote: decisionNote || null
+          });
+        }
+        return stamped;
+      });
     }
     function upsertWRO(w){
       setWros(function(list){
@@ -9260,7 +9295,52 @@
     var ctx = props.ctx;
     var trainerTuple = useState((ctx.trainers && ctx.trainers[0]) || '');
     var trainer = trainerTuple[0]; var setTrainer = trainerTuple[1];
+
+    /* Patch: admin-tool launchers live here too so the sidebar
+       "Schedule" entry exposes Closures + Time Off without requiring
+       admins to navigate to the Audit page. Same modals as the audit
+       page; either path lands in the same component. */
+    var closuresOpenTuple = useState(false);
+    var closuresOpen = closuresOpenTuple[0]; var setClosuresOpen = closuresOpenTuple[1];
+    var timeOffOpenTuple = useState(false);
+    var timeOffOpen = timeOffOpenTuple[0]; var setTimeOffOpen = timeOffOpenTuple[1];
+    var bannersOpenTuple = useState(false);
+    var bannersOpen = bannersOpenTuple[0]; var setBannersOpen = bannersOpenTuple[1];
+
+    /* Patch: AdminOverview's quick-link cards deep-link via these
+       openOnMount props. We only act on the first render since this
+       view is mounted fresh per nav. Consumers reset the prop after
+       reading. */
+    useEffect(function(){
+      if (props.openClosuresOnMount) setClosuresOpen(true);
+      if (props.openTimeOffOnMount) setTimeOffOpen(true);
+      if (props.onConsumedOpenOnMount) props.onConsumedOpenOnMount();
+    }, []);
+
+    var closuresCount = (ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length;
+    var timeOffCount = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length;
+
     return e('div', null,
+      e('div', { className: 'section-head' },
+        e('div', null,
+          e('h2', null, 'Schedule'),
+          e('div', { className: 'meta' }, 'Per-trainer week view · admin tools')
+        ),
+        e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+          ctx.can('canManageClosures') && e('button', {
+            className: 'btn btn-primary btn-sm',
+            onClick: function(){ setClosuresOpen(true); }
+          }, '📅 Closures (' + closuresCount + ')'),
+          ctx.can('addTimeOff') && e('button', {
+            className: 'btn btn-primary btn-sm',
+            onClick: function(){ setTimeOffOpen(true); }
+          }, '🏖 Time Off (' + timeOffCount + ')'),
+          ctx.can('canManageBanners') && e('button', {
+            className: 'btn btn-outline btn-sm',
+            onClick: function(){ setBannersOpen(true); }
+          }, 'Banners')
+        )
+      ),
       e('div', { className: 'field', style: { marginBottom: '14px' } },
         e('label', null, 'Trainer'),
         e('select', {
@@ -9283,7 +9363,19 @@
         : e('div', { className: 'empty' },
             e('div', { className: 'icon' }, '📆'),
             e('div', null, 'Pick a trainer to see their week.')
-          )
+          ),
+      closuresOpen && e(ClosuresManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setClosuresOpen(false); }
+      }),
+      timeOffOpen && e(TimeOffManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setTimeOffOpen(false); }
+      }),
+      bannersOpen && e(BannerManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setBannersOpen(false); }
+      })
     );
   }
 
@@ -17594,6 +17686,13 @@
       if (tab !== 'payroll') setSelectedTrainerForPayroll(null);
     }, [tab]);
 
+    /* Patch: AdminOverview quick-link cards deep-link straight to a modal
+       on AdminScheduleView. Holds the pending action ('closures' |
+       'time_off' | null) until AdminScheduleView consumes it on mount. */
+    var pendingScheduleActionTuple = useState(null);
+    var pendingScheduleAction = pendingScheduleActionTuple[0];
+    var setPendingScheduleAction = pendingScheduleActionTuple[1];
+
     /* Cleanup-B: DOMAIN_TABS + changeDomain removed with the pill row
        and admin tab strip. Sidebar items now drive (domain, tab)
        transitions directly via SIDEBAR_TO_STATE / navigateTab below. */
@@ -17611,10 +17710,15 @@
 
     /* Hoisted navigation helper. Used by AdminOverview's "see all"
        links, by Cleanup-A fold links rendered inside ConsultQueueView /
-       AdminAllClients / AdminTimeView, and by AdminSettingsLanding. */
-    function navigateTab(newTab, newDomain){
+       AdminAllClients / AdminTimeView, and by AdminSettingsLanding.
+       Patch: optional `opts.open` deep-links to a modal on the
+       destination tab (currently only 'closures' | 'time_off' on the
+       schedule tab). */
+    function navigateTab(newTab, newDomain, opts){
       if (newDomain) setDomain(newDomain);
       setTab(newTab);
+      if (opts && opts.open) setPendingScheduleAction(opts.open);
+      else setPendingScheduleAction(null);
     }
 
     /* Today view in PT or GX domain shows a domain-filtered version. */
@@ -17698,7 +17802,10 @@
       tabView = e(AdminScheduleView, {
         ctx: ctx,
         onOpenClient: function(id){ setClientDetailId(id); },
-        onOpenClass: function(id){ setClassDetailId(id); }
+        onOpenClass: function(id){ setClassDetailId(id); },
+        openClosuresOnMount: pendingScheduleAction === 'closures',
+        openTimeOffOnMount: pendingScheduleAction === 'time_off',
+        onConsumedOpenOnMount: function(){ setPendingScheduleAction(null); }
       });
     } else if (tab === 'fill_rate') {
       tabView = e(AdminGXFillRate, { ctx: ctx });
@@ -18104,6 +18211,87 @@
       }, 'today details →')
     ) : null;
 
+    /* Patch: admin tools quick-link cards. Three primary entry points
+       admins reach in one click from the Dashboard landing: Schedule
+       (per-trainer week + tools), Closures (auto-opens modal),
+       Time Off (auto-opens manager). Banners stay accessible via the
+       Schedule page header so the trio doesn't bloat. Cards gated by
+       the same perms used downstream so trainers viewing a future
+       admin-overview clone won't see them. */
+    var adminToolCards = [];
+    if (ctx.can('canViewAnyTrainerSchedule')) {
+      adminToolCards.push({
+        key: 'schedule',
+        icon: '\ud83d\udcc6',
+        label: 'Schedule',
+        sub: 'per-trainer week view',
+        onClick: function(){ navigate('schedule', 'both'); }
+      });
+    }
+    if (ctx.can('canManageClosures')) {
+      adminToolCards.push({
+        key: 'closures',
+        icon: '\ud83d\udcc5',
+        label: 'Closures',
+        sub: 'holidays + facility closures',
+        onClick: function(){ navigate('schedule', 'both', { open: 'closures' }); }
+      });
+    }
+    if (ctx.can('addTimeOff')) {
+      adminToolCards.push({
+        key: 'time_off',
+        icon: '\ud83c\udfd6',
+        label: 'Time Off',
+        sub: 'requests + direct entry',
+        onClick: function(){ navigate('schedule', 'both', { open: 'time_off' }); }
+      });
+    }
+    var adminToolsRow = adminToolCards.length === 0 ? null : e('div', {
+      style: {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: '10px',
+        marginBottom: '18px'
+      }
+    },
+      adminToolCards.map(function(c){
+        return e('button', {
+          key: c.key,
+          type: 'button',
+          onClick: c.onClick,
+          style: {
+            display: 'block',
+            textAlign: 'left',
+            padding: '16px 18px',
+            background: 'var(--paper)',
+            border: '1px solid var(--rule)',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            fontFamily: 'inherit'
+          }
+        },
+          e('div', { style: { fontSize: '22px', marginBottom: '6px' } }, c.icon),
+          e('div', {
+            style: {
+              fontFamily: 'var(--serif)',
+              fontSize: '17px',
+              fontWeight: 500,
+              color: 'var(--ink)',
+              marginBottom: '2px'
+            }
+          }, c.label),
+          e('div', {
+            style: {
+              fontSize: '12px',
+              color: 'var(--slate)',
+              fontFamily: 'var(--mono)',
+              letterSpacing: '0.02em'
+            }
+          }, c.sub)
+        );
+      })
+    );
+
     return e('div', null,
       drillLink,
       e('div', { className: 'kpi-strip' },
@@ -18130,6 +18318,8 @@
           title: 'cost recovery data is not yet wired into the tracker. metric will populate when financial data integrates.'
         })
       ),
+
+      adminToolsRow,
 
       e('div', { className: 'two-col' },
         e(Panel, {
@@ -22086,6 +22276,9 @@
       if (eIso <= sIso)   { setError('End must be after start'); return; }
       setError(null);
 
+      /* Patch: await the save before showing success and closing. On
+         reject, surface the error and keep the modal open so the
+         trainer can retry without re-entering everything. */
       ctx.requestTimeOff({
         trainerId: requesterId,
         startAt: sIso,
@@ -22093,9 +22286,13 @@
         allDay: !!allDay,
         kind: kind,
         reason: note ? note.trim() : null
+      }).then(function(){
+        ctx.toast('Time off requested · admin notified ✓');
+        props.onClose();
+      }).catch(function(err){
+        var msg = err && err.message ? err.message : 'unknown error';
+        ctx.toast('Could not submit time off request: ' + msg, 'error');
       });
-      ctx.toast('Time off requested · admin notified ✓');
-      props.onClose();
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -22645,12 +22842,18 @@
           )
         ),
         e('div', { style: { display: 'flex', gap: '6px' } },
+          /* Patch: await the save before toasting + fan-out. On reject,
+             surface the error so the lead/admin knows to retry. */
           e('button', {
             className: 'btn btn-sm',
             style: { background: 'var(--moss)', color: '#fff', fontWeight: 600 },
             onClick: function(){
-              ctx.decideTimeOffRequest(t.id, 'approved', null);
-              ctx.toast('Time off approved · ' + trainerName(t.trainerId) + ' notified ✓');
+              ctx.decideTimeOffRequest(t.id, 'approved', null).then(function(){
+                ctx.toast('Time off approved · ' + trainerName(t.trainerId) + ' notified ✓');
+              }).catch(function(err){
+                var msg = err && err.message ? err.message : 'unknown error';
+                ctx.toast('Could not save approval: ' + msg, 'error');
+              });
             }
           }, '✓ Approve'),
           e('button', {
@@ -22659,8 +22862,12 @@
             onClick: function(){
               var why = window.prompt('Reason for denial (optional):', '');
               if (why === null) return; /* cancelled */
-              ctx.decideTimeOffRequest(t.id, 'denied', (why && why.trim()) || null);
-              ctx.toast('Request denied · ' + trainerName(t.trainerId) + ' notified', 'error');
+              ctx.decideTimeOffRequest(t.id, 'denied', (why && why.trim()) || null).then(function(){
+                ctx.toast('Request denied · ' + trainerName(t.trainerId) + ' notified', 'error');
+              }).catch(function(err){
+                var msg = err && err.message ? err.message : 'unknown error';
+                ctx.toast('Could not save denial: ' + msg, 'error');
+              });
             }
           }, '✕ Deny')
         )
@@ -23573,16 +23780,22 @@
     return e('div', null,
       e('div', { className: 'section-head' },
         e('div', null,
-          e('h2', null, 'Bi-Weekly Audit'),
+          /* Patch: rename from "Bi-Weekly Audit" so the sidebar
+             "Schedule" entry visually matches the destination page.
+             Audit terminology preserved in the compound name. */
+          e('h2', null, 'Schedule and Audit'),
           e('div', { className: 'meta' },
             payPeriodLabel(period) + ' \u00b7 ' + statusLabel + ' \u00b7 pay day ' + formatShort(period.payDay)
           )
         ),
+        /* Patch: Closures and Time Off promoted to primary actions so
+           admin sees them as the obvious entry points, not as auxiliary
+           outline buttons next to CSV. Banners and CSV stay secondary. */
         e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
-          e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setClosuresOpen(true); } },
-            'Closures (' + ((ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length) + ')'),
-          ctx.can('addTimeOff') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setTimeOffOpen(true); } },
-            'Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
+          e('button', { className: 'btn btn-primary btn-sm', onClick: function(){ setClosuresOpen(true); } },
+            '\ud83d\udcc5 Closures (' + ((ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length) + ')'),
+          ctx.can('addTimeOff') && e('button', { className: 'btn btn-primary btn-sm', onClick: function(){ setTimeOffOpen(true); } },
+            '\ud83c\udfd6 Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
           ctx.can('canManageBanners') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setBannersOpen(true); } },
             'Banners'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
