@@ -8795,30 +8795,9 @@
         })()
       ),
 
-      /* Phase 3b-B: .tstats strip derived from existing summary. Pay-period
-         label + grand total + scheduled-item count. Hidden in compact mode. */
-      !compact && e('div', { className: 'tstats' },
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'On schedule'),
-          e('div', { className: 'tstat-value' }, todayCount),
-          e('div', { className: 'tstat-sub' }, todayCount === 1 ? 'item today' : 'items today')
-        ),
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'Pay period'),
-          e('div', { className: 'tstat-value' }, displayHrs(summary.grandTotal) + ' hr'),
-          e('div', { className: 'tstat-sub' }, summary.payPeriod.label)
-        ),
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'Forward + admin'),
-          e('div', { className: 'tstat-value' },
-            displayHrs(summary.forwardFacing.total) + ' / ' +
-            displayHrs(summary.autoAdmin.hours + summary.manualAdmin.hours)
-          ),
-          e('div', { className: 'tstat-sub' },
-            displayHrs((summary.serviceRecovery && summary.serviceRecovery.hours) || 0) + ' hr recovery'
-          )
-        )
-      ),
+      /* Patch F: pay-period framing tiles moved to TimeCardView per
+         Reagan's call. Today keeps the date headline, HOLIDAY chips,
+         the Mon-Sat .week-strip, and the Request Time Off launcher. */
 
       /* Spec 1 (C): Mon-Sat per-day hours strip for the current week.
          Today's column highlighted. Saturday absorbs the week's full
@@ -12225,6 +12204,18 @@
       var prefill = props.prefill || {};
       var consultSessions = [];
       if (isConsult && prefill.preferredDate) {
+        /* Patch F: block consult booking on a facility-matched closure. */
+        var blockingClosure = findFacilityClosure(ctx.closures || [], prefill.preferredDate, form.location);
+        if (blockingClosure) {
+          var fac = blockingClosure.facility || 'all';
+          var facLabel = fac === 'all' ? 'all facilities' : fac;
+          ctx.toast(
+            'Cannot book consultation on ' + formatShort(parseYMD(prefill.preferredDate)) +
+            ' - ' + (blockingClosure.reason || 'closure') + ' (' + facLabel + ').',
+            'error'
+          );
+          return;
+        }
         consultSessions.push({
           id: uid(),
           date: prefill.preferredDate,
@@ -12566,6 +12557,19 @@
       if (!date) { ctx.toast('Date is required', 'error'); return; }
       if (!time) { ctx.toast('Time is required', 'error'); return; }
       if (remaining <= 0) { ctx.toast('No sessions remaining in package', 'error'); return; }
+      /* Patch F: block scheduling on a facility-matched closure date.
+         Mirror's the class-creation and attendance-log validation pattern. */
+      var blockingClosure = findFacilityClosure(ctx.closures || [], date, client.location);
+      if (blockingClosure) {
+        var fac = blockingClosure.facility || 'all';
+        var facLabel = fac === 'all' ? 'all facilities' : fac;
+        ctx.toast(
+          'Cannot schedule a session on ' + formatShort(parseYMD(date)) +
+          ' - ' + (blockingClosure.reason || 'closure') + ' (' + facLabel + ').',
+          'error'
+        );
+        return;
+      }
       var sess = {
         id: uid(),
         date: date,
@@ -15297,6 +15301,43 @@
     var modal = modalTuple[0]; var setModal = modalTuple[1];
 
     var card = calcTrainerHours(trainerName, offset, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
+
+    /* Patch F: pay-period framing tiles + Mon-Sat strip moved here from
+       TrainerToday. summary and todayCount stay current-period regardless
+       of the offset toggle below - tiles are a "where am I right now"
+       snapshot, the toggle drills into period detail underneath. */
+    var summaryNow = offset === 0 ? card : calcTrainerHours(trainerName, 0, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
+    var todayYMD = todayStr();
+    var todayCount = (function(){
+      var n = 0;
+      var todayDate = parseYMD(todayYMD);
+      var occs = occurrencesInWindow(ctx.classes || [], todayDate, todayDate, ctx.closures || []);
+      occs.forEach(function(o){
+        if (o.isClosed || o.isCancelled) return;
+        var assignedSub = o.assignedSub;
+        var subStatusVal = assignedSub ? subStatus(assignedSub) : null;
+        var subTaken = subStatusVal === 'claimed' || subStatusVal === 'approved';
+        var subName = assignedSub && (assignedSub.subInstructor || assignedSub.claimedBy);
+        var isOriginal = trainerNameMatches(trainerName, o.cls.instructor);
+        var isSub = subName && trainerNameMatches(trainerName, subName);
+        if ((isOriginal && !subTaken) || isSub) n++;
+      });
+      (ctx.clients || []).forEach(function(client){
+        (client.sessions || []).forEach(function(s){
+          if (s.date !== todayYMD) return;
+          var sessTrainer = s.trainerName || client.trainerName;
+          if (!trainerNameMatches(trainerName, sessTrainer)) return;
+          n++;
+        });
+      });
+      (ctx.wros || []).forEach(function(w){
+        var orientYMD = (w.post && w.post.orientationDate) || w.date;
+        if (orientYMD !== todayYMD) return;
+        var sp = (w.post && w.post.specialistName) || w.claimedBy;
+        if (sp && trainerNameMatches(trainerName, sp)) n++;
+      });
+      return n;
+    })();
     /* PT section pools 1:1 sessions and orientations together (per Selisa's
        pattern). Each entry carries a 'kind' so the label can disambiguate. */
     var pt = card.forwardFacing.ptSessions
@@ -15448,12 +15489,53 @@
         ctx: ctx,
         onClose: function(){ setRequestOpen(false); }
       }),
-      /* Patch: WeeklyHoursDashboard removed from TimeCardView. The
-         Mon-Sat .week-strip on TrainerToday is the canonical weekly
-         view; mixing a Sun-Sat panel inside this pay-period (14-day)
-         time card was causing window-mismatch confusion. Read-only
-         payroll-review path via TeamHoursView still works fine - the
-         pay-period section subtotals are the right framing there. */
+
+      /* Patch F: pay-period framing widget. Tiles + Mon-Sat strip
+         relocated here from TrainerToday so pay-period context lives on
+         the Time Card. Tiles pull current-period data regardless of the
+         3-pill offset below - they're a "where am I now" snapshot.
+         Visible to read-only viewers too (data scoped to displayed
+         trainer; only the Request Time Off button gates on isReadOnly). */
+      e('div', { className: 'tstats' },
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'On schedule'),
+          e('div', { className: 'tstat-value' }, todayCount),
+          e('div', { className: 'tstat-sub' }, todayCount === 1 ? 'item today' : 'items today')
+        ),
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'Pay period'),
+          e('div', { className: 'tstat-value' }, displayHrs(summaryNow.grandTotal) + ' hr'),
+          e('div', { className: 'tstat-sub' }, summaryNow.payPeriod.label)
+        ),
+        e('div', { className: 'tstat' },
+          e('div', { className: 'tstat-label' }, 'Forward + admin'),
+          e('div', { className: 'tstat-value' },
+            displayHrs(summaryNow.forwardFacing.total) + ' / ' +
+            displayHrs(summaryNow.autoAdmin.hours + summaryNow.manualAdmin.hours)
+          ),
+          e('div', { className: 'tstat-sub' },
+            displayHrs((summaryNow.serviceRecovery && summaryNow.serviceRecovery.hours) || 0) + ' hr recovery'
+          )
+        )
+      ),
+      (function(){
+        var todayDate = parseYMD(todayYMD);
+        var monday = mondayOf(todayDate);
+        var byDay = calcWeekHoursByDay(trainerName, monday, ctx);
+        return e('div', { className: 'week-strip' },
+          byDay.days.map(function(d){
+            var isToday = d.ymd === todayYMD;
+            return e('div', {
+              key: d.ymd,
+              className: 'day' + (isToday ? ' is-today' : '')
+            },
+              e('div', { className: 'day-label' }, d.label),
+              e('div', { className: 'day-date' }, d.date.getDate()),
+              e('div', { className: 'day-hours' }, d.hours.toFixed(1))
+            );
+          })
+        );
+      })(),
 
       /* Pay period selector */
       e('div', {
