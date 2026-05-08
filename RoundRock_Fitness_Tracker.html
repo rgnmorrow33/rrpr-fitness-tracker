@@ -7832,10 +7832,6 @@
     var consultPrefillTuple = useState(null);
     var consultPrefill = consultPrefillTuple[0]; var setConsultPrefill = consultPrefillTuple[1];
 
-    /* Spec 2 (D): add-client pre-auth flow. Direct NewClientModal launch. */
-    var addClientOpenTuple = useState(false);
-    var addClientOpen = addClientOpenTuple[0]; var setAddClientOpen = addClientOpenTuple[1];
-
     var profiles = (ctx.trainerProfiles || []).filter(function(p){ return p.is_active !== false; });
 
     function startSignIn(profile){
@@ -7852,10 +7848,10 @@
         e('div', { className: 'tag' }, 'Clay Madsen Recreation Center')
       ),
 
-      /* Public kiosk tile - members fill out a WRO request without logging in.
-         Spec 2 (C/D): two additional pre-auth tiles for front-desk-driven
-         flows: Consultation booking and Add Client. All three share matching
-         tile styling. */
+      /* Public kiosk tile - members fill out a WRO request or book a
+         consultation without logging in. Add-client tile removed in
+         this patch: front desk creates clients via the consultation
+         flow (which already collects basics + creates the client). */
       e('div', {
         style: {
           background: 'var(--cream-2)',
@@ -7881,12 +7877,7 @@
             className: 'btn btn-gold',
             style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
             onClick: function(){ setConsultBookingOpen(true); }
-          }, '💬  Book a Consultation'),
-          e('button', {
-            className: 'btn btn-gold',
-            style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
-            onClick: function(){ setAddClientOpen(true); }
-          }, '👤  Add New Client')
+          }, '💬  Book a Consultation')
         )
       ),
 
@@ -7970,6 +7961,7 @@
       consultPrefill && e(NewClientModal, {
         ctx: ctx,
         prefill: consultPrefill,
+        intakeMode: 'consultation',
         onClose: function(){ setConsultPrefill(null); },
         onCreate: function(c){
           /* Front Desk attribution when no session is active. */
@@ -7977,19 +7969,6 @@
           ctx.auditedUpsertClient(stamped, 'create');
           setConsultPrefill(null);
           ctx.toast('Consultation booked · client created ✓');
-        }
-      }),
-
-      /* Spec 2 (D): add-client pre-auth modal. Direct NewClientModal
-         launch with Front Desk attribution. */
-      addClientOpen && e(NewClientModal, {
-        ctx: ctx,
-        onClose: function(){ setAddClientOpen(false); },
-        onCreate: function(c){
-          var stamped = ctx.session ? c : Object.assign({}, c, { createdBy: 'Front Desk' });
-          ctx.auditedUpsertClient(stamped, 'create');
-          setAddClientOpen(false);
-          ctx.toast('Client created ✓');
         }
       })
     );
@@ -9320,6 +9299,34 @@
     var closuresCount = (ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length;
     var timeOffCount = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length;
 
+    /* Patch: surface clients with empty trainerName who have at least one
+       scheduled session. Consultation-mode intake creates these (trainer
+       assigned post-consult); without this panel they'd never appear in
+       any trainer's week and would slip past admin until the appointment
+       date passed. Sorted by next-scheduled-date ascending. */
+    var todayY = todayStr();
+    var unassignedConsults = (function(){
+      var rows = [];
+      (ctx.clients || []).forEach(function(c){
+        if (c.deleted_at) return;
+        var hasTrainer = c.trainerName && String(c.trainerName).trim();
+        if (hasTrainer) return;
+        var upcoming = (c.sessions || []).filter(function(s){
+          return s.status === 'scheduled' && (!s.date || s.date >= todayY);
+        }).sort(function(a, b){
+          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+          return (a.time || '') < (b.time || '') ? -1 : 1;
+        });
+        if (upcoming.length === 0) return;
+        rows.push({ client: c, next: upcoming[0] });
+      });
+      rows.sort(function(a, b){
+        if (a.next.date !== b.next.date) return a.next.date < b.next.date ? -1 : 1;
+        return (a.next.time || '') < (b.next.time || '') ? -1 : 1;
+      });
+      return rows;
+    })();
+
     return e('div', null,
       e('div', { className: 'section-head' },
         e('div', null,
@@ -9340,6 +9347,68 @@
             onClick: function(){ setBannersOpen(true); }
           }, 'Banners')
         )
+      ),
+      /* Patch: unassigned consultations panel. Click a row to open the
+         client (admin assigns a trainer via the existing edit flow,
+         which propagates to the scheduled session via fallback). */
+      unassignedConsults.length > 0 && e('div', {
+        style: {
+          background: 'var(--ochre-bg)',
+          border: '1px solid var(--ochre)',
+          borderRadius: '6px',
+          padding: '12px 14px',
+          marginBottom: '14px'
+        }
+      },
+        e('div', {
+          style: {
+            fontSize: '12px', fontWeight: 700, letterSpacing: '0.05em',
+            textTransform: 'uppercase', color: 'var(--ochre)', marginBottom: '6px'
+          }
+        }, '⚠ Unassigned consultations (' + unassignedConsults.length + ')'),
+        e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '10px' } },
+          'Booked through the front-desk consultation flow. Open the client to pick a trainer.'
+        ),
+        unassignedConsults.map(function(row){
+          var c = row.client; var s = row.next;
+          var when = s.date
+            ? (formatShort(parseYMD(s.date)) + (s.time ? (' · ' + formatTime12(s.time)) : ''))
+            : 'No date set';
+          return e('button', {
+            key: c.id,
+            type: 'button',
+            onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
+            style: {
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '12px',
+              width: '100%',
+              padding: '10px 12px',
+              background: '#fff',
+              border: '1px solid var(--rule)',
+              borderRadius: '6px',
+              marginBottom: '6px',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              textAlign: 'left'
+            }
+          },
+            e('div', null,
+              e('div', { style: { fontSize: '14px', fontWeight: 600, color: 'var(--navy)' } }, c.name),
+              e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+                when + ' · ' + (c.location || 'CMRC')
+              )
+            ),
+            e('span', {
+              style: {
+                fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
+                background: 'var(--ochre)', color: '#fff', fontWeight: 700,
+                textTransform: 'uppercase', letterSpacing: '0.04em'
+              }
+            }, 'Assign trainer →')
+          );
+        })
       ),
       e('div', { className: 'field', style: { marginBottom: '14px' } },
         e('label', null, 'Trainer'),
@@ -11692,6 +11761,15 @@
     var ctx = props.ctx;
     var existing = props.client;
     var isEdit = !!existing;
+    /* Patch: 'consultation' mode strips the modal down to intake
+       essentials (name, contact, location, referral, PAR-Q+). The
+       package is locked from prefill.pkgId, trainer is unassigned
+       until post-consult, payment fields are hidden ($0), and the
+       preferredDate/preferredTime from the booking modal becomes a
+       scheduled session on save. Authenticated launches still use
+       'full' mode (default). */
+    var intakeMode = props.intakeMode || 'full';
+    var isConsult = intakeMode === 'consultation';
 
     var formTuple = useState(function(){
       if (existing) {
@@ -11807,7 +11885,9 @@
       var errs = intakeFieldErrors(form);
       setErrors(errs);
       if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
-      if (!form.trainerName) { ctx.toast('Trainer is required', 'error'); return; }
+      /* Patch: trainer is hidden in consult mode (assigned post-
+         consultation) so skip the trainer-required check. */
+      if (!isConsult && !form.trainerName) { ctx.toast('Trainer is required', 'error'); return; }
       var pkg = selectedPkg;
       var pkgRecord = {
         sessions: pkg.sessions,
@@ -11817,8 +11897,26 @@
         amountPaid: pkg.price,
         purchaseDate: form.datePurchased,
         paymentType: form.paymentType,
-        source: 'manual'
+        source: isConsult ? 'consultation' : 'manual'
       };
+      /* Patch: in consult mode, the booking modal's preferredDate +
+         preferredTime become a scheduled session record. trainerName is
+         intentionally empty - admin or Carlos assigns a trainer post-
+         booking via ClientDetail (the AdminScheduleView "Unassigned
+         consultations" panel surfaces them). */
+      var prefill = props.prefill || {};
+      var consultSessions = [];
+      if (isConsult && prefill.preferredDate) {
+        consultSessions.push({
+          id: uid(),
+          date: prefill.preferredDate,
+          time: prefill.preferredTime || '',
+          status: 'scheduled',
+          durationHours: 0.75,
+          trainerName: '',
+          note: 'Consultation appointment - awaiting trainer assignment'
+        });
+      }
       var out;
       if (isEdit) {
         /* Editing - preserve any additional packages, replace just the first one's metadata */
@@ -11860,7 +11958,7 @@
           trainerName: form.trainerName,
           referralSource: form.referralSource || null,
           parQ: Object.assign({}, parQ, { flagCount: parQFlagCount }),
-          sessions: []
+          sessions: consultSessions
         };
       }
       props.onCreate(out);
@@ -11869,10 +11967,13 @@
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
-          e('h2', null, isEdit ? 'Edit Client' : 'New Client'),
+          e('h2', null, isEdit ? 'Edit Client' : (isConsult ? 'Consultation Intake' : 'New Client')),
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' },
+          isConsult && e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px', padding: '10px 12px', background: 'var(--paper-2)', borderRadius: '6px' } },
+            'Capture the basics so we can confirm the appointment. Trainer assignment happens after the consultation.'
+          ),
           e('div', { className: 'field' },
             e('label', null, 'Full Name *'),
             e('input', {
@@ -11903,19 +12004,34 @@
               errors.email && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.email)
             )
           ),
-          e('div', { className: 'row2' },
-            e('div', { className: 'field' },
-              e('label', null, 'Location'),
-              e('select', { value: form.location, onChange: function(ev){ onLocationChange(ev.target.value); } },
-                LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
+          /* Patch: in consult mode, hide Date Purchased (no purchase),
+             and lock Location since it determines which consult package
+             is selected (cmrc-consult vs baca-consult). Full mode is
+             unchanged. */
+          isConsult
+            ? e('div', { className: 'field' },
+                e('label', null, 'Location'),
+                e('input', {
+                  value: form.location,
+                  readOnly: true,
+                  style: { background: 'var(--paper-2)' }
+                })
               )
-            ),
-            e('div', { className: 'field' },
-              e('label', null, 'Date Purchased'),
-              e('input', { type: 'date', value: form.datePurchased, onChange: function(ev){ update('datePurchased', ev.target.value); } })
-            )
-          ),
-          e('div', { className: 'field' },
+            : e('div', { className: 'row2' },
+                e('div', { className: 'field' },
+                  e('label', null, 'Location'),
+                  e('select', { value: form.location, onChange: function(ev){ onLocationChange(ev.target.value); } },
+                    LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
+                  )
+                ),
+                e('div', { className: 'field' },
+                  e('label', null, 'Date Purchased'),
+                  e('input', { type: 'date', value: form.datePurchased, onChange: function(ev){ update('datePurchased', ev.target.value); } })
+                )
+              ),
+          /* Package picker hidden in consult mode (cmrc-consult or
+             baca-consult locked from prefill.pkgId). */
+          !isConsult && e('div', { className: 'field' },
             e('label', null, 'Package'),
             e('div', { className: 'package-grid' },
               packagesAvailable.map(function(p){
@@ -11935,7 +12051,9 @@
               'Set client location to filter packages.'
             )
           ),
-          e('div', { className: 'field' },
+          /* Trainer assignment hidden in consult mode - admin or Carlos
+             assigns post-consult via ClientDetail edit. */
+          !isConsult && e('div', { className: 'field' },
             e('label', null, 'Trainer'),
             e('select', {
               value: form.trainerName,
@@ -11964,7 +12082,12 @@
               e('option', { value: 'other' }, 'Other')
             )
           ),
-          e('div', { className: 'row2' },
+          /* Patch: payment + team member + membership all hidden in
+             consult mode. Consultation is $0; the client record gets
+             enrolled into a paid package post-consultation when a
+             trainer extends the relationship. Membership status comes
+             during full intake. */
+          !isConsult && e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Payment Type'),
               e('select', { value: form.paymentType, onChange: function(ev){ update('paymentType', ev.target.value); } },
@@ -11980,11 +12103,11 @@
               })
             )
           ),
-          e('div', { className: 'field' },
+          !isConsult && e('div', { className: 'field' },
             e('label', null, 'Team Member Initials'),
             e('input', { value: form.teamMember, onChange: function(ev){ update('teamMember', ev.target.value.toUpperCase()); }, maxLength: 5, placeholder: 'E.g. RM' })
           ),
-          e('div', { className: 'field' },
+          !isConsult && e('div', { className: 'field' },
             e('div', { className: 'checkbox-row' },
               e('input', {
                 type: 'checkbox',
@@ -11995,7 +12118,7 @@
               e('label', { htmlFor: 'mver' }, 'Membership verified at front desk')
             )
           ),
-          e('div', { className: 'row2' },
+          !isConsult && e('div', { className: 'row2' },
             e('div', { className: 'field' },
               e('label', null, 'Membership Type'),
               e('select', { value: form.membershipType, onChange: function(ev){ update('membershipType', ev.target.value); } },
@@ -15007,10 +15130,12 @@
         ctx: ctx,
         onClose: function(){ setRequestOpen(false); }
       }),
-      /* Weekly hours dashboard - same component used on the Today tab.
-         Always anchors to the current Sun-Sat regardless of which pay
-         period is selected below. */
-      e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
+      /* Patch: WeeklyHoursDashboard removed from TimeCardView. The
+         Mon-Sat .week-strip on TrainerToday is the canonical weekly
+         view; mixing a Sun-Sat panel inside this pay-period (14-day)
+         time card was causing window-mismatch confusion. Read-only
+         payroll-review path via TeamHoursView still works fine - the
+         pay-period section subtotals are the right framing there. */
 
       /* Pay period selector */
       e('div', {
