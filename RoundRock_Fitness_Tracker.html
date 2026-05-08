@@ -2781,6 +2781,7 @@
         payload: payload || {}
       }).then(function(res){
         if (res.error) console.error('Notification emit failed:', res.error);
+        else console.info('[notify] emit ok type=' + type + ' target=' + targetTrainerId);
       }).catch(function(err){
         console.error('Notification emit threw:', err);
       });
@@ -2797,6 +2798,12 @@
         };
       })).then(function(res){
         if (res.error) console.error('Notification emitMany failed:', res.error);
+        else {
+          var typeCounts = {};
+          clean.forEach(function(r){ typeCounts[r.type] = (typeCounts[r.type] || 0) + 1; });
+          var summary = Object.keys(typeCounts).map(function(k){ return k + '=' + typeCounts[k]; }).join(' ');
+          console.info('[notify] emitMany ok rows=' + clean.length + ' (' + summary + ')');
+        }
       }).catch(function(err){
         console.error('Notification emitMany threw:', err);
       });
@@ -4561,6 +4568,16 @@
     var tFirst = t.split(' ')[0];
     var cFirst = c.split(' ')[0];
     return tFirst === cFirst && tFirst.length >= 3;
+  }
+
+  /* Patch D (Spec 2): only approved time-off renders on schedules.
+     Pending awaits a lead/admin decision. Denied is a closed event.
+     Legacy rows lack a status field; the DB default backfilled them
+     to 'approved' but the in-memory representation may not have a
+     status key set, so a falsy status is treated as approved. */
+  function isTimeOffApproved(t){
+    if (!t || t.deleted_at) return false;
+    return t.status === 'approved' || !t.status;
   }
 
   /* Time-off range filters. Both skip soft-deleted entries. Range bounds
@@ -8703,10 +8720,27 @@
       return false;
     });
 
+    /* Patch D (Spec 2): approved time-off overlapping today for the
+       signed-in trainer. Pending and denied filtered by isTimeOffApproved. */
+    var myTimeOffToday = (function(){
+      var profile = (ctx.trainerProfiles || []).find(function(p){
+        return p && p.id && trainerNameMatches(trainerName, p.name);
+      });
+      if (!profile) return [];
+      var dayStartIso = todayYMD + 'T00:00:00';
+      var dayEndIso   = todayYMD + 'T23:59:59';
+      return (ctx.timeOff || []).filter(function(t){
+        if (!isTimeOffApproved(t)) return false;
+        if (t.trainerId !== profile.id) return false;
+        if (!t.startAt || !t.endAt) return false;
+        return t.endAt >= dayStartIso && t.startAt <= dayEndIso;
+      });
+    })();
+
     /* Pay-period summary */
     var summary = calcTrainerHours(trainerName, 0, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
 
-    var todayCount = myClassesToday.length + ptSessionsToday.length + myWrosToday.length;
+    var todayCount = myClassesToday.length + ptSessionsToday.length + myWrosToday.length + myTimeOffToday.length;
 
     /* Full-screen detail swaps. Same pattern as TrainerGX/TrainerPT: when
        a detail id is set, return the detail component instead of the
@@ -8941,6 +8975,57 @@
         })
       ),
 
+      /* Patch D (Spec 2): approved time-off overlapping today.
+         Read-only on this surface; manager modal handles edits. */
+      myTimeOffToday.length > 0 && e('div', { style: { marginBottom: '20px' } },
+        e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } },
+          '\ud83c\udf34 Time off today (' + myTimeOffToday.length + ')'
+        ),
+        myTimeOffToday.map(function(t){
+          var kindLabel = (t.kind || 'off');
+          kindLabel = kindLabel.charAt(0).toUpperCase() + kindLabel.slice(1);
+          var dayChip;
+          if (t.allDay) {
+            dayChip = 'All day';
+          } else {
+            var startD = new Date(t.startAt);
+            var endD = new Date(t.endAt);
+            var dayStartIso = todayYMD + 'T00:00:00';
+            var dayEndIso = todayYMD + 'T23:59:59';
+            var startsBefore = t.startAt < dayStartIso;
+            var endsAfter = t.endAt > dayEndIso;
+            if (startsBefore && endsAfter) {
+              dayChip = 'All day';
+            } else {
+              var sH = startsBefore ? '12:00 AM' : (function(){
+                var h = startD.getHours(); var m = startD.getMinutes();
+                return formatTime12((h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m);
+              })();
+              var eH = endsAfter ? '11:59 PM' : (function(){
+                var h = endD.getHours(); var m = endD.getMinutes();
+                return formatTime12((h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m);
+              })();
+              dayChip = sH + ' \u2013 ' + eH;
+            }
+          }
+          return e('div', {
+            key: 'timeoff-' + t.id,
+            className: 't-session',
+            style: { '--stripe-color': 'var(--timeoff)', cursor: 'default' }
+          },
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, kindLabel),
+              e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, dayChip)
+            ),
+            (t.reason || t.decisionNote) && e('div', { className: 't-session-meta' },
+              t.reason && e('span', null, t.reason),
+              t.reason && t.decisionNote && e('span', null, '\u00b7'),
+              t.decisionNote && e('span', { style: { fontStyle: 'italic' } }, t.decisionNote)
+            )
+          );
+        })
+      ),
+
       /* WROs scheduled today */
       myWrosToday.length > 0 && e('div', { style: { marginBottom: '20px' } },
         e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } },
@@ -9160,6 +9245,35 @@
       wrosByDate[orientYMD].push(w);
     });
 
+    /* Patch D (Spec 2): approved time-off rendered per affected day.
+       Multi-day blocks distribute across each overlapping date. The
+       trainer profile id is looked up by name match - TrainerWeekView
+       receives trainerName, not the id, so we resolve once. */
+    var trainerProfile = (ctx.trainerProfiles || []).find(function(p){
+      return p && p.id && trainerNameMatches(trainerName, p.name);
+    });
+    var timeOffByDate = {};
+    if (trainerProfile) {
+      var weekStartIso = new Date(weekStartYMD + 'T00:00:00').toISOString();
+      var weekEndIso   = new Date(weekEndYMD + 'T23:59:59').toISOString();
+      listTimeOffForTrainer(ctx.timeOff, trainerProfile.id, weekStartIso, weekEndIso).forEach(function(t){
+        if (!isTimeOffApproved(t)) return;
+        var startD = new Date(t.startAt);
+        var endD = new Date(t.endAt);
+        if (isNaN(startD.getTime()) || isNaN(endD.getTime())) return;
+        var cursor = new Date(startD.getFullYear(), startD.getMonth(), startD.getDate());
+        var lastDay = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate());
+        while (cursor.getTime() <= lastDay.getTime()) {
+          var ymd = toYMD(cursor);
+          if (ymd >= weekStartYMD && ymd <= weekEndYMD) {
+            if (!timeOffByDate[ymd]) timeOffByDate[ymd] = [];
+            timeOffByDate[ymd].push(t);
+          }
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      });
+    }
+
     function weekLabel(){
       var startStr = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       var endStr = weekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -9282,6 +9396,56 @@
       );
     }
 
+    /* Patch D (Spec 2): approved time-off card. Read-only on the schedule
+       (manager modal handles edits). Stripe color matches the AllTrainers
+       grid treatment for visual consistency. */
+    function timeOffCard(t, ymd){
+      var kindLabel = (t.kind || 'off');
+      kindLabel = kindLabel.charAt(0).toUpperCase() + kindLabel.slice(1);
+      /* Per-day window: the time-off block may span multiple days; show
+         the window scoped to this date or "All day" if it covers the
+         entire 24h. */
+      var dayChip;
+      if (t.allDay) {
+        dayChip = 'All day';
+      } else {
+        var startD = new Date(t.startAt);
+        var endD = new Date(t.endAt);
+        var dayStartIso = ymd + 'T00:00:00';
+        var dayEndIso = ymd + 'T23:59:59';
+        var startsBefore = t.startAt < dayStartIso;
+        var endsAfter = t.endAt > dayEndIso;
+        if (startsBefore && endsAfter) {
+          dayChip = 'All day';
+        } else {
+          var sH = startsBefore ? '12:00 AM' : (function(){
+            var h = startD.getHours(); var m = startD.getMinutes();
+            return formatTime12((h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m);
+          })();
+          var eH = endsAfter ? '11:59 PM' : (function(){
+            var h = endD.getHours(); var m = endD.getMinutes();
+            return formatTime12((h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m);
+          })();
+          dayChip = sH + ' – ' + eH;
+        }
+      }
+      return e('div', {
+        key: 'timeoff-' + t.id + ':' + ymd,
+        className: 't-session',
+        style: { '--stripe-color': 'var(--timeoff)', cursor: 'default' }
+      },
+        e('div', { className: 't-session-row' },
+          e('div', { className: 't-session-title' }, kindLabel),
+          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, dayChip)
+        ),
+        (t.reason || t.decisionNote) && e('div', { className: 't-session-meta' },
+          t.reason && e('span', null, t.reason),
+          t.reason && t.decisionNote && e('span', null, '·'),
+          t.decisionNote && e('span', { style: { fontStyle: 'italic' } }, t.decisionNote)
+        )
+      );
+    }
+
     var days = [];
     for (var i = 0; i < 7; i++) {
       var d = addDays(weekStart, i);
@@ -9291,11 +9455,12 @@
       var gxList = gxByDate[ymd] || [];
       var ptList = ptByDate[ymd] || [];
       var wroList = wrosByDate[ymd] || [];
+      var timeOffList = timeOffByDate[ymd] || [];
       /* Spec 2 (A): HOLIDAY chips for closures on this date. Show every
          non-deleted closure with its scope label - lets trainers self-
          filter without us deriving a facility set. */
       var dayClosures = closuresOnDate(ctx.closures || [], ymd);
-      var hasAny = gxList.length + ptList.length + wroList.length > 0;
+      var hasAny = gxList.length + ptList.length + wroList.length + timeOffList.length > 0;
       days.push(e('div', {
         key: ymd,
         style: {
@@ -9323,6 +9488,7 @@
         ),
         hasAny
           ? e('div', null,
+              timeOffList.map(function(t){ return safeRender('to-' + t.id + ':' + ymd, function(){ return timeOffCard(t, ymd); }); }),
               gxList.map(function(o){ return safeRender('gx-' + (o.cls && o.cls.id) + ':' + o.date, function(){ return gxCard(o); }); }),
               ptList.map(function(it){ return safeRender('pt-' + (it.session && it.session.id), function(){ return ptCard(it); }); }),
               wroList.map(function(w){ return safeRender('wro-' + w.id, function(){ return wroCard(w); }); })
@@ -9816,6 +9982,8 @@
         var dayStartIso = new Date(dateYMD + 'T00:00:00').toISOString();
         var dayEndIso   = new Date(dateYMD + 'T23:59:59').toISOString();
         listTimeOffForTrainer(ctx.timeOff, profile.id, dayStartIso, dayEndIso).forEach(function(t){
+          /* Patch D (Spec 2): skip pending/denied requests. */
+          if (!isTimeOffApproved(t)) return;
           var startD = new Date(t.startAt);
           var endD = new Date(t.endAt);
           if (isNaN(startD.getTime()) || isNaN(endD.getTime())) return;
