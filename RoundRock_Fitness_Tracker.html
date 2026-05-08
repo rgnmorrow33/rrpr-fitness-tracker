@@ -2089,6 +2089,137 @@
   function getAppSessionName(){ return _appSessionName || 'system'; }
   function setAppSessionName(name){ _appSessionName = name || null; }
 
+  /* ============ REALTIME CHANNEL AUTO-RECONNECT (Patch C) ============
+     iPad sleep/wake, wifi roams, and brief offline blips can drop the
+     supabase realtime channel without the app noticing. Without
+     reconnect, trainers see stale data. This helper wraps channel
+     creation + subscribe with exponential backoff resubscribe and a
+     module-scoped registry so window 'online' / visibilitychange
+     handlers can sweep all live channels and force-recover.
+
+     Backoff: 1s -> 2s -> 4s -> 8s, capped at 30s. Reset to 1s on a
+     successful SUBSCRIBED state. Called sites pass a buildChannel
+     factory (because supabase channels can't be re-subscribed once
+     CLOSED; we removeChannel + recreate). */
+  var _activeChannels = new Map();
+  var BACKOFF_INITIAL_MS = 1000;
+  var BACKOFF_MAX_MS = 30000;
+
+  function _scheduleReconnect(key){
+    var entry = _activeChannels.get(key);
+    if (!entry) return;
+    if (entry.timer) return;
+    var delay = Math.min(entry.backoffMs, BACKOFF_MAX_MS);
+    console.warn('[realtime] scheduling reconnect for ' + key + ' in ' + delay + 'ms');
+    entry.timer = setTimeout(function(){
+      entry.timer = null;
+      _reconnectChannel(key);
+    }, delay);
+    entry.backoffMs = Math.min(entry.backoffMs * 2, BACKOFF_MAX_MS);
+  }
+
+  function _reconnectChannel(key){
+    var entry = _activeChannels.get(key);
+    if (!entry) return;
+    if (!supabaseClient) return;
+    /* Tear down the prior channel - supabase v2 channels can't be
+       re-subscribed once they hit CLOSED, so we recreate. */
+    try { supabaseClient.removeChannel(entry.channel); } catch(_){}
+    var nextChannel;
+    try {
+      nextChannel = entry.builder(supabaseClient);
+    } catch(err){
+      console.error('[realtime] builder threw for ' + key + ':', err);
+      _scheduleReconnect(key);
+      return;
+    }
+    entry.channel = nextChannel;
+    entry.lastStatus = null;
+    nextChannel.subscribe(function(status){
+      _handleChannelStatus(key, status);
+    });
+  }
+
+  function _handleChannelStatus(key, status){
+    var entry = _activeChannels.get(key);
+    if (!entry) return;
+    entry.lastStatus = status;
+    if (status === 'SUBSCRIBED') {
+      if (entry.backoffMs !== BACKOFF_INITIAL_MS) {
+        console.info('[realtime] reconnected ' + key);
+      }
+      entry.backoffMs = BACKOFF_INITIAL_MS;
+      if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      console.warn('[realtime] ' + key + ' status=' + status);
+      _scheduleReconnect(key);
+    }
+    if (entry.onStatus) {
+      try { entry.onStatus(status); } catch(err){ console.error('[realtime] onStatus threw:', err); }
+    }
+  }
+
+  /* subscribeWithReconnect(key, builder, onStatus?)
+       key      - stable string id, unique per active channel
+       builder  - (supabaseClient) => channel, with .on() bindings already
+                  attached. Must NOT call .subscribe() - this helper does.
+       onStatus - optional (status) => void, layered on top of the
+                  reconnect handler so callers can drive UI state.
+     Returns an unsubscribe() that removes from the registry. */
+  function subscribeWithReconnect(key, builder, onStatus){
+    if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+      return function(){};
+    }
+    /* Tear down any prior entry on the same key (defensive against a
+       caller who didn't unsubscribe before re-subscribing). */
+    if (_activeChannels.has(key)) {
+      try { _activeChannels.get(key).timer && clearTimeout(_activeChannels.get(key).timer); } catch(_){}
+      try { supabaseClient.removeChannel(_activeChannels.get(key).channel); } catch(_){}
+      _activeChannels.delete(key);
+    }
+    var initialChannel;
+    try {
+      initialChannel = builder(supabaseClient);
+    } catch(err){
+      console.error('[realtime] initial builder threw for ' + key + ':', err);
+      return function(){};
+    }
+    var entry = {
+      channel: initialChannel,
+      builder: builder,
+      backoffMs: BACKOFF_INITIAL_MS,
+      timer: null,
+      lastStatus: null,
+      onStatus: onStatus || null
+    };
+    _activeChannels.set(key, entry);
+    initialChannel.subscribe(function(status){
+      _handleChannelStatus(key, status);
+    });
+    return function(){
+      var e2 = _activeChannels.get(key);
+      if (!e2) return;
+      if (e2.timer) clearTimeout(e2.timer);
+      try { supabaseClient.removeChannel(e2.channel); } catch(_){}
+      _activeChannels.delete(key);
+    };
+  }
+
+  /* Sweep live channels and force resubscribe any not in SUBSCRIBED.
+     Called by window 'online' and document visibilitychange:visible
+     listeners installed at App level. Idempotent - already-SUBSCRIBED
+     channels are skipped. */
+  function sweepReconnectChannels(reason){
+    if (STORAGE_MODE !== 'supabase' || !supabaseClient) return;
+    _activeChannels.forEach(function(entry, key){
+      if (entry.lastStatus === 'SUBSCRIBED') return;
+      console.info('[realtime] sweep (' + reason + ') resubscribing ' + key);
+      if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+      entry.backoffMs = BACKOFF_INITIAL_MS;
+      _reconnectChannel(key);
+    });
+  }
+
   /* Generic camelCase ↔ snake_case translator builder. Identity passthrough
      for keys not in the map. Always sets updated_at on toSupabase; never
      sets created_at (DB default fires on insert, untouched on update).
@@ -2616,23 +2747,25 @@
     },
     /* Returns an unsubscribe fn. Server-side filter so other trainers'
        inserts never hit this client. Separate channel from 'app-changes'
-       (which is unfiltered and shared across the entity tables). */
+       (which is unfiltered and shared across the entity tables).
+       Patch C: routed through subscribeWithReconnect so iPad sleep/wake
+       and wifi blips don't leave the bell silent on stale state. */
     subscribeForTrainer: function(trainerId, onInsert){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
         return function(){};
       }
-      var channel = supabaseClient.channel('notifications-' + trainerId);
-      channel.on('postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'notifications',
-          filter: 'target_trainer_id=eq.' + trainerId },
-        function(payload){
-          try { onInsert(translate.notifications.fromSupabase(payload.new)); }
-          catch(err){ console.error('Notification insert handler failed:', err); }
-        });
-      channel.subscribe();
-      return function(){
-        try { supabaseClient.removeChannel(channel); } catch(_){}
-      };
+      function buildNotifications(client){
+        var channel = client.channel('notifications-' + trainerId);
+        channel.on('postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'notifications',
+            filter: 'target_trainer_id=eq.' + trainerId },
+          function(payload){
+            try { onInsert(translate.notifications.fromSupabase(payload.new)); }
+            catch(err){ console.error('Notification insert handler failed:', err); }
+          });
+        return channel;
+      }
+      return subscribeWithReconnect('notifications:' + trainerId, buildNotifications);
     },
     /* Phase 3: emit helpers used by trigger hooks. Fire-and-forget; never
        throw, never block the caller's primary action. Failures log to
@@ -5393,7 +5526,6 @@
     useEffect(function(){
       if (STORAGE_MODE !== 'supabase') return;
       if (!supabaseClient) return;
-      var channel = supabaseClient.channel('app-changes');
       var subs = [
         ['clients',           setClients,           'clients'],
         ['classes',           setClasses,           'classes'],
@@ -5408,26 +5540,44 @@
         ['trainer_time_off',  setTimeOff,           'timeOff'],
         ['announcement_banners', setAnnouncementBanners, 'announcementBanners']
       ];
-      subs.forEach(function(sub){
-        var table = sub[0]; var setter = sub[1]; var entity = sub[2];
-        channel.on('postgres_changes',
-          { event: '*', schema: 'public', table: table },
-          function(){
-            storage[entity].load().then(function(fresh){
-              if (fresh != null) setter(fresh);
-            }).catch(function(err){
-              console.error('Subscription reload failed for ' + table + ':', err);
+      /* Patch C: route through subscribeWithReconnect. Builder runs on
+         every reconnect so the rebuilt channel re-attaches all 12
+         postgres_changes listeners. setSyncStatus is the existing UI
+         dot - layered as the onStatus side-effect. */
+      function buildAppChanges(client){
+        var channel = client.channel('app-changes');
+        subs.forEach(function(sub){
+          var table = sub[0]; var setter = sub[1]; var entity = sub[2];
+          channel.on('postgres_changes',
+            { event: '*', schema: 'public', table: table },
+            function(){
+              storage[entity].load().then(function(fresh){
+                if (fresh != null) setter(fresh);
+              }).catch(function(err){
+                console.error('Subscription reload failed for ' + table + ':', err);
+              });
             });
-          });
-      });
-      channel.subscribe(function(status){
-        /* Supabase v2 emits 'SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT',
-           'CLOSED'. Map to a binary connected/disconnected for the dot. */
+        });
+        return channel;
+      }
+      var unsubscribe = subscribeWithReconnect('app-changes', buildAppChanges, function(status){
         if (status === 'SUBSCRIBED') setSyncStatus('connected');
         else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setSyncStatus('disconnected');
       });
+
+      /* Patch C: wake/online sweep. iPad sleep, wifi roam, brief
+         offline blips - any of these can leave channels stuck in a
+         non-SUBSCRIBED state. visibilitychange:visible and the global
+         online event both trigger an idempotent sweep. */
+      function onVisible(){ if (document.visibilityState === 'visible') sweepReconnectChannels('visible'); }
+      function onOnline(){ sweepReconnectChannels('online'); }
+      window.addEventListener('online', onOnline);
+      document.addEventListener('visibilitychange', onVisible);
+
       return function(){
-        try { supabaseClient.removeChannel(channel); } catch(_){}
+        unsubscribe();
+        window.removeEventListener('online', onOnline);
+        document.removeEventListener('visibilitychange', onVisible);
         setSyncStatus(STORAGE_MODE === 'supabase' ? 'disconnected' : 'idle');
       };
     }, []);
