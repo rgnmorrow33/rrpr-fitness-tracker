@@ -1774,6 +1774,60 @@
     background: var(--paper-2);
   }
 
+  /* Spec 2 (B): announcement banner. Dark navy bg + cream text per spec.
+     Renders top of every dashboard surface; not scoped under
+     .trainer-content because admin views (no .trainer-content wrapper)
+     also need to surface it. */
+  .ann-banner {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 10px 22px;
+    font-size: 13px;
+    line-height: 1.4;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--ink-2);
+  }
+  .ann-banner .ann-icon {
+    font-size: 14px;
+    color: var(--side-brand);
+    flex-shrink: 0;
+  }
+  .ann-banner .ann-body { flex: 1; min-width: 0; }
+  .ann-banner .ann-meta {
+    font-size: 11px;
+    color: var(--side-text);
+    margin-left: auto;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* Spec 2 (A): HOLIDAY chip on trainer schedule. Shows on closure dates
+     with scoped facility label so trainers know to log holiday time. */
+  .trainer-content .holiday-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--ochre-bg);
+    color: var(--ochre);
+    border: 1px solid var(--ochre);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    margin: 4px 0;
+  }
+  .trainer-content .holiday-chip .scope {
+    background: var(--ochre);
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
@@ -1979,6 +2033,26 @@
   var useEffect = React.useEffect;
   var useRef = React.useRef;
   var useMemo = React.useMemo;
+
+  /* Spec 2 (F): body scroll-lock with scrollbar-gutter reservation.
+     Modals call this on mount to prevent the underlying page from
+     scrolling, AND reserve the vanishing scrollbar's horizontal space
+     as right padding so the page doesn't shift left when the modal
+     opens. iOS Safari reproduces the shift most reliably on iPad
+     portrait. */
+  function useBodyScrollLock(){
+    useEffect(function(){
+      var prevOverflow = document.body.style.overflow;
+      var prevPad = document.body.style.paddingRight;
+      var sbW = window.innerWidth - document.documentElement.clientWidth;
+      document.body.style.overflow = 'hidden';
+      if (sbW > 0) document.body.style.paddingRight = sbW + 'px';
+      return function(){
+        document.body.style.overflow = prevOverflow;
+        document.body.style.paddingRight = prevPad;
+      };
+    }, []);
+  }
   var useCallback = React.useCallback;
 
   /* ============ STORAGE MODE + ADAPTER ============
@@ -2124,6 +2198,17 @@
     ]),
 
     closures: makeFieldTranslator([
+      ['createdAt', 'created_at'],
+      ['facility',  'facility']
+    ]),
+
+    /* Spec 2 (B): announcement banners. Single active row at a time
+       (newest by created_at wins when multiple are active); past
+       banners filtered client-side. */
+    announcementBanners: makeFieldTranslator([
+      ['startsAt',  'starts_at'],
+      ['endsAt',    'ends_at'],
+      ['createdBy', 'created_by'],
       ['createdAt', 'created_at']
     ]),
 
@@ -2640,6 +2725,7 @@
     contacts:         makeEntity('cmrc_contacts_v1', 'member_contacts', translate.contacts),
     scheduleVersions: makeEntity('cmrc_schedule_versions_v1', 'schedule_versions', translate.scheduleVersions),
     timeOff:          makeEntity('cmrc_time_off_v1', 'trainer_time_off', translate.timeOff),
+    announcementBanners: makeEntity('cmrc_announcement_banners_v1', 'announcement_banners', translate.announcementBanners),
     notifications:    notificationsStorage,
     adminPin:         makeSettingsRow('admin_pin_v1', 'admin_pin'),
     /* Sign-in session: ALWAYS localStorage-only, even when STORAGE_MODE is
@@ -2817,7 +2903,8 @@
       canRestoreDeleted: false,
       canHardDelete: false,
       canRequestTimeOff: true,
-      addTimeOff: false
+      addTimeOff: false,
+      canManageBanners: false
     },
     lead: {
       canEditOwnAttendance: true,
@@ -2848,7 +2935,8 @@
       canRestoreDeleted: false,
       canHardDelete: false,
       canRequestTimeOff: true,
-      addTimeOff: true
+      addTimeOff: true,
+      canManageBanners: true
     },
     admin: {
       canEditOwnAttendance: true,
@@ -2875,7 +2963,8 @@
       canRestoreDeleted: true,
       canHardDelete: true,
       canRequestTimeOff: true,
-      addTimeOff: true
+      addTimeOff: true,
+      canManageBanners: true
     }
   };
 
@@ -4179,13 +4268,51 @@
   /* Given a class list and a date window, return every scheduled occurrence
      (one per matching weekday within the window), annotated with whether
      that occurrence has a matching attendance log. */
-  function occurrencesInWindow(classes, startDate, endDate, closures){
-    var closureMap = {};
-    /* Sprint L commit 5: skip soft-deleted closures so a removed-then-
-       re-added closure on the same date doesn't report stale state. */
-    (closures || []).forEach(function(cl){
-      if (cl && !cl.deleted_at) closureMap[cl.date] = cl;
+  /* Spec 2 (A): facility-aware closure lookup. Returns the first matching
+     non-deleted closure for the given date+facility, or null. Used for
+     class-creation validation, attendance-log validation, and the
+     trainer-schedule HOLIDAY chip. */
+  function findFacilityClosure(closures, ymd, facility){
+    if (!closures || !ymd) return null;
+    for (var i = 0; i < closures.length; i++) {
+      var cl = closures[i];
+      if (!cl || cl.deleted_at) continue;
+      if (cl.date !== ymd) continue;
+      var fac = cl.facility || 'all';
+      if (fac === 'all' || fac === facility) return cl;
+    }
+    return null;
+  }
+  /* Spec 2 (A): all closures matching a date, regardless of facility.
+     Used by the trainer-schedule HOLIDAY chip which displays every
+     closure on that date with its scope label (per spec decision). */
+  function closuresOnDate(closures, ymd){
+    if (!closures || !ymd) return [];
+    return closures.filter(function(cl){
+      return cl && !cl.deleted_at && cl.date === ymd;
     });
+  }
+
+  function occurrencesInWindow(classes, startDate, endDate, closures){
+    /* Spec 2 (A): closures are now facility-scoped. Multiple closures can
+       coexist on the same date (e.g., separate CMRC + Baca rows). Build
+       a per-date array, then match per-class by facility ('all' or
+       location match). Soft-deleted closures are skipped. */
+    var closureMapByDate = {};
+    (closures || []).forEach(function(cl){
+      if (!cl || cl.deleted_at) return;
+      if (!closureMapByDate[cl.date]) closureMapByDate[cl.date] = [];
+      closureMapByDate[cl.date].push(cl);
+    });
+    function matchClosureForFacility(closuresForDate, facility){
+      if (!closuresForDate) return null;
+      for (var i = 0; i < closuresForDate.length; i++) {
+        var cl = closuresForDate[i];
+        var clFac = cl.facility || 'all';
+        if (clFac === 'all' || clFac === facility) return cl;
+      }
+      return null;
+    }
     var result = [];
     var cursor = new Date(startDate.getTime());
     var endMs = endDate.getTime();
@@ -4193,7 +4320,7 @@
       var idx = cursor.getDay();
       var dow = IDX_TO_DOW[idx];
       var ymd = toYMD(cursor);
-      var closure = closureMap[ymd] || null;
+      var closuresForDate = closureMapByDate[ymd] || null;
       classes.forEach(function(c){
         if (normalizeDow(c.dayOfWeek) !== dow) return;
         /* v2.2: respect optional season window. seasonStart/seasonEnd are
@@ -4202,6 +4329,7 @@
            permanently - just set seasonEnd, don't delete. */
         if (c.seasonStart && ymd < c.seasonStart) return;
         if (c.seasonEnd && ymd > c.seasonEnd) return;
+        var closure = matchClosureForFacility(closuresForDate, c.location);
         var att = (c.attendance || []).find(function(a){ return a.date === ymd; });
         var cancellation = (c.cancellations || []).find(function(x){ return x.date === ymd; });
         var assignedSub = getAssignedSubForDate(c, ymd);
@@ -5116,6 +5244,13 @@
     var timeOff = timeOffTuple[0];
     var setTimeOff = timeOffTuple[1];
 
+    /* Spec 2 (B): announcement banners. Single active banner shown at
+       a time across all dashboard surfaces; ActiveBanner picks the
+       newest active row from this list. */
+    var announcementBannersTuple = useState([]);
+    var announcementBanners = announcementBannersTuple[0];
+    var setAnnouncementBanners = announcementBannersTuple[1];
+
     /* Notifications: trainer-scoped, server-authored. No initial-load
        coordination with loadAll - the list is keyed on session.trainer_id
        and (re)loads in its own effect when sign-in resolves. No save
@@ -5158,6 +5293,7 @@
     var contactsRef = useRef(null);
     var schedVersionsRef = useRef(null);
     var timeOffRef = useRef(null);
+    var announcementBannersRef = useRef(null);
     var pinRef = useRef(null);
 
     /* Strip server-managed timestamps before stringify-comparing local
@@ -5195,6 +5331,7 @@
         storage.contacts.load(),
         storage.scheduleVersions.load(),
         storage.timeOff.load(),
+        storage.announcementBanners.load(),
         storage.adminPin.load()
       ]).then(function(r){
         /* Hydrate refs synchronously BEFORE the setX calls so the save
@@ -5211,7 +5348,8 @@
         var ct = r[8] != null ? r[8] : contacts;
         var sv = r[9] != null ? r[9] : scheduleVersions;
         var to = r[10] != null ? r[10] : timeOff;
-        var pn = r[11] != null ? r[11] : pin;
+        var ab = r[11] != null ? r[11] : announcementBanners;
+        var pn = r[12] != null ? r[12] : pin;
         trainerProfilesRef.current = t;
         clientsRef.current = c;
         classesRef.current = cl;
@@ -5223,6 +5361,7 @@
         contactsRef.current = ct;
         schedVersionsRef.current = sv;
         timeOffRef.current = to;
+        announcementBannersRef.current = ab;
         pinRef.current = pn;
         setTrainerProfiles(t);
         setClients(c);
@@ -5235,6 +5374,7 @@
         setContacts(ct);
         setScheduleVersions(sv);
         setTimeOff(to);
+        setAnnouncementBanners(ab);
         setPin(pn);
         setLoading(false);
       }).catch(function(err){
@@ -5265,7 +5405,8 @@
         ['closures',          setClosures,          'closures'],
         ['trainers',          setTrainerProfiles,   'trainers'],
         ['schedule_versions', setScheduleVersions,  'scheduleVersions'],
-        ['trainer_time_off',  setTimeOff,           'timeOff']
+        ['trainer_time_off',  setTimeOff,           'timeOff'],
+        ['announcement_banners', setAnnouncementBanners, 'announcementBanners']
       ];
       subs.forEach(function(sub){
         var table = sub[0]; var setter = sub[1]; var entity = sub[2];
@@ -5353,6 +5494,7 @@
     useEffect(function(){ _saveIfDirty(contactsRef,     contacts,         storage.contacts.save,         'contacts'); },         [contacts, loading]);
     useEffect(function(){ _saveIfDirty(schedVersionsRef, scheduleVersions, storage.scheduleVersions.save, 'scheduleVersions'); }, [scheduleVersions, loading]);
     useEffect(function(){ _saveIfDirty(timeOffRef,     timeOff,          storage.timeOff.save,          'timeOff'); },          [timeOff, loading]);
+    useEffect(function(){ _saveIfDirty(announcementBannersRef, announcementBanners, storage.announcementBanners.save, 'announcementBanners'); }, [announcementBanners, loading]);
     useEffect(function(){ _saveIfDirty(pinRef,          pin,              storage.adminPin.save,         'pin'); },              [pin, loading]);
 
     /* v2: idempotent sub-status migration. Walks every class once on mount;
@@ -6011,7 +6153,15 @@
     function addClosure(closure){
       var actor = ctxCurrentUserName() || 'unknown';
       var nowIso = new Date().toISOString();
-      var withId = Object.assign({ id: uid(), createdBy: actor }, closure);
+      /* Spec 2 (A): default facility 'all' for legacy callers. Soft-delete
+         only the prior closure on the same date+facility (so a CMRC closure
+         being re-added doesn't accidentally clear a same-day Baca closure). */
+      var withId = Object.assign({
+        id: uid(),
+        createdBy: actor,
+        facility: 'all'
+      }, closure);
+      var newFacility = withId.facility || 'all';
       var stamped = appendAuditEntry(withId, session, 'closure_added', {
         entity_type: 'closure',
         target_id: withId.id,
@@ -6020,7 +6170,8 @@
       });
       setClosures(function(list){
         var withReplaced = (list || []).map(function(x){
-          if (x.date === closure.date && !x.deleted_at) {
+          var xFac = x.facility || 'all';
+          if (x.date === withId.date && xFac === newFacility && !x.deleted_at) {
             return Object.assign({}, x, { deleted_at: nowIso, deleted_by: actor });
           }
           return x;
@@ -6028,8 +6179,16 @@
         return withReplaced.concat([stamped]);
       });
     }
-    function removeClosure(date){
-      var before = (closures || []).find(function(x){ return x.date === date && !x.deleted_at; });
+    function removeClosure(date, facility){
+      /* Spec 2 (A): facility param disambiguates same-date closures.
+         Legacy callers omit it; falls back to first non-deleted match
+         on the date. */
+      var before = (closures || []).find(function(x){
+        if (x.deleted_at) return false;
+        if (x.date !== date) return false;
+        if (facility && (x.facility || 'all') !== facility) return false;
+        return true;
+      });
       if (!before) return;
       var actor = ctxCurrentUserName() || 'unknown';
       var deleted = Object.assign({}, before, {
@@ -6088,6 +6247,37 @@
       });
       setTimeOff(function(list){
         return list.map(function(x){ return x.id === id ? stamped : x; });
+      });
+    }
+
+    /* Spec 2 (B): announcement banner mutators. Upsert covers both new
+       and edit; deactivate is a "stop now" shortcut that sets endsAt to
+       now without preserving full edit history. Delete is hard-delete
+       since these are short-lived ops broadcasts. */
+    function upsertBanner(b){
+      var hadId = !!(b && b.id);
+      var withMeta = Object.assign({ id: hadId ? b.id : uid() }, b, {
+        createdBy: b.createdBy || ctxCurrentUserName() || 'unknown',
+        createdAt: b.createdAt || new Date().toISOString()
+      });
+      setAnnouncementBanners(function(list){
+        if (hadId) return list.map(function(x){ return x.id === withMeta.id ? withMeta : x; });
+        return list.concat([withMeta]);
+      });
+      return withMeta;
+    }
+    function deactivateBanner(id){
+      var nowIso = new Date().toISOString();
+      setAnnouncementBanners(function(list){
+        return list.map(function(x){
+          if (x.id !== id) return x;
+          return Object.assign({}, x, { endsAt: nowIso });
+        });
+      });
+    }
+    function deleteBanner(id){
+      setAnnouncementBanners(function(list){
+        return list.filter(function(x){ return x.id !== id; });
       });
     }
 
@@ -7021,6 +7211,10 @@
       addClosure: addClosure,
       removeClosure: removeClosure,
       timeOff: timeOff,
+      announcementBanners: announcementBanners,
+      upsertBanner: upsertBanner,
+      deactivateBanner: deactivateBanner,
+      deleteBanner: deleteBanner,
       upsertTimeOff: upsertTimeOff,
       softDeleteTimeOff: softDeleteTimeOff,
       requestTimeOff: requestTimeOff,
@@ -7251,6 +7445,191 @@
     var date = new Date(t);
     return (date.getMonth() + 1) + '/' + date.getDate();
   }
+  /* Spec 2 (B): active announcement banner. Picks the newest row where
+     now is within [starts_at, ends_at]. Renders at the top of every
+     dashboard surface (TrainerView .trainer-content top, AdminDashboard
+     main top). Hidden when no row is active. Re-renders every minute
+     so an expiring banner auto-hides without a route change. */
+  function ActiveBanner(props){
+    var ctx = props.ctx;
+    var tickTuple = useState(0);
+    var setTick = tickTuple[1];
+    useEffect(function(){
+      var t = setInterval(function(){ setTick(function(n){ return n + 1; }); }, 60 * 1000);
+      return function(){ clearInterval(t); };
+    }, []);
+    var nowMs = Date.now();
+    var active = (ctx.announcementBanners || []).filter(function(b){
+      if (!b || !b.body) return false;
+      var s = b.startsAt ? Date.parse(b.startsAt) : null;
+      var e2 = b.endsAt ? Date.parse(b.endsAt) : null;
+      if (s != null && !isNaN(s) && nowMs < s) return false;
+      if (e2 != null && !isNaN(e2) && nowMs >= e2) return false;
+      return true;
+    }).sort(function(a, b){
+      return (b.createdAt || '') < (a.createdAt || '') ? -1 : 1;
+    });
+    if (active.length === 0) return null;
+    var b = active[0];
+    var endsLabel = '';
+    if (b.endsAt) {
+      var ed = new Date(b.endsAt);
+      if (!isNaN(ed.getTime())) {
+        endsLabel = 'until ' + ed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+          ' ' + ed.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      }
+    }
+    return e('div', { className: 'ann-banner' },
+      e('span', { className: 'ann-icon' }, '📣'),
+      e('div', { className: 'ann-body' }, b.body),
+      endsLabel && e('div', { className: 'ann-meta' }, endsLabel)
+    );
+  }
+
+  /* Spec 2 (B): banner post UI. Lead/admin only via canManageBanners.
+     Lists active + upcoming + recently expired (last 7 days) for context.
+     Single textarea + ends_at picker per spec. */
+  function BannerManagerModal(props){
+    var ctx = props.ctx;
+    var bodyTuple = useState('');
+    var body = bodyTuple[0]; var setBody = bodyTuple[1];
+    var endsAtTuple = useState(function(){
+      var d = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      var y = d.getFullYear();
+      var mo = String(d.getMonth() + 1).padStart(2, '0');
+      var da = String(d.getDate()).padStart(2, '0');
+      var hh = String(d.getHours()).padStart(2, '0');
+      var mm = String(d.getMinutes()).padStart(2, '0');
+      return y + '-' + mo + '-' + da + 'T' + hh + ':' + mm;
+    });
+    var endsAt = endsAtTuple[0]; var setEndsAt = endsAtTuple[1];
+    var errorTuple = useState(null);
+    var error = errorTuple[0]; var setError = errorTuple[1];
+
+    var nowMs = Date.now();
+    var rows = (ctx.announcementBanners || []).slice().sort(function(a, b){
+      return (b.createdAt || '') < (a.createdAt || '') ? -1 : 1;
+    });
+    var cutoff = nowMs - 7 * 24 * 60 * 60 * 1000;
+    var visibleRows = rows.filter(function(b){
+      var endMs = b.endsAt ? Date.parse(b.endsAt) : null;
+      return endMs == null || isNaN(endMs) || endMs >= cutoff;
+    });
+
+    function bannerStatus(b){
+      var s = b.startsAt ? Date.parse(b.startsAt) : null;
+      var en = b.endsAt ? Date.parse(b.endsAt) : null;
+      if (s != null && !isNaN(s) && nowMs < s) return { label: 'Upcoming', color: 'var(--brass)' };
+      if (en != null && !isNaN(en) && nowMs >= en) return { label: 'Expired', color: 'var(--slate)' };
+      return { label: 'Active', color: 'var(--moss)' };
+    }
+
+    function submit(){
+      var trimmed = body.trim();
+      if (!trimmed) { setError('Banner text required'); return; }
+      if (!endsAt) { setError('End date required'); return; }
+      var endIso = new Date(endsAt).toISOString();
+      if (isNaN(Date.parse(endIso))) { setError('Invalid end date'); return; }
+      if (Date.parse(endIso) <= Date.now()) { setError('End must be in the future'); return; }
+      setError(null);
+      ctx.upsertBanner({
+        body: trimmed,
+        startsAt: new Date().toISOString(),
+        endsAt: endIso
+      });
+      ctx.toast('Banner posted ✓');
+      setBody('');
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Announcement Banners'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px' } },
+            'Posts to every dashboard for all roles between start and end. Newest active banner wins. Past banners auto-hide after end time.'
+          ),
+          error && e('div', { className: 'banner red', style: { marginBottom: '12px' } }, error),
+          e('div', { className: 'field' },
+            e('label', null, 'Banner text *'),
+            e('textarea', {
+              value: body,
+              onChange: function(ev){ setBody(ev.target.value); },
+              rows: 3,
+              placeholder: 'Brief broadcast - e.g., "CMRC HVAC out 5/26-5/28. Use Baca."'
+            })
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Ends at *'),
+            e('input', {
+              type: 'datetime-local',
+              value: endsAt,
+              onChange: function(ev){ setEndsAt(ev.target.value); }
+            })
+          ),
+          e('div', { style: { marginBottom: '14px' } },
+            e('button', { className: 'btn btn-primary', onClick: submit }, '+ Post banner')
+          ),
+          visibleRows.length > 0 && e('h3', { style: { fontSize: '14px', marginBottom: '8px' } }, 'Recent banners'),
+          visibleRows.map(function(b){
+            var status = bannerStatus(b);
+            return e('div', {
+              key: b.id,
+              style: {
+                background: '#fff',
+                border: '1px solid var(--rule)',
+                borderRadius: '6px',
+                padding: '10px 12px',
+                marginBottom: '8px'
+              }
+            },
+              e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' } },
+                e('div', { style: { flex: 1 } },
+                  e('div', { style: { fontSize: '13px', color: 'var(--navy)' } }, b.body),
+                  e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '4px' } },
+                    'Ends ' + (b.endsAt ? new Date(b.endsAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '?') +
+                    (b.createdBy ? ' · by ' + b.createdBy : '')
+                  )
+                ),
+                e('span', {
+                  style: {
+                    fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                    background: status.color, color: '#fff', fontWeight: 700,
+                    textTransform: 'uppercase', letterSpacing: '0.04em'
+                  }
+                }, status.label)
+              ),
+              e('div', { style: { display: 'flex', gap: '6px', marginTop: '8px' } },
+                status.label === 'Active' && e('button', {
+                  className: 'btn btn-ghost btn-sm',
+                  onClick: function(){
+                    if (!window.confirm('End this banner now?')) return;
+                    ctx.deactivateBanner(b.id);
+                    ctx.toast('Banner ended', 'info');
+                  }
+                }, 'End now'),
+                e('button', {
+                  className: 'btn btn-ghost btn-sm',
+                  style: { color: 'var(--brick)' },
+                  onClick: function(){
+                    if (!window.confirm('Delete this banner permanently?')) return;
+                    ctx.deleteBanner(b.id);
+                    ctx.toast('Banner deleted', 'error');
+                  }
+                }, 'Delete')
+              )
+            );
+          })
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-primary', onClick: props.onClose }, 'Done')
+        )
+      )
+    );
+  }
+
   function NotificationsBell(props){
     var ctx = props.ctx;
     var openTuple = useState(false);
@@ -7410,6 +7789,18 @@
     var frontDeskOpen = frontDeskOpenTuple[0];
     var setFrontDeskOpen = frontDeskOpenTuple[1];
 
+    /* Spec 2 (C): consultation pre-auth booking flow. consultBooking
+       holds a draft booking that, on save, triggers the new client
+       intake modal with prefill (mirrors WRO save -> Convert to PT). */
+    var consultBookingOpenTuple = useState(false);
+    var consultBookingOpen = consultBookingOpenTuple[0]; var setConsultBookingOpen = consultBookingOpenTuple[1];
+    var consultPrefillTuple = useState(null);
+    var consultPrefill = consultPrefillTuple[0]; var setConsultPrefill = consultPrefillTuple[1];
+
+    /* Spec 2 (D): add-client pre-auth flow. Direct NewClientModal launch. */
+    var addClientOpenTuple = useState(false);
+    var addClientOpen = addClientOpenTuple[0]; var setAddClientOpen = addClientOpenTuple[1];
+
     var profiles = (ctx.trainerProfiles || []).filter(function(p){ return p.is_active !== false; });
 
     function startSignIn(profile){
@@ -7426,7 +7817,10 @@
         e('div', { className: 'tag' }, 'Clay Madsen Recreation Center')
       ),
 
-      /* Public kiosk tile - members fill out a WRO request without logging in */
+      /* Public kiosk tile - members fill out a WRO request without logging in.
+         Spec 2 (C/D): two additional pre-auth tiles for front-desk-driven
+         flows: Consultation booking and Add Client. All three share matching
+         tile styling. */
       e('div', {
         style: {
           background: 'var(--cream-2)',
@@ -7442,11 +7836,23 @@
             color: 'var(--gold)', textTransform: 'uppercase', marginBottom: '10px'
           }
         }, '✋ For Members'),
-        e('button', {
-          className: 'btn btn-gold',
-          style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
-          onClick: function(){ ctx.setSession({ role: 'kiosk_wro' }); }
-        }, '🏋  Weight Room Orientation Sign-Up')
+        e('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+          e('button', {
+            className: 'btn btn-gold',
+            style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
+            onClick: function(){ ctx.setSession({ role: 'kiosk_wro' }); }
+          }, '🏋  Weight Room Orientation Sign-Up'),
+          e('button', {
+            className: 'btn btn-gold',
+            style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
+            onClick: function(){ setConsultBookingOpen(true); }
+          }, '💬  Book a Consultation'),
+          e('button', {
+            className: 'btn btn-gold',
+            style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
+            onClick: function(){ setAddClientOpen(true); }
+          }, '👤  Add New Client')
+        )
       ),
 
       e('h2', { style: { margin: '0 0 6px', fontSize: '18px', color: 'var(--slate)' } }, 'Trainer / Admin Login'),
@@ -7502,7 +7908,171 @@
           });
         },
         onFail: function(){ ctx.toast('Wrong PIN', 'error'); }
+      }),
+
+      /* Spec 2 (C): consultation booking intake. On save, transitions to
+         the new-client intake modal with prefill (consult package
+         preselected). Mirror's WRO Convert-to-PT pattern. */
+      consultBookingOpen && e(NewConsultationModal, {
+        ctx: ctx,
+        onClose: function(){ setConsultBookingOpen(false); },
+        onSave: function(booking){
+          setConsultBookingOpen(false);
+          var pkgId = booking.location === 'Baca' ? 'baca-consult' : 'cmrc-consult';
+          setConsultPrefill({
+            name: booking.name,
+            phone: booking.phone,
+            email: booking.email,
+            location: booking.location,
+            referralSource: 'consultation',
+            pkgId: pkgId,
+            preferredDate: booking.preferredDate,
+            preferredTime: booking.preferredTime,
+            notes: booking.notes
+          });
+        }
+      }),
+      consultPrefill && e(NewClientModal, {
+        ctx: ctx,
+        prefill: consultPrefill,
+        onClose: function(){ setConsultPrefill(null); },
+        onCreate: function(c){
+          /* Front Desk attribution when no session is active. */
+          var stamped = ctx.session ? c : Object.assign({}, c, { createdBy: 'Front Desk' });
+          ctx.auditedUpsertClient(stamped, 'create');
+          setConsultPrefill(null);
+          ctx.toast('Consultation booked · client created ✓');
+        }
+      }),
+
+      /* Spec 2 (D): add-client pre-auth modal. Direct NewClientModal
+         launch with Front Desk attribution. */
+      addClientOpen && e(NewClientModal, {
+        ctx: ctx,
+        onClose: function(){ setAddClientOpen(false); },
+        onCreate: function(c){
+          var stamped = ctx.session ? c : Object.assign({}, c, { createdBy: 'Front Desk' });
+          ctx.auditedUpsertClient(stamped, 'create');
+          setAddClientOpen(false);
+          ctx.toast('Client created ✓');
+        }
       })
+    );
+  }
+
+  /* ============ NEW CONSULTATION MODAL (Spec 2) ============
+     Brief booking intake for the pre-auth Consultation tile. Captures
+     basic contact + preferred date/time so the front desk can submit
+     even if the prospective client walks before the full intake. On
+     save, the parent (Login) opens NewClientModal with these fields
+     prefilled and the location's consult package preselected. */
+  function NewConsultationModal(props){
+    var ctx = props.ctx;
+    var nameTuple = useState('');
+    var name = nameTuple[0]; var setName = nameTuple[1];
+    var phoneTuple = useState('');
+    var phone = phoneTuple[0]; var setPhone = phoneTuple[1];
+    var emailTuple = useState('');
+    var email = emailTuple[0]; var setEmail = emailTuple[1];
+    var locationTuple = useState('CMRC');
+    var location = locationTuple[0]; var setLocation = locationTuple[1];
+    var dateTuple = useState(todayStr());
+    var date = dateTuple[0]; var setDate = dateTuple[1];
+    var timeTuple = useState('10:00');
+    var time = timeTuple[0]; var setTime = timeTuple[1];
+    var notesTuple = useState('');
+    var notes = notesTuple[0]; var setNotes = notesTuple[1];
+    var errorTuple = useState(null);
+    var error = errorTuple[0]; var setError = errorTuple[1];
+
+    function submit(){
+      if (!name.trim()) { setError('Name required'); return; }
+      if (!phone.trim() && !email.trim()) {
+        setError('At least one of phone or email required'); return;
+      }
+      setError(null);
+      props.onSave({
+        name: name.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        location: location,
+        preferredDate: date,
+        preferredTime: time,
+        notes: notes.trim()
+      });
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Book a Consultation'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Quick booking for a 45-minute fitness consultation. After save, finish the new-client intake to lock in the appointment.'
+          ),
+          error && e('div', { className: 'banner red', style: { marginBottom: '12px' } }, error),
+          e('div', { className: 'field' },
+            e('label', null, 'Full name *'),
+            e('input', { value: name, onChange: function(ev){ setName(ev.target.value); }, placeholder: 'First Last' })
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Phone'),
+              e('input', { type: 'tel', value: phone, onChange: function(ev){ setPhone(ev.target.value); }, placeholder: '(512) 555-1234' })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Email'),
+              e('input', { type: 'email', value: email, onChange: function(ev){ setEmail(ev.target.value); }, placeholder: 'name@example.com' })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Facility'),
+            e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+              ['CMRC', 'Baca'].map(function(loc){
+                var active = location === loc;
+                return e('button', {
+                  key: loc,
+                  type: 'button',
+                  onClick: function(){ setLocation(loc); },
+                  style: {
+                    padding: '8px 14px', borderRadius: '999px',
+                    border: '1.5px solid ' + (active ? 'var(--navy)' : 'var(--border)'),
+                    background: active ? 'var(--navy)' : '#fff',
+                    color: active ? '#fff' : 'var(--slate)',
+                    fontWeight: 600, fontSize: '13px',
+                    cursor: 'pointer'
+                  }
+                }, loc);
+              })
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Preferred date'),
+              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Preferred time'),
+              e('input', { type: 'time', value: time, onChange: function(ev){ setTime(ev.target.value); } })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Notes (optional)'),
+            e('textarea', {
+              value: notes,
+              onChange: function(ev){ setNotes(ev.target.value); },
+              rows: 3,
+              placeholder: 'Goals, mobility flags, scheduling constraints...'
+            })
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-primary', onClick: submit }, 'Continue to Intake →')
+        )
+      )
     );
   }
 
@@ -7906,6 +8476,9 @@
     var sessionDetail = sessionDetailTuple[0]; var setSessionDetail = sessionDetailTuple[1];
     var recoveryTargetTuple = useState(null);
     var recoveryTarget = recoveryTargetTuple[0]; var setRecoveryTarget = recoveryTargetTuple[1];
+    /* Spec 2 (E): time-off request launcher state on the Today view. */
+    var requestTimeOffOpenTuple = useState(false);
+    var requestTimeOffOpen = requestTimeOffOpenTuple[0]; var setRequestTimeOffOpen = requestTimeOffOpenTuple[1];
 
     /* Today's class occurrences */
     var todayOccs = useMemo(function(){
@@ -7999,12 +8572,29 @@
 
     return e('div', null,
       /* Phase 3b-B: simplified date headline (gradient hero retired).
-         Suppressed in compact mode (stacked "All trainers" view). */
+         Suppressed in compact mode (stacked "All trainers" view).
+         Spec 2 (A): HOLIDAY chips for any closures on today's date so
+         trainers see them on landing. */
       !compact && e('div', { style: { marginBottom: '14px' } },
         e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--slate)', fontWeight: 600 } }, 'Today'),
         e('div', { style: { fontFamily: 'var(--serif)', fontSize: '24px', color: 'var(--navy)', lineHeight: 1.15, marginTop: '2px' } },
           todayDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
-        )
+        ),
+        (function(){
+          var todayClosures = closuresOnDate(ctx.closures || [], todayYMD);
+          if (todayClosures.length === 0) return null;
+          return e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' } },
+            todayClosures.map(function(cl){
+              var fac = cl.facility || 'all';
+              var facLabel = fac === 'all' ? 'All facilities' : fac;
+              return e('span', { key: cl.id || (todayYMD + ':' + fac), className: 'holiday-chip' },
+                'HOLIDAY',
+                e('span', { style: { color: 'var(--slate)', fontWeight: 500 } }, '· ' + (cl.reason || 'Closed')),
+                e('span', { className: 'scope' }, facLabel)
+              );
+            })
+          );
+        })()
       ),
 
       /* Phase 3b-B: .tstats strip derived from existing summary. Pay-period
@@ -8053,6 +8643,22 @@
           })
         );
       })(),
+
+      /* Spec 2 (E): secondary Request Time Off launcher on Today view.
+         Outline so it doesn't fight with primary tab actions; visible
+         to all tiers (canRequestTimeOff is T/T/T). */
+      !compact && ctx.can('canRequestTimeOff') && e('div', {
+        style: { marginBottom: '14px', display: 'flex', justifyContent: 'flex-end' }
+      },
+        e('button', {
+          className: 'btn btn-outline btn-sm',
+          onClick: function(){ setRequestTimeOffOpen(true); }
+        }, '+ Request Time Off')
+      ),
+      requestTimeOffOpen && e(TimeOffRequestModal, {
+        ctx: ctx,
+        onClose: function(){ setRequestTimeOffOpen(false); }
+      }),
 
       /* Weekly hours dashboard - shared with the Time Card page. Hidden
          in compact stacked mode. */
@@ -8521,6 +9127,10 @@
       var gxList = gxByDate[ymd] || [];
       var ptList = ptByDate[ymd] || [];
       var wroList = wrosByDate[ymd] || [];
+      /* Spec 2 (A): HOLIDAY chips for closures on this date. Show every
+         non-deleted closure with its scope label - lets trainers self-
+         filter without us deriving a facility set. */
+      var dayClosures = closuresOnDate(ctx.closures || [], ymd);
       var hasAny = gxList.length + ptList.length + wroList.length > 0;
       days.push(e('div', {
         key: ymd,
@@ -8532,9 +9142,20 @@
           marginBottom: '10px'
         }
       },
-        e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: hasAny ? '8px' : '0' } },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: (hasAny || dayClosures.length) ? '8px' : '0', flexWrap: 'wrap' } },
           e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, dayLabel),
           isToday && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '999px', background: 'var(--teal)', color: '#fff', fontWeight: 700, letterSpacing: '0.05em' } }, 'TODAY')
+        ),
+        dayClosures.length > 0 && e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: hasAny ? '8px' : '0' } },
+          dayClosures.map(function(cl){
+            var fac = cl.facility || 'all';
+            var facLabel = fac === 'all' ? 'All facilities' : fac;
+            return e('span', { key: cl.id || (ymd + ':' + fac), className: 'holiday-chip' },
+              'HOLIDAY',
+              e('span', { style: { color: 'var(--slate)', fontWeight: 500 } }, '· ' + (cl.reason || 'Closed')),
+              e('span', { className: 'scope' }, facLabel)
+            );
+          })
         ),
         hasAny
           ? e('div', null,
@@ -8542,7 +9163,7 @@
               ptList.map(function(it){ return safeRender('pt-' + (it.session && it.session.id), function(){ return ptCard(it); }); }),
               wroList.map(function(w){ return safeRender('wro-' + w.id, function(){ return wroCard(w); }); })
             )
-          : e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No sessions or classes')
+          : !dayClosures.length && e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No sessions or classes')
       ));
     }
 
@@ -9456,6 +10077,11 @@
     var timeOffOpenTuple = useState(false);
     var timeOffOpen = timeOffOpenTuple[0]; var setTimeOffOpen = timeOffOpenTuple[1];
 
+    /* Spec 2 (B): banner manager modal state. Lead/admin only via
+       canManageBanners. */
+    var bannersOpenTuple = useState(false);
+    var bannersOpen = bannersOpenTuple[0]; var setBannersOpen = bannersOpenTuple[1];
+
     /* Phase 3b-A2: team-hours master-detail. selectedTrainerForTeamHours
        names the trainer whose card is open via TeamHoursView drill-down.
        Cleared on every navigate() call so re-tapping the tab returns to
@@ -9609,6 +10235,10 @@
           e('div', { className: 'title' }, headerContext.title)
         )
       ),
+      /* Spec 2 (B): active announcement banner. Renders before
+         .trainer-content so the dark navy strip sits flush below the
+         trainer chrome. */
+      e(ActiveBanner, { ctx: ctx }),
       e('div', { className: 'trainer-content' },
         /* v2.6: Notification bar shows on every tab except time_card.
            Surfaces available pickups across categories. */
@@ -9672,7 +10302,11 @@
           ctx.can('addTimeOff') && e('button', {
             className: 'btn btn-outline btn-sm',
             onClick: function(){ setTimeOffOpen(true); }
-          }, 'Time Off')
+          }, 'Time Off'),
+          ctx.can('canManageBanners') && e('button', {
+            className: 'btn btn-outline btn-sm',
+            onClick: function(){ setBannersOpen(true); }
+          }, 'Banner')
         ),
         /* Compact pay-period summary chip (suppressed on today + time_card
            tabs - today shows its own bigger summary, time card is the full
@@ -9756,6 +10390,11 @@
       timeOffOpen && e(TimeOffManagerModal, {
         ctx: ctx,
         onClose: function(){ setTimeOffOpen(false); }
+      }),
+      /* Spec 2 (B): banner manager (lead/admin via canManageBanners) */
+      bannersOpen && e(BannerManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setBannersOpen(false); }
       })
     );
   }
@@ -11000,13 +11639,17 @@
       var initialLoc = prefill.location || 'CMRC';
       var initialList = getPackagesForFacility(initialLoc).list;
       var initialDefault = initialList.find(function(t){ return t.sessions === 5; }) || initialList[Math.min(3, initialList.length - 1)];
+      /* Spec 2 (C): allow prefill.pkgId to preselect a package template
+         (used by the consultation pre-auth flow). Falls back to the
+         5-session default when absent or unmatched. */
+      var prefillPkg = prefill.pkgId && initialList.find(function(t){ return t.id === prefill.pkgId; });
       return {
         name: prefill.name || '',
         phone: prefill.phone || '',
         email: prefill.email || '',
         location: initialLoc,
         datePurchased: todayStr(),
-        pkgId: initialDefault.id,
+        pkgId: prefillPkg ? prefillPkg.id : initialDefault.id,
         paymentType: 'Card',
         teamMember: '',
         membershipVerified: false,
@@ -12682,6 +13325,21 @@
       if (form.seasonStart && form.seasonEnd && form.seasonEnd < form.seasonStart) {
         ctx.toast('Season end must be on or after season start', 'error'); return;
       }
+      /* Spec 2 (A): block class creation when seasonStart falls on a
+         facility-matched closure date. */
+      if (form.seasonStart) {
+        var blockingClosure = findFacilityClosure(ctx.closures || [], form.seasonStart, form.location);
+        if (blockingClosure) {
+          var fac = blockingClosure.facility || 'all';
+          var facLabel = fac === 'all' ? 'all facilities' : fac;
+          ctx.toast(
+            'Cannot start a class on ' + formatShort(parseYMD(form.seasonStart)) +
+            ' - ' + (blockingClosure.reason || 'closure') + ' (' + facLabel + ').',
+            'error'
+          );
+          return;
+        }
+      }
       var out;
       if (isEdit) {
         out = Object.assign({}, existing, {
@@ -12909,6 +13567,18 @@
     function submit(){
       var n = parseInt(headcount, 10);
       if (isNaN(n) || n < 0) { ctx.toast('Enter a valid headcount', 'error'); return; }
+      /* Spec 2 (A): block attendance log on a facility-matched closure. */
+      var blockingClosure = findFacilityClosure(ctx.closures || [], date, props.cls.location);
+      if (blockingClosure) {
+        var fac = blockingClosure.facility || 'all';
+        var facLabel = fac === 'all' ? 'all facilities' : fac;
+        ctx.toast(
+          'Cannot log attendance on ' + formatShort(parseYMD(date)) +
+          ' - ' + (blockingClosure.reason || 'closure') + ' (' + facLabel + ').',
+          'error'
+        );
+        return;
+      }
       var att = {
         id: uid(),
         date: date,
@@ -14227,16 +14897,19 @@
           letterSpacing: '0.02em'
         }
       }, 'Viewing time card for ' + trainerName + '. Read-only.'),
-      /* Spec 1 (B): Request time off entry point. Visible to all tiers
-         that have canRequestTimeOff (trainer/lead/admin). Hidden in
-         read-only mode (lead/admin viewing someone else's card). */
+      /* Spec 1 (B) / Spec 2 (E): Request time off entry point. Visible
+         to all tiers that have canRequestTimeOff (trainer/lead/admin).
+         Hidden in read-only mode (lead/admin viewing someone else's
+         card). Spec 2 polish: more prominent (primary, full-width on
+         mobile, top of view) since smoke surfaced it was easy to miss. */
       !isReadOnly && ctx.can('canRequestTimeOff') && e('div', {
-        style: { marginBottom: '14px', display: 'flex', justifyContent: 'flex-end' }
+        style: { marginBottom: '14px' }
       },
         e('button', {
-          className: 'btn btn-outline btn-sm',
+          className: 'btn btn-primary',
+          style: { width: '100%' },
           onClick: function(){ setRequestOpen(true); }
-        }, '+ Request time off')
+        }, '+ Request Time Off')
       ),
       requestOpen && e(TimeOffRequestModal, {
         ctx: ctx,
@@ -17161,6 +17834,9 @@
             onClick: function(){ ctx.setSession(null); }
           }, 'Sign out')
         }),
+        /* Spec 2 (B): active announcement banner sits below the topbar
+           so it persists across admin navigation. */
+        e(ActiveBanner, { ctx: ctx }),
         e('div', { className: 'content' },
           /* Cleanup-B: domain pills + admin tab strip removed. Sidebar
              drives all admin nav now; AdminOverview's "today details"
@@ -20000,6 +20676,11 @@
     var w = props.wro;
     var existing = w.post || {};
 
+    /* Spec 2 (F): scroll-lock the body while the orientation form is open.
+       Reserves the vanishing scrollbar's gutter so the underlying page
+       doesn't shift left when the modal mounts. */
+    useBodyScrollLock();
+
     /* v2.5: auto-claim on modal open if the form is incomplete and the
        trainer hasn't already claimed it. This way the team can see who's
        working on it even if the trainer leaves the form mid-flow. */
@@ -21581,34 +22262,50 @@
       var conflicts = [];
       var cursor = new Date(startD.getFullYear(), startD.getMonth(), startD.getDate());
       var lastDay = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate());
+      /* Spec 2 (A): closures are per-facility. Skip a class only if the
+         closure on that date covers its facility ('all' or location match). */
+      var closuresByDate = {};
+      (ctx.closures || []).forEach(function(cl){
+        if (!cl || cl.deleted_at) return;
+        if (!closuresByDate[cl.date]) closuresByDate[cl.date] = [];
+        closuresByDate[cl.date].push(cl);
+      });
+      function isFacilityClosed(ymd, facility){
+        var list = closuresByDate[ymd];
+        if (!list) return false;
+        for (var i = 0; i < list.length; i++) {
+          var fac = list[i].facility || 'all';
+          if (fac === 'all' || fac === facility) return true;
+        }
+        return false;
+      }
       while (cursor.getTime() <= lastDay.getTime()) {
         var ymd = toYMD(cursor);
         var dow = IDX_TO_DOW[cursor.getDay()];
-        if (!(ctx.closures || []).some(function(cl){ return cl.date === ymd; })) {
-          (ctx.classes || []).forEach(function(c){
-            if (!c || c.deleted_at) return;
-            if (!trainerNameMatches(trainerName, c.instructor)) return;
-            if (normalizeDow(c.dayOfWeek) !== dow) return;
-            if (c.seasonStart && ymd < c.seasonStart) return;
-            if (c.seasonEnd && ymd > c.seasonEnd) return;
-            if ((c.cancellations || []).some(function(x){ return x.date === ymd; })) return;
-            var existingSub = (c.subAssignments || []).find(function(s){ return s.date === ymd; });
-            if (existingSub) {
-              var st = existingSub.status;
-              if (st === 'claimed' || st === 'approved') return;
-            }
-            var clsStart = new Date(ymd + 'T' + (c.startTime || '00:00') + ':00');
-            var clsEnd = new Date(ymd + 'T' + (c.endTime || c.startTime || '23:59') + ':00');
-            if (clsEnd < startD || clsStart > endD) return;
-            conflicts.push({
-              cls: c, ymd: ymd,
-              startTime: c.startTime || '',
-              endTime: c.endTime || '',
-              location: c.location || '',
-              alreadyOpen: !!(existingSub && existingSub.status === 'open')
-            });
+        (ctx.classes || []).forEach(function(c){
+          if (!c || c.deleted_at) return;
+          if (!trainerNameMatches(trainerName, c.instructor)) return;
+          if (normalizeDow(c.dayOfWeek) !== dow) return;
+          if (c.seasonStart && ymd < c.seasonStart) return;
+          if (c.seasonEnd && ymd > c.seasonEnd) return;
+          if (isFacilityClosed(ymd, c.location)) return;
+          if ((c.cancellations || []).some(function(x){ return x.date === ymd; })) return;
+          var existingSub = (c.subAssignments || []).find(function(s){ return s.date === ymd; });
+          if (existingSub) {
+            var st = existingSub.status;
+            if (st === 'claimed' || st === 'approved') return;
+          }
+          var clsStart = new Date(ymd + 'T' + (c.startTime || '00:00') + ':00');
+          var clsEnd = new Date(ymd + 'T' + (c.endTime || c.startTime || '23:59') + ':00');
+          if (clsEnd < startD || clsStart > endD) return;
+          conflicts.push({
+            cls: c, ymd: ymd,
+            startTime: c.startTime || '',
+            endTime: c.endTime || '',
+            location: c.location || '',
+            alreadyOpen: !!(existingSub && existingSub.status === 'open')
           });
-        }
+        });
         cursor.setDate(cursor.getDate() + 1);
       }
       return conflicts;
@@ -22031,17 +22728,30 @@
     var reasonTuple = useState('Holiday');
     var reason = reasonTuple[0];
     var setReason = reasonTuple[1];
+    /* Spec 2 (A): facility scope. 'all' is the default since most
+       holidays affect both buildings; CMRC/Baca for single-building
+       closures (HVAC, painting, etc.). */
+    var facilityTuple = useState('all');
+    var facility = facilityTuple[0]; var setFacility = facilityTuple[1];
+
+    function facilityLabel(f){
+      if (f === 'CMRC') return 'CMRC';
+      if (f === 'Baca') return 'Baca';
+      return 'All facilities';
+    }
 
     function add(){
       if (!date) { ctx.toast('Pick a date', 'error'); return; }
-      ctx.addClosure({ date: date, reason: reason || 'Closed' });
+      ctx.addClosure({ date: date, reason: reason || 'Closed', facility: facility });
       ctx.toast('Closure added ✓');
       setDate(todayStr());
       setReason('Holiday');
+      setFacility('all');
     }
-    function remove(d){
-      if (!window.confirm('Remove closure for ' + formatShort(parseYMD(d)) + '?')) return;
-      ctx.removeClosure(d);
+    function remove(cl){
+      var label = formatShort(parseYMD(cl.date)) + ' · ' + facilityLabel(cl.facility || 'all');
+      if (!window.confirm('Remove closure for ' + label + '?')) return;
+      ctx.removeClosure(cl.date, cl.facility || 'all');
       ctx.toast('Closure removed', 'error');
     }
 
@@ -22049,7 +22759,10 @@
     var auditTargetTuple = useState(null);
     var auditTarget = auditTargetTuple[0]; var setAuditTarget = auditTargetTuple[1];
     var sorted = (ctx.closures || []).filter(function(c){ return !c.deleted_at; })
-      .slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; });
+      .slice().sort(function(a,b){
+        if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+        return (a.facility || 'all') < (b.facility || 'all') ? -1 : 1;
+      });
 
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
@@ -22059,7 +22772,7 @@
         ),
         e('div', { className: 'modal-body' },
           e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
-            'Closed dates won\'t generate scheduled occurrences in the audit. Use for holidays and full facility closures.'
+            'Closed dates won\'t generate scheduled occurrences in the audit. Use for holidays and full facility closures. Pick a single building to scope a partial closure (e.g., HVAC at CMRC only).'
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
@@ -22071,15 +22784,48 @@
               e('input', { value: reason, onChange: function(ev){ setReason(ev.target.value); }, placeholder: 'E.g. Memorial Day' })
             )
           ),
+          e('div', { className: 'field' },
+            e('label', null, 'Facility'),
+            e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+              ['all', 'CMRC', 'Baca'].map(function(f){
+                var active = facility === f;
+                return e('button', {
+                  key: f,
+                  type: 'button',
+                  onClick: function(){ setFacility(f); },
+                  style: {
+                    padding: '8px 14px', borderRadius: '999px',
+                    border: '1.5px solid ' + (active ? 'var(--navy)' : 'var(--border)'),
+                    background: active ? 'var(--navy)' : '#fff',
+                    color: active ? '#fff' : 'var(--slate)',
+                    fontWeight: 600, fontSize: '13px',
+                    cursor: 'pointer'
+                  }
+                }, facilityLabel(f));
+              })
+            )
+          ),
           e('div', { style: { marginBottom: '14px' } },
             e('button', { className: 'btn btn-primary', onClick: add }, '+ Add Closure')
           ),
           sorted.length === 0
             ? e('div', { style: { color: 'var(--slate)', fontStyle: 'italic', fontSize: '13px' } }, 'No closures recorded.')
             : sorted.map(function(cl){
-                return e('div', { key: cl.id || cl.date, className: 'list-row' },
+                var fac = cl.facility || 'all';
+                return e('div', { key: cl.id || (cl.date + ':' + fac), className: 'list-row' },
                   e('div', null,
-                    e('div', { style: { fontWeight: 700 } }, formatShort(parseYMD(cl.date))),
+                    e('div', { style: { fontWeight: 700 } },
+                      formatShort(parseYMD(cl.date)),
+                      e('span', {
+                        style: {
+                          marginLeft: '8px', fontSize: '10px',
+                          padding: '2px 8px', borderRadius: '999px',
+                          background: fac === 'all' ? 'var(--navy)' : (fac === 'CMRC' ? 'var(--teal)' : 'var(--brass-soft)'),
+                          color: '#fff', fontWeight: 700,
+                          textTransform: 'uppercase', letterSpacing: '0.04em'
+                        }
+                      }, facilityLabel(fac))
+                    ),
                     e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, cl.reason || 'Closed')
                   ),
                   e('div', { style: { display: 'flex', gap: '6px' } },
@@ -22088,7 +22834,7 @@
                       title: 'View audit history',
                       onClick: function(){ setAuditTarget(cl); }
                     }, '📜'),
-                    e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(cl.date); } }, '✕')
+                    e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(cl); } }, '✕')
                   )
                 );
               })
@@ -22133,6 +22879,11 @@
     var timeOffOpenTuple = useState(false);
     var timeOffOpen = timeOffOpenTuple[0];
     var setTimeOffOpen = timeOffOpenTuple[1];
+
+    /* Spec 2 (B): banner manager modal state. */
+    var bannersOpenTuple = useState(false);
+    var bannersOpen = bannersOpenTuple[0];
+    var setBannersOpen = bannersOpenTuple[1];
 
     var cancelTargetTuple = useState(null); /* { cls, date } */
     var cancelTarget = cancelTargetTuple[0];
@@ -22832,6 +23583,8 @@
             'Closures (' + ((ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length) + ')'),
           ctx.can('addTimeOff') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setTimeOffOpen(true); } },
             'Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
+          ctx.can('canManageBanners') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setBannersOpen(true); } },
+            'Banners'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
         )
       ),
@@ -22874,6 +23627,10 @@
       timeOffOpen && e(TimeOffManagerModal, {
         ctx: ctx,
         onClose: function(){ setTimeOffOpen(false); }
+      }),
+      bannersOpen && e(BannerManagerModal, {
+        ctx: ctx,
+        onClose: function(){ setBannersOpen(false); }
       }),
       cancelTarget && e(CancelClassModal, {
         ctx: ctx,
