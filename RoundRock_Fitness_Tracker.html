@@ -1723,6 +1723,57 @@
     .trainer-content .t-session-title { font-size: 13.5px; }
   }
 
+  /* Spec 1: Mon-Sat per-day hours strip. Used on TrainerToday and (via
+     .tbl) inside TeamHoursView. The standalone strip variant is a
+     6-column grid with today highlighted via .is-today. */
+  .trainer-content .week-strip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .trainer-content .week-strip .day {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 8px 6px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .trainer-content .week-strip .day.is-today {
+    background: var(--brass-soft);
+    border-color: var(--brass);
+    color: #fff;
+  }
+  .trainer-content .week-strip .day.is-today .day-label,
+  .trainer-content .week-strip .day.is-today .day-hours,
+  .trainer-content .week-strip .day.is-today .day-date {
+    color: #fff;
+  }
+  .trainer-content .week-strip .day-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--slate);
+    font-weight: 600;
+  }
+  .trainer-content .week-strip .day-date {
+    font-size: 11px;
+    color: var(--slate-soft);
+  }
+  .trainer-content .week-strip .day-hours {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+  }
+  .trainer-content .tbl .col-today {
+    background: var(--paper-2);
+  }
+
   /* sub-queue badge */
   .subq-badge {
     display: inline-flex;
@@ -2267,14 +2318,20 @@
        is a pre-existing latent shape mismatch with appendAuditEntry; not
        fixed here.) */
     timeOff: makeFieldTranslator([
-      ['trainerId',  'trainer_id'],
-      ['startAt',    'start_at'],
-      ['endAt',      'end_at'],
-      ['allDay',     'all_day'],
-      ['createdBy',  'created_by'],
-      ['deletedAt',  'deleted_at'],
-      ['deletedBy',  'deleted_by'],
-      ['createdAt',  'created_at']
+      ['trainerId',    'trainer_id'],
+      ['startAt',      'start_at'],
+      ['endAt',        'end_at'],
+      ['allDay',       'all_day'],
+      ['createdBy',    'created_by'],
+      ['deletedAt',    'deleted_at'],
+      ['deletedBy',    'deleted_by'],
+      ['createdAt',    'created_at'],
+      /* Spec 1: request-flow columns. status is 'pending' | 'approved' | 'denied'.
+         Existing rows default to 'approved' on the DB side so legacy entries
+         skip the new approval workflow. kind already round-trips as passthrough. */
+      ['decidedBy',    'decided_by'],
+      ['decidedAt',    'decided_at'],
+      ['decisionNote', 'decision_note']
     ])
   };
 
@@ -2741,6 +2798,7 @@
       canRequestSub: true,
       canClaimSub: true,
       canAddClient: false,
+      canAddClass: false,
       canAddPackage: false,
       canEditClient: false,
       canEditPackage: false,
@@ -2758,6 +2816,7 @@
       canViewAuditHistory: false,
       canRestoreDeleted: false,
       canHardDelete: false,
+      canRequestTimeOff: true,
       addTimeOff: false
     },
     lead: {
@@ -2766,6 +2825,7 @@
       canRequestSub: true,
       canClaimSub: true,
       canAddClient: true,
+      canAddClass: true,
       canAddPackage: true,
       canEditClient: true,
       canEditPackage: true,
@@ -2787,6 +2847,7 @@
       canViewAuditHistory: false,
       canRestoreDeleted: false,
       canHardDelete: false,
+      canRequestTimeOff: true,
       addTimeOff: true
     },
     admin: {
@@ -2795,6 +2856,7 @@
       canRequestSub: true,
       canClaimSub: true,
       canAddClient: true,
+      canAddClass: true,
       canAddPackage: true,
       canEditClient: true,
       canEditPackage: true,
@@ -2812,6 +2874,7 @@
       canViewAuditHistory: true,
       canRestoreDeleted: true,
       canHardDelete: true,
+      canRequestTimeOff: true,
       addTimeOff: true
     }
   };
@@ -4561,6 +4624,98 @@
     };
   }
 
+  /* Spec 1: per-day Mon-Sat breakdown for the trainer Today strip and
+     the Team Hours master list. monStartDate is a Date pinned to Monday
+     of the target week. Each cell sums forward-facing hours (GX
+     attended/scheduled + PT logged) plus any manual admin items dated
+     on that day. Saturday additionally absorbs the week's full auto-
+     admin total per spec E ("Saturday roll-up"), since auto-admin has
+     no per-day attribution otherwise. */
+  function calcWeekHoursByDay(trainerName, monStartDate, ctx){
+    var labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var days = labels.map(function(lbl, i){
+      var d = addDays(monStartDate, i);
+      return {
+        ymd: toYMD(d),
+        label: lbl,
+        date: d,
+        hours: 0,
+        forwardFacing: 0,
+        manualAdmin: 0,
+        autoAdmin: 0
+      };
+    });
+    function bumpForwardFacing(ymd, hrs){
+      for (var i = 0; i < days.length; i++) {
+        if (days[i].ymd === ymd) { days[i].forwardFacing += hrs; return; }
+      }
+    }
+    function bumpManualAdmin(ymd, hrs){
+      for (var i = 0; i < days.length; i++) {
+        if (days[i].ymd === ymd) { days[i].manualAdmin += hrs; return; }
+      }
+    }
+
+    /* GX forward-facing: attended classes (not cancelled, not closure). */
+    var weekStartYMD = days[0].ymd;
+    var weekEndYMD = days[days.length - 1].ymd;
+    (ctx.classes || []).forEach(function(c){
+      (c.attendance || []).forEach(function(a){
+        if (a.cancelled) return;
+        if (!a.date || a.date < weekStartYMD || a.date > weekEndYMD) return;
+        var actual = a.actualInstructor || a.instructor || c.instructor;
+        if (!trainerNameMatches(trainerName, actual)) return;
+        bumpForwardFacing(a.date, attendanceDurationHours(c, a));
+      });
+    });
+
+    /* PT forward-facing: only attended counts. */
+    (ctx.clients || []).forEach(function(client){
+      (client.sessions || []).forEach(function(s){
+        if (s.status !== 'attended') return;
+        if (!s.date || s.date < weekStartYMD || s.date > weekEndYMD) return;
+        var sessTrainer = s.trainerName || client.trainerName;
+        if (!trainerNameMatches(trainerName, sessTrainer)) return;
+        var dur = (typeof s.durationHours === 'number' && s.durationHours > 0) ? s.durationHours : 1;
+        bumpForwardFacing(s.date, dur);
+      });
+    });
+
+    /* Manual admin items - per-day attribution by item.date. */
+    (ctx.items || []).forEach(function(it){
+      if (!it.date || it.date < weekStartYMD || it.date > weekEndYMD) return;
+      var matches = (it.assignees || []).some(function(n){ return trainerNameMatches(trainerName, n); });
+      if (!matches) return;
+      bumpManualAdmin(it.date, typeof it.hours === 'number' ? it.hours : 0);
+    });
+
+    /* Auto-admin: 0.25 x week's forward-facing total, parked on Saturday
+       per spec E. Saturday's hours = forward-facing-on-Sat + auto-admin. */
+    var weekForwardTotal = days.reduce(function(s, d){ return s + d.forwardFacing; }, 0);
+    var autoAdminTotal = autoAdminHours(weekForwardTotal);
+    days[5].autoAdmin = autoAdminTotal;
+
+    days.forEach(function(d){
+      d.hours = Math.round((d.forwardFacing + d.manualAdmin + d.autoAdmin) * 100) / 100;
+    });
+    return {
+      days: days,
+      total: Math.round(days.reduce(function(s, d){ return s + d.hours; }, 0) * 100) / 100,
+      autoAdminTotal: autoAdminTotal
+    };
+  }
+
+  /* Helper: Monday of the week containing the given date. Used by Today
+     and Team Hours per-day strips (Mon-Sat per spec). */
+  function mondayOf(date){
+    var d = new Date(date.getTime());
+    d.setHours(0, 0, 0, 0);
+    var dow = d.getDay(); /* 0=Sun..6=Sat */
+    var deltaToMonday = dow === 0 ? -6 : (1 - dow); /* Sun->-6, Mon->0, Tue->-1, ... */
+    d.setDate(d.getDate() + deltaToMonday);
+    return d;
+  }
+
   /* Shared weekly hours dashboard panel. Renders Sun-Sat single-week
      scheduled vs logged with two progress bars (GX, PT) plus a small
      supplemental footnote for other-logged. Derives the window from
@@ -5935,6 +6090,93 @@
         return list.map(function(x){ return x.id === id ? stamped : x; });
       });
     }
+
+    /* Spec 1 (B): trainer-facing time-off REQUEST. Always status='pending';
+       fans out a 'time_off_requested' notification to every active lead
+       and admin (excluding the requester). Distinct from upsertTimeOff
+       which is the lead/admin direct-write path. */
+    function requestTimeOff(record){
+      var actor = ctxCurrentUserName() || 'unknown';
+      var withMeta = Object.assign({ id: uid() }, record, {
+        status: 'pending',
+        createdBy: actor,
+        createdAt: new Date().toISOString()
+      });
+      var stamped = appendAuditEntry(withMeta, session, 'timeoff_requested', {
+        entity_type: 'time_off',
+        target_id: withMeta.id,
+        before: null,
+        after: withMeta
+      });
+      setTimeOff(function(list){ return list.concat([stamped]); });
+
+      /* Fan-out to lead + admin, excluding the requester. */
+      var requesterId = withMeta.trainerId;
+      var rows = (trainerProfiles || [])
+        .filter(function(p){
+          if (!p.is_active || !p.id) return false;
+          if (p.id === requesterId) return false;
+          var tier = p.role_tier || p.role || 'trainer';
+          return tier === 'lead' || tier === 'admin';
+        })
+        .map(function(p){
+          return {
+            target_trainer_id: p.id,
+            type: 'time_off_requested',
+            payload: {
+              timeOffId: withMeta.id,
+              requesterId: requesterId,
+              requesterName: ((trainerProfiles || []).find(function(x){ return x.id === requesterId; }) || {}).name || 'A trainer',
+              kind: withMeta.kind || 'sick',
+              startAt: withMeta.startAt,
+              endAt: withMeta.endAt,
+              allDay: !!withMeta.allDay
+            }
+          };
+        });
+      if (rows.length > 0) storage.notifications.emitMany(rows);
+      return stamped;
+    }
+
+    /* Spec 1 (B): lead/admin decision on a pending request. Writes
+       status + decided_by/at + optional decision_note, then notifies
+       the requester. */
+    function decideTimeOffRequest(id, decision, decisionNote){
+      var before = (timeOff || []).find(function(x){ return x.id === id; });
+      if (!before) return;
+      if (decision !== 'approved' && decision !== 'denied') return;
+      var actor = ctxCurrentUserName() || 'unknown';
+      var nowIso = new Date().toISOString();
+      var after = Object.assign({}, before, {
+        status: decision,
+        decidedBy: actor,
+        decidedAt: nowIso,
+        decisionNote: decisionNote || null
+      });
+      var stamped = appendAuditEntry(after, session,
+        decision === 'approved' ? 'timeoff_approved' : 'timeoff_denied',
+        {
+          entity_type: 'time_off',
+          target_id: id,
+          before: before,
+          after: after
+        });
+      setTimeOff(function(list){
+        return list.map(function(x){ return x.id === id ? stamped : x; });
+      });
+      if (before.trainerId) {
+        storage.notifications.emit(before.trainerId, 'time_off_decided', {
+          timeOffId: id,
+          decision: decision,
+          decidedBy: actor,
+          startAt: before.startAt,
+          endAt: before.endAt,
+          kind: before.kind,
+          decisionNote: decisionNote || null
+        });
+      }
+      return stamped;
+    }
     function upsertWRO(w){
       setWros(function(list){
         var exists = list.some(function(x){ return x.id === w.id; });
@@ -6781,6 +7023,8 @@
       timeOff: timeOff,
       upsertTimeOff: upsertTimeOff,
       softDeleteTimeOff: softDeleteTimeOff,
+      requestTimeOff: requestTimeOff,
+      decideTimeOffRequest: decideTimeOffRequest,
       upsertWRO: upsertWRO,
       claimWRO: claimWRO,
       unclaimWRO: unclaimWRO,
@@ -6963,6 +7207,28 @@
       if (p.threshold_band === 0)      return who + "'s " + pkgLbl + ' expired ' + (p.expires_on || '');
       if (p.days_remaining === 1)      return who + "'s " + pkgLbl + ' expires tomorrow';
       return who + "'s " + pkgLbl + ' expires in ' + p.days_remaining + ' days';
+    }
+    /* Spec 1 (B): time-off request flow */
+    if (n.type === 'time_off_requested') {
+      var rname = p.requesterName || 'A trainer';
+      var rkind = p.kind === 'sick' ? 'sick day' : (p.kind === 'vacation' ? 'vacation' : 'time off');
+      var when = '';
+      if (p.startAt) {
+        var d = new Date(p.startAt);
+        if (!isNaN(d.getTime())) when = ' starting ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      }
+      return rname + ' requested ' + rkind + when;
+    }
+    if (n.type === 'time_off_decided') {
+      var dec = p.decision === 'approved' ? 'approved' : (p.decision === 'denied' ? 'denied' : 'decided');
+      var dkind = p.kind === 'sick' ? 'sick day' : (p.kind === 'vacation' ? 'vacation' : 'time off');
+      var dwhen = '';
+      if (p.startAt) {
+        var dd = new Date(p.startAt);
+        if (!isNaN(dd.getTime())) dwhen = ' (' + dd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ')';
+      }
+      var note = p.decisionNote ? ' · ' + p.decisionNote : '';
+      return 'Your ' + dkind + dwhen + ' was ' + dec + note;
     }
     var snippet;
     try { snippet = JSON.stringify(p); } catch(_){ snippet = ''; }
@@ -7766,6 +8032,28 @@
         )
       ),
 
+      /* Spec 1 (C): Mon-Sat per-day hours strip for the current week.
+         Today's column highlighted. Saturday absorbs the week's full
+         auto-admin per spec E. Hidden in compact stacked mode. */
+      !compact && (function(){
+        var todayY = todayStr();
+        var monday = mondayOf(todayDate);
+        var byDay = calcWeekHoursByDay(trainerName, monday, ctx);
+        return e('div', { className: 'week-strip' },
+          byDay.days.map(function(d){
+            var isToday = d.ymd === todayY;
+            return e('div', {
+              key: d.ymd,
+              className: 'day' + (isToday ? ' is-today' : '')
+            },
+              e('div', { className: 'day-label' }, d.label),
+              e('div', { className: 'day-date' }, d.date.getDate()),
+              e('div', { className: 'day-hours' }, d.hours.toFixed(1))
+            );
+          })
+        );
+      })(),
+
       /* Weekly hours dashboard - shared with the Time Card page. Hidden
          in compact stacked mode. */
       !compact && e(WeeklyHoursDashboard, { ctx: ctx, trainerName: trainerName }),
@@ -8419,6 +8707,23 @@
     var timeOffEdit = timeOffEditTuple[0]; var setTimeOffEdit = timeOffEditTuple[1];
     var canEditTimeOff = ctx.can('addTimeOff');
 
+    /* Spec 1 (F): widen day-mode time-scaled grid on desktop only so
+       concurrent blocks don't visually cramp. Time-scale stays
+       intentional for conflict visibility; we just give the canvas more
+       horizontal room and shrink the per-block minimum so true short
+       blocks can render at proportional width without forcing a stack
+       lane. Mobile (<1024px) keeps the original 60px/hour. */
+    var isDesktopTuple = useState(function(){
+      return typeof window !== 'undefined' && window.innerWidth >= 1024;
+    });
+    var isDesktop = isDesktopTuple[0]; var setIsDesktop = isDesktopTuple[1];
+    useEffect(function(){
+      if (typeof window === 'undefined') return undefined;
+      function onResize(){ setIsDesktop(window.innerWidth >= 1024); }
+      window.addEventListener('resize', onResize);
+      return function(){ window.removeEventListener('resize', onResize); };
+    }, []);
+
     /* Detail swaps replace the grid in place; the back chevron in the
        outer header (driven by setHeaderContext) restores the grid. */
     if (classDetailId) {
@@ -8755,7 +9060,8 @@
         hourLabels.push(h12 + ampm);
       }
       var trainerColW = 110;
-      var hourColW = 60;
+      /* Spec 1 (F): desktop widens hour columns from 60 -> 100 px. */
+      var hourColW = isDesktop ? 100 : 60;
       var stripW = hourColW * 18;
 
       return e('div', null,
@@ -8806,7 +9112,12 @@
                  Time scale becomes a guide rather than a strict
                  constraint - intentional per spec. */
               var pxPerMin = stripW / WINDOW_SIZE;
-              var MIN_BLOCK_PX = 140;
+              /* Spec 1 (F): desktop drops the per-block minimum so 30-min
+                 PT blocks can render at their true proportional width
+                 (~50px @ 100px/hr) without being inflated to 140 and
+                 forced into a stacked lane. Mobile keeps 140 since the
+                 narrow canvas needs the readability floor. */
+              var MIN_BLOCK_PX = isDesktop ? 90 : 140;
               var minWidthMin = MIN_BLOCK_PX / pxPerMin;
               var laneCount = assignLanes(events, minWidthMin);
               var laneH = 62;
@@ -11792,7 +12103,7 @@
         ),
         e('div', { style: { display: 'flex', gap: '8px' } },
           e('button', { className: 'btn btn-amber btn-sm', onClick: function(){ setCoverOpen(true); } }, 'Cover a Class'),
-          e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setNewOpen(true); } }, '+ New Class')
+          ctx.can('canAddClass') && e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setNewOpen(true); } }, '+ New Class')
         )
       ),
       myClasses.length === 0
@@ -13805,6 +14116,43 @@
       return (a.timeIn || '') < (b.timeIn || '') ? -1 : 1;
     });
 
+    /* Spec 1 (E): inject the week's auto-admin total as a virtual entry
+       on each Saturday within the pay period. Pay period spans 14 days
+       (2 weeks), so 2 Saturdays each get their week's auto-admin. The
+       virtual entries render in the manual-admin section (per spec:
+       "Match how the team logs admin time manually today") with a
+       distinguishing title and read-only behavior (no onClick, no
+       sourceSessionId). */
+    var period = payPeriodByIndex(payPeriodForDate(new Date()).index + offset);
+    var pCursor = new Date(period.start.getTime());
+    var pLastDay = new Date(period.end.getTime());
+    var virtualAutoAdmin = [];
+    while (pCursor.getTime() <= pLastDay.getTime()) {
+      if (pCursor.getDay() === 6 /* Saturday */) {
+        var weekMonday = mondayOf(pCursor);
+        var weekHrs = calcWeekHoursByDay(trainerName, weekMonday, ctx);
+        if (weekHrs.autoAdminTotal > 0) {
+          virtualAutoAdmin.push({
+            key: 'auto-admin-' + toYMD(pCursor),
+            title: 'Auto admin (week of ' + weekMonday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ')',
+            subtitle: '0.25 × forward-facing hours · auto-credited',
+            hours: weekHrs.autoAdminTotal,
+            date: toYMD(pCursor),
+            virtual: true
+          });
+        }
+      }
+      pCursor.setDate(pCursor.getDate() + 1);
+    }
+    /* Inserted in date order alongside any real manual items. */
+    var manualPlusAuto = manual.concat(virtualAutoAdmin).sort(function(a, b){
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      /* Virtual auto-admin sorts after same-day manual entries. */
+      if (a.virtual && !b.virtual) return 1;
+      if (!a.virtual && b.virtual) return -1;
+      return (a.timeIn || '') < (b.timeIn || '') ? -1 : 1;
+    });
+
     /* Compute a rolling running-total per entry within each section. */
     function withRunning(entries){
       var running = 0;
@@ -13816,7 +14164,7 @@
     var ptRolling = withRunning(pt);
     var gxRolling = withRunning(gx);
     var subRolling = withRunning(subs);
-    var manualRolling = withRunning(manual);
+    var manualRolling = withRunning(manualPlusAuto);
 
     /* Phase 3b-B: each section is a .tbl with a heading row + entry rows.
        The heading row uses .tbl-section-head for the title + total. */
@@ -13859,6 +14207,11 @@
       );
     }
 
+    /* Spec 1 (B): trainer-facing request modal mount. Lead/admin keep
+       their direct-write path via TimeOffManagerModal in TrainerView. */
+    var requestOpenTuple = useState(false);
+    var requestOpen = requestOpenTuple[0]; var setRequestOpen = requestOpenTuple[1];
+
     return e('div', null,
       /* Phase 3b-A2: read-only banner when viewing another trainer's card
          via TeamHoursView drill-down. Self mode hides this. */
@@ -13874,6 +14227,21 @@
           letterSpacing: '0.02em'
         }
       }, 'Viewing time card for ' + trainerName + '. Read-only.'),
+      /* Spec 1 (B): Request time off entry point. Visible to all tiers
+         that have canRequestTimeOff (trainer/lead/admin). Hidden in
+         read-only mode (lead/admin viewing someone else's card). */
+      !isReadOnly && ctx.can('canRequestTimeOff') && e('div', {
+        style: { marginBottom: '14px', display: 'flex', justifyContent: 'flex-end' }
+      },
+        e('button', {
+          className: 'btn btn-outline btn-sm',
+          onClick: function(){ setRequestOpen(true); }
+        }, '+ Request time off')
+      ),
+      requestOpen && e(TimeOffRequestModal, {
+        ctx: ctx,
+        onClose: function(){ setRequestOpen(false); }
+      }),
       /* Weekly hours dashboard - same component used on the Today tab.
          Always anchors to the current Sun-Sat regardless of which pay
          period is selected below. */
@@ -14035,8 +14403,12 @@
         )
       ),
 
-      /* Manual admin (with edit button on each) */
-      e('div', {
+      /* Manual admin (with edit button on each). Spec 1 (E): also shows
+         per-week auto-admin entries dated to each Saturday in the period.
+         Subtotal includes both manual + auto. */
+      (function(){
+        var combinedSubtotal = card.manualAdmin.hours + (card.autoAdmin.hours || 0);
+        return e('div', {
         style: {
           background: '#fff',
           border: '1.5px solid var(--border)',
@@ -14046,29 +14418,33 @@
         }
       },
         e('div', { style: { padding: '10px 14px', background: 'var(--cream-2)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
-          e('h3', { style: { fontSize: '14px', margin: 0, color: 'var(--navy)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, '\ud83d\udcdd Manual Admin'),
-          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + displayHrs(card.manualAdmin.hours) + ' hr')
+          e('h3', { style: { fontSize: '14px', margin: 0, color: 'var(--navy)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, '\ud83d\udcdd Manual + Auto Admin'),
+          e('div', { style: { fontSize: '13px', color: 'var(--navy)', fontWeight: 700 } }, 'Subtotal: ' + displayHrs(combinedSubtotal) + ' hr')
         ),
         manualRolling.length === 0
           ? e('div', { style: { padding: '14px', fontStyle: 'italic', color: 'var(--slate-soft)', fontSize: '13px' } },
               'No admin time logged this period. Tap "+ Log Admin Time" below.'
             )
           : manualRolling.map(function(it){
+              var isVirtual = !!it.virtual;
               return e('div', {
-                key: it.id,
-                onClick: isReadOnly ? null : function(){ setModal(it); },
+                key: it.key || it.id,
+                onClick: (isReadOnly || isVirtual) ? null : function(){ setModal(it); },
                 style: {
                   padding: '10px 14px', borderBottom: '1px solid var(--border)',
-                  cursor: isReadOnly ? 'default' : 'pointer'
+                  cursor: (isReadOnly || isVirtual) ? 'default' : 'pointer',
+                  background: isVirtual ? 'var(--paper-2)' : 'transparent'
                 }
               },
                 e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' } },
                   e('div', { style: { flex: 1 } },
                     e('div', { style: { fontWeight: 500, color: 'var(--navy)', fontSize: '13px' } }, it.title),
                     e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } },
-                      formatShort(parseYMD(it.date)) + ' \u00b7 ' +
-                      (it.type === 'Other' ? (it.customType || 'Other') : it.type) +
-                      ' \u00b7 ' + formatTime12(it.timeIn) + '\u2013' + formatTime12(it.timeOut)
+                      isVirtual
+                        ? (formatShort(parseYMD(it.date)) + ' \u00b7 ' + it.subtitle)
+                        : (formatShort(parseYMD(it.date)) + ' \u00b7 ' +
+                           (it.type === 'Other' ? (it.customType || 'Other') : it.type) +
+                           ' \u00b7 ' + formatTime12(it.timeIn) + '\u2013' + formatTime12(it.timeOut))
                     )
                   ),
                   e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '12px' } },
@@ -14085,7 +14461,8 @@
             onClick: function(){ setModal('new'); }
           }, '+ Log Admin Time')
         )
-      ),
+      );
+      })(),
 
       /* v2.4: Contacts section. Shows count + breakdown by type and topic +
          capped admin hours. Read-only here (logged from floating button on
@@ -14489,48 +14866,43 @@
     var ctx = props.ctx;
     var onTrainerSelect = props.onTrainerSelect;
 
-    /* Three-pill period offset matches TimeCardView's pattern.
-       -1 = previous (just closed), 0 = current, 1 = next */
-    var offsetTuple = useState(0);
-    var offset = offsetTuple[0]; var setOffset = offsetTuple[1];
+    /* Spec 1 (D): per-day Mon-Sat breakdown for each trainer. Three-pill
+       toggle is now week-based (was pay-period). Drill-down to a
+       trainer's TimeCardView still uses pay-period there. */
+    var weekOffsetTuple = useState(0);
+    var weekOffset = weekOffsetTuple[0]; var setWeekOffset = weekOffsetTuple[1];
 
-    /* ctx.trainers is already filtered to active, non-deleted (line ~6190).
-       Sort alphabetically for stable presentation. */
     var trainerNames = (ctx.trainers || []).slice().sort(function(a, b){
       return a.toLowerCase() < b.toLowerCase() ? -1 : 1;
     });
 
+    var todayY = todayStr();
+    var monday = mondayOf(addDays(parseYMD(todayY), weekOffset * 7));
+    var weekEnd = addDays(monday, 5);
+    var weekLabel = monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+      ' – ' + weekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
     var rows = trainerNames.map(function(name){
-      var card = calcTrainerHours(
-        name, offset,
-        ctx.clients, ctx.classes,
-        ctx.items || [], ctx.wros || [], ctx.contacts || []
-      );
-      /* Orientations roll into the PT category per Selisa's pattern,
-         so they're counted in ptCount alongside 1:1 sessions. */
-      var ptCount = (card.forwardFacing.ptSessions || []).length
-                  + (card.forwardFacing.orientations || []).length;
-      var gxCount = (card.forwardFacing.gxClasses || []).length;
-      return {
-        name: name,
-        hours: card.grandTotal || 0,
-        ptCount: ptCount,
-        gxCount: gxCount,
-        adminHours: (card.manualAdmin && card.manualAdmin.hours) || 0
-      };
+      var byDay = calcWeekHoursByDay(name, monday, ctx);
+      return { name: name, byDay: byDay };
     });
 
-    var totalHours = rows.reduce(function(s, r){ return s + r.hours; }, 0);
+    var dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var todayIdx = -1; /* which Mon-Sat column is today, if this is the current week */
+    if (weekOffset === 0) {
+      var dow = parseYMD(todayY).getDay(); /* 0=Sun..6=Sat */
+      if (dow >= 1 && dow <= 6) todayIdx = dow - 1;
+    }
 
-    /* Period label sourced via the same helpers TimeCardView uses
-       internally - no third date-formatting pattern. */
-    var periodForLabel = payPeriodByIndex(payPeriodForDate(new Date()).index + offset);
-    var periodLabel = payPeriodLabel(periodForLabel);
+    var teamTotalsPerDay = dayLabels.map(function(_, i){
+      return rows.reduce(function(s, r){ return s + r.byDay.days[i].hours; }, 0);
+    });
+    var teamGrandTotal = rows.reduce(function(s, r){ return s + r.byDay.total; }, 0);
 
     function pill(value, label){
       return e('span', {
-        className: 'pill' + (offset === value ? ' active' : ''),
-        onClick: function(){ setOffset(value); }
+        className: 'pill' + (weekOffset === value ? ' active' : ''),
+        onClick: function(){ setWeekOffset(value); }
       }, label);
     }
 
@@ -14538,7 +14910,7 @@
       e('div', { className: 'team-hours-header' },
         e('h2', null, 'Team hours'),
         e('div', { className: 'team-hours-period' },
-          e('span', { className: 'period-label' }, 'pay period ' + periodLabel),
+          e('span', { className: 'period-label' }, 'week of ' + weekLabel),
           pill(-1, 'Previous'),
           pill(0, 'Current'),
           pill(1, 'Next')
@@ -14552,28 +14924,51 @@
               border: '1px solid var(--rule)', borderRadius: '6px'
             }
           }, 'No active trainers.')
-        : rows.map(function(r){
-            return e('div', {
-              key: r.name,
-              className: 'team-hours-row',
-              onClick: function(){ onTrainerSelect && onTrainerSelect(r.name); }
-            },
-              e('div', null,
-                e('div', { className: 'name' }, r.name),
-                e('div', { className: 'breakdown' },
-                  r.ptCount + ' pt · ' + r.gxCount + ' gx · ' +
-                  r.adminHours.toFixed(1) + ' admin'
+        : e('div', { className: 'tbl-wrap' },
+            e('table', { className: 'tbl' },
+              e('thead', null,
+                e('tr', null,
+                  e('th', null, 'Trainer'),
+                  dayLabels.map(function(lbl, i){
+                    return e('th', {
+                      key: 'h-' + lbl,
+                      className: 'num' + (i === todayIdx ? ' col-today' : '')
+                    }, lbl);
+                  }),
+                  e('th', { className: 'num' }, 'Total')
                 )
               ),
-              e('div', { className: 'hours' }, r.hours.toFixed(1) + ' hrs'),
-              e('div', { className: 'chevron' }, '→')
-            );
-          }),
-      rows.length > 0 && e('div', { className: 'team-hours-totals' },
-        e('div', { className: 'label' }, 'Team total'),
-        e('div', null, ''),
-        e('div', { className: 'total' }, totalHours.toFixed(1) + ' hrs')
-      )
+              e('tbody', null,
+                rows.map(function(r){
+                  return e('tr', {
+                    key: r.name,
+                    onClick: function(){ onTrainerSelect && onTrainerSelect(r.name); },
+                    style: { cursor: 'pointer' }
+                  },
+                    e('td', { style: { fontWeight: 600 } }, r.name),
+                    r.byDay.days.map(function(d, i){
+                      return e('td', {
+                        key: 'c-' + i,
+                        className: 'num' + (i === todayIdx ? ' col-today' : '')
+                      }, d.hours.toFixed(1));
+                    }),
+                    e('td', { className: 'num', style: { fontWeight: 700, color: 'var(--teal)' } }, r.byDay.total.toFixed(1))
+                  );
+                }),
+                e('tr', { style: { background: 'var(--paper-2)' } },
+                  e('td', { style: { fontWeight: 700, textTransform: 'uppercase', fontSize: '11px', letterSpacing: '0.05em' } }, 'Team total'),
+                  teamTotalsPerDay.map(function(v, i){
+                    return e('td', {
+                      key: 't-' + i,
+                      className: 'num' + (i === todayIdx ? ' col-today' : ''),
+                      style: { fontWeight: 700 }
+                    }, v.toFixed(1));
+                  }),
+                  e('td', { className: 'num', style: { fontWeight: 700, color: 'var(--teal)' } }, teamGrandTotal.toFixed(1))
+                )
+              )
+            )
+          )
     );
   }
 
@@ -20957,6 +21352,139 @@
     );
   }
 
+  /* ============ TIME-OFF REQUEST MODAL (Spec 1) ============
+     Trainer-facing request flow. Always writes status='pending' and
+     fans out to all leads + admins. Type is required: Sick | Vacation
+     only (the longer kind list lives on the lead/admin direct-write
+     modal). */
+  function TimeOffRequestModal(props){
+    var ctx = props.ctx;
+    var REQUEST_KINDS = [
+      { value: 'sick',     label: 'Sick' },
+      { value: 'vacation', label: 'Vacation' }
+    ];
+
+    var session = ctx.session || {};
+    var requesterId = session.trainer_id || null;
+
+    function joinIso(dateStr, timeStr){
+      if (!dateStr) return null;
+      var t = timeStr || '00:00';
+      var d = new Date(dateStr + 'T' + t);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    }
+
+    var kindTuple      = useState('sick');
+    var kind           = kindTuple[0];      var setKind      = kindTuple[1];
+    var allDayTuple    = useState(true);
+    var allDay         = allDayTuple[0];    var setAllDay    = allDayTuple[1];
+    var startDateTuple = useState(todayStr());
+    var startDate      = startDateTuple[0]; var setStartDate = startDateTuple[1];
+    var startTimeTuple = useState('08:00');
+    var startTime      = startTimeTuple[0]; var setStartTime = startTimeTuple[1];
+    var endDateTuple   = useState(todayStr());
+    var endDate        = endDateTuple[0];   var setEndDate   = endDateTuple[1];
+    var endTimeTuple   = useState('17:00');
+    var endTime        = endTimeTuple[0];   var setEndTime   = endTimeTuple[1];
+    var noteTuple      = useState('');
+    var note           = noteTuple[0];      var setNote      = noteTuple[1];
+    var errorTuple     = useState(null);
+    var error          = errorTuple[0];     var setError     = errorTuple[1];
+
+    function submit(){
+      if (!requesterId) {
+        setError('Could not identify your trainer profile. Sign out and back in.');
+        return;
+      }
+      if (!kind) { setError('Pick a type'); return; }
+      if (!startDate || !endDate) { setError('Start and end dates required'); return; }
+      var sIso = joinIso(startDate, allDay ? '00:00' : (startTime || '00:00'));
+      var eIso = joinIso(endDate,   allDay ? '23:59' : (endTime   || '23:59'));
+      if (!sIso || !eIso) { setError('Invalid date/time'); return; }
+      if (eIso <= sIso)   { setError('End must be after start'); return; }
+      setError(null);
+
+      ctx.requestTimeOff({
+        trainerId: requesterId,
+        startAt: sIso,
+        endAt: eIso,
+        allDay: !!allDay,
+        kind: kind,
+        reason: note ? note.trim() : null
+      });
+      ctx.toast('Time off requested · admin notified ✓');
+      props.onClose();
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Request Time Off'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          error && e('div', { className: 'banner red', style: { marginBottom: '12px' } }, error),
+          e('div', { className: 'field' },
+            e('label', null, 'Type *'),
+            e('select', {
+              value: kind,
+              onChange: function(ev){ setKind(ev.target.value); }
+            }, REQUEST_KINDS.map(function(k){
+              return e('option', { key: k.value, value: k.value }, k.label);
+            }))
+          ),
+          e('div', { className: 'field' },
+            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+              e('input', {
+                type: 'checkbox',
+                checked: allDay,
+                onChange: function(ev){ setAllDay(ev.target.checked); }
+              }),
+              'All day'
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Start date *'),
+              e('input', { type: 'date', value: startDate, onChange: function(ev){ setStartDate(ev.target.value); } })
+            ),
+            !allDay && e('div', { className: 'field' },
+              e('label', null, 'Start time'),
+              e('input', { type: 'time', value: startTime, onChange: function(ev){ setStartTime(ev.target.value); } })
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'End date *'),
+              e('input', { type: 'date', value: endDate, onChange: function(ev){ setEndDate(ev.target.value); } })
+            ),
+            !allDay && e('div', { className: 'field' },
+              e('label', null, 'End time'),
+              e('input', { type: 'time', value: endTime, onChange: function(ev){ setEndTime(ev.target.value); } })
+            )
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Note (optional)'),
+            e('textarea', {
+              value: note,
+              onChange: function(ev){ setNote(ev.target.value); },
+              placeholder: 'Anything admin should know...',
+              rows: 3
+            })
+          ),
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
+            'Your request will land with admin and lead trainers for approval. You\'ll be notified when there\'s a decision.'
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-primary', onClick: submit }, 'Submit request')
+        )
+      )
+    );
+  }
+
   /* ============ TIME-OFF ENTRY MODAL (Sprint L) ============
      Form modal for trainer time-off entries. Permission-gated at the
      entry-point caller (ctx.can('addTimeOff')) - lead and admin only.
@@ -21326,11 +21854,15 @@
     var editTarget = editTargetTuple[0]; var setEditTarget = editTargetTuple[1];
 
     var nowIso = new Date().toISOString();
-    var rows = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; })
+    var allRows = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; })
       .slice()
       .sort(function(a, b){ return (a.startAt || '') < (b.startAt || '') ? -1 : 1; });
-    var upcoming = rows.filter(function(t){ return (t.endAt || '') >= nowIso; });
-    var past = rows.filter(function(t){ return (t.endAt || '') < nowIso; });
+    /* Spec 1: separate pending requests from approved/denied. Legacy rows
+       have status missing or 'approved' (DB default backfill). */
+    var pending = allRows.filter(function(t){ return t.status === 'pending'; });
+    var decided = allRows.filter(function(t){ return t.status !== 'pending'; });
+    var upcoming = decided.filter(function(t){ return (t.endAt || '') >= nowIso; });
+    var past = decided.filter(function(t){ return (t.endAt || '') < nowIso; });
 
     function trainerName(id){
       var p = (ctx.trainerProfiles || []).find(function(x){ return x.id === id; });
@@ -21364,10 +21896,76 @@
         onClick: function(){ setEditTarget(t); setEntryOpen(true); }
       },
         e('div', null,
-          e('div', { style: { fontWeight: 700 } }, trainerName(t.trainerId) + ' · ' + (t.kind || '?')),
+          e('div', { style: { fontWeight: 700 } },
+            trainerName(t.trainerId) + ' · ' + (t.kind || '?'),
+            t.status === 'denied' && e('span', {
+              style: {
+                fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                background: 'var(--brick)', color: '#fff', fontWeight: 700,
+                marginLeft: '8px', textTransform: 'uppercase', letterSpacing: '0.04em'
+              }
+            }, 'Denied')
+          ),
           e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
             fmtRange(t) + (t.reason ? ' · ' + t.reason : '')
           )
+        )
+      );
+    }
+
+    /* Spec 1: pending request row with inline approve/deny actions.
+       Approve fans out time_off_decided to requester. Deny prompts for
+       optional reason (passed as decisionNote). */
+    function pendingRow(t){
+      return e('div', {
+        key: t.id,
+        style: {
+          background: 'var(--ochre-bg)',
+          border: '1px solid var(--ochre)',
+          borderRadius: '6px',
+          padding: '10px 12px',
+          marginBottom: '8px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: '10px',
+          flexWrap: 'wrap'
+        }
+      },
+        e('div', { style: { flex: 1, minWidth: '180px' } },
+          e('div', { style: { fontWeight: 700, color: 'var(--navy)' } },
+            trainerName(t.trainerId) + ' · ' + (t.kind === 'sick' ? 'Sick' : (t.kind === 'vacation' ? 'Vacation' : (t.kind || '?'))),
+            e('span', {
+              style: {
+                fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                background: 'var(--ochre)', color: '#fff', fontWeight: 700,
+                marginLeft: '8px', textTransform: 'uppercase', letterSpacing: '0.04em'
+              }
+            }, 'Pending')
+          ),
+          e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+            fmtRange(t) + (t.reason ? ' · ' + t.reason : '')
+          )
+        ),
+        e('div', { style: { display: 'flex', gap: '6px' } },
+          e('button', {
+            className: 'btn btn-sm',
+            style: { background: 'var(--moss)', color: '#fff', fontWeight: 600 },
+            onClick: function(){
+              ctx.decideTimeOffRequest(t.id, 'approved', null);
+              ctx.toast('Time off approved · ' + trainerName(t.trainerId) + ' notified ✓');
+            }
+          }, '✓ Approve'),
+          e('button', {
+            className: 'btn btn-sm',
+            style: { background: 'var(--brick)', color: '#fff', fontWeight: 600 },
+            onClick: function(){
+              var why = window.prompt('Reason for denial (optional):', '');
+              if (why === null) return; /* cancelled */
+              ctx.decideTimeOffRequest(t.id, 'denied', (why && why.trim()) || null);
+              ctx.toast('Request denied · ' + trainerName(t.trainerId) + ' notified', 'error');
+            }
+          }, '✕ Deny')
         )
       );
     }
@@ -21379,6 +21977,18 @@
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' },
+          /* Spec 1 (B): pending requests at top so lead/admin sees them
+             on open. Approve/deny inline. */
+          pending.length > 0 && e('div', { style: { marginBottom: '14px' } },
+            e('h3', {
+              style: {
+                fontSize: '13px', textTransform: 'uppercase',
+                letterSpacing: '0.05em', fontWeight: 700,
+                color: 'var(--ochre)', marginBottom: '8px'
+              }
+            }, 'Pending requests (' + pending.length + ')'),
+            pending.map(pendingRow)
+          ),
           e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
             'Track sick days, vacation, personal time, holidays. Tap a row to edit. Conflicting classes will be flagged on save.'
           ),
@@ -21396,7 +22006,7 @@
             e('h3', { style: { fontSize: '14px', marginBottom: '6px', color: 'var(--slate-soft)' } }, 'Past'),
             past.slice(0, 20).map(row)
           ),
-          rows.length === 0 && e('div', { style: { color: 'var(--slate)', fontStyle: 'italic', fontSize: '13px' } },
+          allRows.length === 0 && e('div', { style: { color: 'var(--slate)', fontStyle: 'italic', fontSize: '13px' } },
             'No time off recorded.'
           )
         ),
