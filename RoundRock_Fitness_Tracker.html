@@ -18064,10 +18064,12 @@
     var myInProgressWros = openWros.filter(function(w){
       return wroState(w) === 'in_progress' && trainerNameMatches(trainerName, w.claimedBy);
     }).sort(function(a, b){ return (a.claimedAt || '') < (b.claimedAt || '') ? 1 : -1; });
-    var othersInProgressWros = openWros.filter(function(w){
-      return wroState(w) === 'in_progress' && !trainerNameMatches(trainerName, w.claimedBy);
-    }).sort(function(a, b){ return (a.claimedAt || '') < (b.claimedAt || '') ? 1 : -1; });
-    var pendingWros = openWros;  // kept for the meta count
+    /* Patch M: header meta count and visible sections agree - only
+       counts WROs this trainer can act on (claim or complete). Once a
+       teammate claims a WRO it disappears from this trainer's view
+       entirely. Admin oversight is unaffected (independent filter in
+       ConsultQueueView). */
+    var pendingWros = availableWros.concat(myInProgressWros);
 
     var cutoffYMD = toYMD(addDays(new Date(), -7));
     var myRecentWros = allWros.filter(function(w){
@@ -18346,44 +18348,6 @@
                 className: 'btn btn-teal btn-sm',
                 onClick: function(){ setWroOpen(w); }
               }, 'Complete')
-            )
-          );
-        })
-      ),
-
-      othersInProgressWros.length > 0 && e('div', { style: { marginBottom: '20px' } },
-        e('h3', {
-          style: {
-            fontSize: '14px', color: 'var(--slate)', marginBottom: '4px',
-            display: 'flex', alignItems: 'center', gap: '6px'
-          }
-        }, 'WROs others are working on (' + othersInProgressWros.length + ')'),
-        e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '10px', lineHeight: 1.4 } },
-          'Read-only. So you don\'t double up with a teammate.'
-        ),
-        othersInProgressWros.map(function(w){
-          return e('div', {
-            key: w.id,
-            className: 't-session',
-            style: { '--stripe-color': 'var(--slate)', background: 'var(--paper-2)', opacity: 0.85, cursor: 'default' }
-          },
-            e('div', { className: 't-session-row' },
-              e('div', { className: 't-session-title' }, w.participantName),
-              e('span', {
-                style: {
-                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
-                  background: WRO_STATE_COLOR.in_progress, color: '#fff',
-                  fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
-                }
-              }, WRO_STATE_BADGE.in_progress)
-            ),
-            e('div', { style: { fontSize: '12px', color: 'var(--teal)', fontWeight: 600 } },
-              '\u2192 ' + w.claimedBy + ' is on it'
-            ),
-            e('div', { className: 't-session-meta' },
-              e('span', null, formatShort(parseYMD(w.date))),
-              e('span', null, '\u00b7'),
-              e('span', null, w.location || 'CMRC')
             )
           );
         })
