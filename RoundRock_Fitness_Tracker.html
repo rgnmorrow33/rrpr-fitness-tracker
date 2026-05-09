@@ -1726,9 +1726,10 @@
   /* Spec 1: Mon-Sat per-day hours strip. Used on TrainerToday and (via
      .tbl) inside TeamHoursView. The standalone strip variant is a
      6-column grid with today highlighted via .is-today. */
+  /* Patch I: 7-column Sun-Sat layout (was 6-column Mon-Sat). */
   .trainer-content .week-strip {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
     gap: 6px;
     margin-bottom: 14px;
   }
@@ -4921,17 +4922,19 @@
     };
   }
 
-  /* Spec 1: per-day Mon-Sat breakdown for the trainer Today strip and
-     the Team Hours master list. monStartDate is a Date pinned to Monday
-     of the target week. Each cell sums forward-facing hours (GX
-     attended/scheduled + PT logged) plus any manual admin items dated
-     on that day. Saturday additionally absorbs the week's full auto-
-     admin total per spec E ("Saturday roll-up"), since auto-admin has
-     no per-day attribution otherwise. */
-  function calcWeekHoursByDay(trainerName, monStartDate, ctx){
-    var labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  /* Spec 1 + Patch I: per-day Sun-Sat breakdown for the trainer Today
+     strip, TimeCardView strip, and the Team Hours master list.
+     sunStartDate is a Date pinned to Sunday of the target week (US
+     convention; matches pay-period Sun-Sat alignment). Each cell sums
+     forward-facing hours (GX attended/scheduled + PT logged) plus any
+     manual admin items dated on that day. Saturday (index 6)
+     additionally absorbs the week's full auto-admin total per spec E
+     ("Saturday roll-up") since auto-admin has no per-day attribution
+     otherwise. Sunday's auto-admin stays 0 by convention. */
+  function calcWeekHoursByDay(trainerName, sunStartDate, ctx){
+    var labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     var days = labels.map(function(lbl, i){
-      var d = addDays(monStartDate, i);
+      var d = addDays(sunStartDate, i);
       return {
         ymd: toYMD(d),
         label: lbl,
@@ -4987,10 +4990,11 @@
     });
 
     /* Auto-admin: 0.25 x week's forward-facing total, parked on Saturday
-       per spec E. Saturday's hours = forward-facing-on-Sat + auto-admin. */
+       (index 6 in Sun-Sat ordering) per spec E. Saturday's hours =
+       forward-facing-on-Sat + auto-admin. */
     var weekForwardTotal = days.reduce(function(s, d){ return s + d.forwardFacing; }, 0);
     var autoAdminTotal = autoAdminHours(weekForwardTotal);
-    days[5].autoAdmin = autoAdminTotal;
+    days[6].autoAdmin = autoAdminTotal;
 
     days.forEach(function(d){
       d.hours = Math.round((d.forwardFacing + d.manualAdmin + d.autoAdmin) * 100) / 100;
@@ -5002,14 +5006,25 @@
     };
   }
 
-  /* Helper: Monday of the week containing the given date. Used by Today
-     and Team Hours per-day strips (Mon-Sat per spec). */
+  /* Helper: Monday of the week containing the given date. Retained for
+     callers that still need a Monday anchor; per-day strips switched to
+     sundayOf in Patch I. */
   function mondayOf(date){
     var d = new Date(date.getTime());
     d.setHours(0, 0, 0, 0);
     var dow = d.getDay(); /* 0=Sun..6=Sat */
     var deltaToMonday = dow === 0 ? -6 : (1 - dow); /* Sun->-6, Mon->0, Tue->-1, ... */
     d.setDate(d.getDate() + deltaToMonday);
+    return d;
+  }
+  /* Helper: Sunday of the week containing the given date. Used by Patch
+     I per-day strips (Sun-Sat) on TrainerToday, TimeCardView, and
+     TeamHoursView. US weeks start Sunday; pay periods align Sun-Sat. */
+  function sundayOf(date){
+    var d = new Date(date.getTime());
+    d.setHours(0, 0, 0, 0);
+    var dow = d.getDay(); /* 0=Sun..6=Sat */
+    d.setDate(d.getDate() - dow);
     return d;
   }
 
@@ -8876,13 +8891,14 @@
          Reagan's call. Today keeps the date headline, HOLIDAY chips,
          the Mon-Sat .week-strip, and the Request Time Off launcher. */
 
-      /* Spec 1 (C): Mon-Sat per-day hours strip for the current week.
-         Today's column highlighted. Saturday absorbs the week's full
-         auto-admin per spec E. Hidden in compact stacked mode. */
+      /* Spec 1 (C) + Patch I: Sun-Sat per-day hours strip for the
+         current week. Today's column highlighted. Saturday absorbs the
+         week's full auto-admin per spec E. Hidden in compact stacked
+         mode. */
       !compact && (function(){
         var todayY = todayStr();
-        var monday = mondayOf(todayDate);
-        var byDay = calcWeekHoursByDay(trainerName, monday, ctx);
+        var sunday = sundayOf(todayDate);
+        var byDay = calcWeekHoursByDay(trainerName, sunday, ctx);
         return e('div', { className: 'week-strip' },
           byDay.days.map(function(d){
             var isToday = d.ymd === todayY;
@@ -15389,11 +15405,12 @@
 
     var card = calcTrainerHours(trainerName, offset, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
 
-    /* Patch F: pay-period framing tiles + Mon-Sat strip moved here from
-       TrainerToday. summary and todayCount stay current-period regardless
-       of the offset toggle below - tiles are a "where am I right now"
-       snapshot, the toggle drills into period detail underneath. */
-    var summaryNow = offset === 0 ? card : calcTrainerHours(trainerName, 0, ctx.clients, ctx.classes, ctx.items || [], ctx.wros || [], ctx.contacts || []);
+    /* Patch F + Patch I: pay-period framing tiles + Sun-Sat strip live
+       on TimeCardView. Tiles now follow the period offset (Patch I); the
+       3-pill toggle below is the source of truth for which period the
+       trainer is reviewing. todayCount stays today-relative when Current
+       is selected; for other offsets we show the period's forward-facing
+       item count. */
     var todayYMD = todayStr();
     var todayCount = (function(){
       var n = 0;
@@ -15425,6 +15442,10 @@
       });
       return n;
     })();
+    var periodItemCount =
+      (card.forwardFacing.ptSessions || []).length +
+      (card.forwardFacing.gxClasses || []).length +
+      (card.forwardFacing.orientations || []).length;
     /* PT section pools 1:1 sessions and orientations together (per Selisa's
        pattern). Each entry carries a 'kind' so the label can disambiguate. */
     var pt = card.forwardFacing.ptSessions
@@ -15583,35 +15604,51 @@
          3-pill offset below - they're a "where am I now" snapshot.
          Visible to read-only viewers too (data scoped to displayed
          trainer; only the Request Time Off button gates on isReadOnly). */
-      e('div', { className: 'tstats' },
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'On schedule'),
-          e('div', { className: 'tstat-value' }, todayCount),
-          e('div', { className: 'tstat-sub' }, todayCount === 1 ? 'item today' : 'items today')
-        ),
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'Pay period'),
-          e('div', { className: 'tstat-value' }, displayHrs(summaryNow.grandTotal) + ' hr'),
-          e('div', { className: 'tstat-sub' }, summaryNow.payPeriod.label)
-        ),
-        e('div', { className: 'tstat' },
-          e('div', { className: 'tstat-label' }, 'Forward + admin'),
-          e('div', { className: 'tstat-value' },
-            displayHrs(summaryNow.forwardFacing.total) + ' / ' +
-            displayHrs(summaryNow.autoAdmin.hours + summaryNow.manualAdmin.hours)
-          ),
-          e('div', { className: 'tstat-sub' },
-            displayHrs((summaryNow.serviceRecovery && summaryNow.serviceRecovery.hours) || 0) + ' hr recovery'
-          )
-        )
-      ),
+      /* Patch I: tiles read from card (offset-aware). On Schedule shows
+         today's count when offset === 0, otherwise the period's
+         forward-facing item count. Sub label tracks the same split. */
       (function(){
-        var todayDate = parseYMD(todayYMD);
-        var monday = mondayOf(todayDate);
-        var byDay = calcWeekHoursByDay(trainerName, monday, ctx);
+        var isCurrent = offset === 0;
+        var displayCount = isCurrent ? todayCount : periodItemCount;
+        var subLabel = isCurrent
+          ? (todayCount === 1 ? 'item today' : 'items today')
+          : (periodItemCount === 1 ? 'item this period' : 'items this period');
+        return e('div', { className: 'tstats' },
+          e('div', { className: 'tstat' },
+            e('div', { className: 'tstat-label' }, 'On schedule'),
+            e('div', { className: 'tstat-value' }, displayCount),
+            e('div', { className: 'tstat-sub' }, subLabel)
+          ),
+          e('div', { className: 'tstat' },
+            e('div', { className: 'tstat-label' }, 'Pay period'),
+            e('div', { className: 'tstat-value' }, displayHrs(card.grandTotal) + ' hr'),
+            e('div', { className: 'tstat-sub' }, card.payPeriod.label)
+          ),
+          e('div', { className: 'tstat' },
+            e('div', { className: 'tstat-label' }, 'Forward + admin'),
+            e('div', { className: 'tstat-value' },
+              displayHrs(card.forwardFacing.total) + ' / ' +
+              displayHrs(card.autoAdmin.hours + card.manualAdmin.hours)
+            ),
+            e('div', { className: 'tstat-sub' },
+              displayHrs((card.serviceRecovery && card.serviceRecovery.hours) || 0) + ' hr recovery'
+            )
+          )
+        );
+      })(),
+      /* Patch I: week-strip anchor follows the offset by 14-day shifts
+         (pay periods are 2-week blocks) so Previous shows the
+         calendar-equivalent week 2 weeks ago, Next 2 weeks ahead. Today
+         highlight only fires when Current is selected. Sun-Sat ordering
+         per Selisa's smoke. */
+      (function(){
+        var anchorDate = addDays(parseYMD(todayYMD), offset * 14);
+        var sunday = sundayOf(anchorDate);
+        var byDay = calcWeekHoursByDay(trainerName, sunday, ctx);
+        var canHighlightToday = offset === 0;
         return e('div', { className: 'week-strip' },
           byDay.days.map(function(d){
-            var isToday = d.ymd === todayYMD;
+            var isToday = canHighlightToday && d.ymd === todayYMD;
             return e('div', {
               key: d.ymd,
               className: 'day' + (isToday ? ' is-today' : '')
@@ -16243,9 +16280,9 @@
     var ctx = props.ctx;
     var onTrainerSelect = props.onTrainerSelect;
 
-    /* Spec 1 (D): per-day Mon-Sat breakdown for each trainer. Three-pill
-       toggle is now week-based (was pay-period). Drill-down to a
-       trainer's TimeCardView still uses pay-period there. */
+    /* Spec 1 (D) + Patch I: per-day Sun-Sat breakdown for each trainer.
+       Three-pill toggle is week-based; drill-down to a trainer's
+       TimeCardView uses pay-period there. */
     var weekOffsetTuple = useState(0);
     var weekOffset = weekOffsetTuple[0]; var setWeekOffset = weekOffsetTuple[1];
 
@@ -16254,21 +16291,20 @@
     });
 
     var todayY = todayStr();
-    var monday = mondayOf(addDays(parseYMD(todayY), weekOffset * 7));
-    var weekEnd = addDays(monday, 5);
-    var weekLabel = monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+    var sunday = sundayOf(addDays(parseYMD(todayY), weekOffset * 7));
+    var weekEnd = addDays(sunday, 6);
+    var weekLabel = sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
       ' – ' + weekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
     var rows = trainerNames.map(function(name){
-      var byDay = calcWeekHoursByDay(name, monday, ctx);
+      var byDay = calcWeekHoursByDay(name, sunday, ctx);
       return { name: name, byDay: byDay };
     });
 
-    var dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    var todayIdx = -1; /* which Mon-Sat column is today, if this is the current week */
+    var dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var todayIdx = -1; /* which Sun-Sat column is today, if this is the current week */
     if (weekOffset === 0) {
-      var dow = parseYMD(todayY).getDay(); /* 0=Sun..6=Sat */
-      if (dow >= 1 && dow <= 6) todayIdx = dow - 1;
+      todayIdx = parseYMD(todayY).getDay(); /* 0=Sun..6=Sat maps directly */
     }
 
     var teamTotalsPerDay = dayLabels.map(function(_, i){
