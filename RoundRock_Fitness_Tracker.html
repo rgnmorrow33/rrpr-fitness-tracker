@@ -9687,33 +9687,9 @@
     var closuresCount = (ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length;
     var timeOffCount = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length;
 
-    /* Patch: surface clients with empty trainerName who have at least one
-       scheduled session. Consultation-mode intake creates these (trainer
-       assigned post-consult); without this panel they'd never appear in
-       any trainer's week and would slip past admin until the appointment
-       date passed. Sorted by next-scheduled-date ascending. */
-    var todayY = todayStr();
-    var unassignedConsults = (function(){
-      var rows = [];
-      (ctx.clients || []).forEach(function(c){
-        if (c.deleted_at) return;
-        var hasTrainer = c.trainerName && String(c.trainerName).trim();
-        if (hasTrainer) return;
-        var upcoming = (c.sessions || []).filter(function(s){
-          return s.status === 'scheduled' && (!s.date || s.date >= todayY);
-        }).sort(function(a, b){
-          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
-          return (a.time || '') < (b.time || '') ? -1 : 1;
-        });
-        if (upcoming.length === 0) return;
-        rows.push({ client: c, next: upcoming[0] });
-      });
-      rows.sort(function(a, b){
-        if (a.next.date !== b.next.date) return a.next.date < b.next.date ? -1 : 1;
-        return (a.next.time || '') < (b.next.time || '') ? -1 : 1;
-      });
-      return rows;
-    })();
+    /* Patch J: unassigned consultations panel relocated to the Leads
+       hub (ConsultQueueView). AdminScheduleView returns to being purely
+       about scheduling. */
 
     return e('div', null,
       e('div', { className: 'section-head' },
@@ -9735,68 +9711,6 @@
             onClick: function(){ setBannersOpen(true); }
           }, 'Banners')
         )
-      ),
-      /* Patch: unassigned consultations panel. Click a row to open the
-         client (admin assigns a trainer via the existing edit flow,
-         which propagates to the scheduled session via fallback). */
-      unassignedConsults.length > 0 && e('div', {
-        style: {
-          background: 'var(--ochre-bg)',
-          border: '1px solid var(--ochre)',
-          borderRadius: '6px',
-          padding: '12px 14px',
-          marginBottom: '14px'
-        }
-      },
-        e('div', {
-          style: {
-            fontSize: '12px', fontWeight: 700, letterSpacing: '0.05em',
-            textTransform: 'uppercase', color: 'var(--ochre)', marginBottom: '6px'
-          }
-        }, '⚠ Unassigned consultations (' + unassignedConsults.length + ')'),
-        e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '10px' } },
-          'Booked through the front-desk consultation flow. Open the client to pick a trainer.'
-        ),
-        unassignedConsults.map(function(row){
-          var c = row.client; var s = row.next;
-          var when = s.date
-            ? (formatShort(parseYMD(s.date)) + (s.time ? (' · ' + formatTime12(s.time)) : ''))
-            : 'No date set';
-          return e('button', {
-            key: c.id,
-            type: 'button',
-            onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
-            style: {
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '12px',
-              width: '100%',
-              padding: '10px 12px',
-              background: '#fff',
-              border: '1px solid var(--rule)',
-              borderRadius: '6px',
-              marginBottom: '6px',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              textAlign: 'left'
-            }
-          },
-            e('div', null,
-              e('div', { style: { fontSize: '14px', fontWeight: 600, color: 'var(--navy)' } }, c.name),
-              e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
-                when + ' · ' + (c.location || 'CMRC')
-              )
-            ),
-            e('span', {
-              style: {
-                fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
-                background: 'var(--ochre)', color: '#fff', fontWeight: 700,
-                textTransform: 'uppercase', letterSpacing: '0.04em'
-              }
-            }, 'Assign trainer →')
-          );
-        })
       ),
       e('div', { className: 'field', style: { marginBottom: '14px' } },
         e('label', null, 'Trainer'),
@@ -17382,6 +17296,40 @@
     var leadDetailTuple = useState(null);
     var leadDetail = leadDetailTuple[0]; var setLeadDetail = leadDetailTuple[1];
 
+    /* Patch J: triage hub. Two new sections sit above the existing
+       leads queue: unconverted WROs and unassigned consultations.
+       Click-through routes via parent-supplied onOpenWRO/onOpenClient
+       (AdminDashboard wires the detail swaps). */
+    var todayY = todayStr();
+    var unconvertedWROs = (ctx.wros || []).filter(function(w){
+      if (!w || w.deletedAt) return false;
+      return !w.convertedToClientId;
+    }).sort(function(a, b){
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return (a.createdAt || '') < (b.createdAt || '') ? 1 : -1;
+    });
+    var unassignedConsults = (function(){
+      var rows = [];
+      (ctx.clients || []).forEach(function(c){
+        if (c.deleted_at) return;
+        var hasTrainer = c.trainerName && String(c.trainerName).trim();
+        if (hasTrainer) return;
+        var upcoming = (c.sessions || []).filter(function(s){
+          return s.status === 'scheduled' && (!s.date || s.date >= todayY);
+        }).sort(function(a, b){
+          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+          return (a.time || '') < (b.time || '') ? -1 : 1;
+        });
+        if (upcoming.length === 0) return;
+        rows.push({ client: c, next: upcoming[0] });
+      });
+      rows.sort(function(a, b){
+        if (a.next.date !== b.next.date) return a.next.date < b.next.date ? -1 : 1;
+        return (a.next.time || '') < (b.next.time || '') ? -1 : 1;
+      });
+      return rows;
+    })();
+
     var allEntries = ctx.queue || [];
     /* v2.3: filter pills now match the broader state machine. 'open' is a
        virtual filter spanning waiting/assigned/contacted/consult_scheduled. */
@@ -17433,20 +17381,154 @@
       }, 'View pipeline \u2192')
     ) : null;
 
+    /* Patch J: section style helpers shared between the two new triage
+       sections. Visual treatment matches the existing list cards but
+       with a section header carrying the count and an empty state when
+       N === 0 so admins know the surface exists. */
+    function sectionHeader(label, count){
+      return e('div', {
+        style: {
+          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+          marginTop: '20px', marginBottom: '8px',
+          paddingBottom: '6px', borderBottom: '1px solid var(--rule)'
+        }
+      },
+        e('div', {
+          style: {
+            fontSize: '13px', fontWeight: 700,
+            textTransform: 'uppercase', letterSpacing: '0.05em',
+            color: 'var(--ink)'
+          }
+        }, label + ' (' + count + ')')
+      );
+    }
+    function sectionEmpty(msg){
+      return e('div', {
+        style: {
+          padding: '14px 16px',
+          background: 'var(--paper)',
+          border: '1px solid var(--rule)',
+          borderRadius: '6px',
+          fontSize: '13px',
+          color: 'var(--slate-soft)',
+          fontStyle: 'italic',
+          marginBottom: '12px'
+        }
+      }, msg);
+    }
+
     return e('div', null,
       foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
-          e('h2', null, 'Consult Queue'),
+          e('h2', null, 'Leads'),
           e('div', { className: 'meta' },
-            counts.open + ' open \u00b7 ' +
-            counts.aged + ' aged \u00b7 ' +
-            counts.converted + ' converted \u00b7 ' +
-            counts.lost + ' lost'
+            unconvertedWROs.length + ' WRO' + (unconvertedWROs.length === 1 ? '' : 's') + ' \u00b7 ' +
+            unassignedConsults.length + ' unassigned consult' + (unassignedConsults.length === 1 ? '' : 's') + ' \u00b7 ' +
+            counts.open + ' queue open \u00b7 ' +
+            counts.aged + ' aged'
           )
         ),
         e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ Add Lead')
       ),
+
+      /* Patch J Section 1: Unconverted WROs. Click routes to WRODetail
+         via parent. */
+      sectionHeader('Unconverted WROs', unconvertedWROs.length),
+      unconvertedWROs.length === 0
+        ? sectionEmpty('No WROs awaiting conversion.')
+        : unconvertedWROs.map(function(w){
+            var state = wroState(w);
+            var hasFlags = (w.healthFlags && w.healthFlags.trim()) || w.prefersInPersonHealthDiscussion;
+            var leftBorder = hasFlags ? 'var(--amber)' :
+                             state === 'pending' ? 'var(--gold)' :
+                             state === 'in_progress' ? 'var(--teal)' :
+                             'var(--slate-soft)';
+            return e('div', {
+              key: 'wro-' + w.id,
+              onClick: function(){ if (props.onOpenWRO) props.onOpenWRO(w.id); },
+              style: {
+                background: '#fff',
+                border: '1.5px solid var(--rule)',
+                borderLeft: '4px solid ' + leftBorder,
+                borderRadius: '8px',
+                padding: '12px 14px',
+                marginBottom: '8px',
+                cursor: 'pointer'
+              }
+            },
+              e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
+                e('div', { style: { flex: 1, minWidth: '180px' } },
+                  e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+                    e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, w.participantName || '\u2014'),
+                    !w.postCompleted && e('span', {
+                      style: {
+                        fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                        background: WRO_STATE_COLOR[state], color: '#fff',
+                        fontWeight: 700, letterSpacing: '0.04em'
+                      }
+                    }, WRO_STATE_BADGE[state]),
+                    hasFlags && e('span', {
+                      style: {
+                        fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                        background: 'var(--amber-bg)', color: 'var(--amber)',
+                        fontWeight: 700
+                      }
+                    }, '\u26a0 FLAGS')
+                  ),
+                  e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+                    formatShort(parseYMD(w.date || todayStr())) + ' \u00b7 ' + (w.location || 'CMRC') +
+                    (w.phone ? ' \u00b7 ' + w.phone : '') +
+                    (state === 'in_progress' && w.claimedBy ? ' \u00b7 claimed by ' + w.claimedBy : '')
+                  )
+                )
+              )
+            );
+          }),
+
+      /* Patch J Section 2: Unassigned consultations. Click routes to
+         ClientDetail; admin uses the existing edit flow to assign a
+         trainer. */
+      sectionHeader('Unassigned Consultations', unassignedConsults.length),
+      unassignedConsults.length === 0
+        ? sectionEmpty('No unassigned consultations.')
+        : unassignedConsults.map(function(row){
+            var c = row.client; var s = row.next;
+            var when = s.date
+              ? (formatShort(parseYMD(s.date)) + (s.time ? (' \u00b7 ' + formatTime12(s.time)) : ''))
+              : 'No date set';
+            return e('div', {
+              key: 'consult-' + c.id,
+              onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
+              style: {
+                background: '#fff',
+                border: '1.5px solid var(--rule)',
+                borderLeft: '4px solid var(--ochre)',
+                borderRadius: '8px',
+                padding: '12px 14px',
+                marginBottom: '8px',
+                cursor: 'pointer',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px'
+              }
+            },
+              e('div', { style: { flex: 1 } },
+                e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, c.name),
+                e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+                  when + ' \u00b7 ' + (c.location || 'CMRC')
+                )
+              ),
+              e('span', {
+                style: {
+                  fontSize: '10px', padding: '4px 10px', borderRadius: '999px',
+                  background: 'var(--ochre)', color: '#fff', fontWeight: 700,
+                  textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap'
+                }
+              }, 'Assign trainer \u2192')
+            );
+          }),
+
+      /* Section 3: Existing leads queue. Filter chips + list unchanged. */
+      sectionHeader('Leads Queue', counts.open),
       e('div', { style: { display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap' } },
         [
           { id: 'open', label: 'Open' },
@@ -18323,6 +18405,17 @@
     var classDetailId = classDetailTuple[0];
     var setClassDetailId = classDetailTuple[1];
 
+    /* Patch J: WRO detail swap so the Leads hub can route WRO clicks
+       to WRODetail without leaving the Leads tab. Mirrors the
+       client/class swap pattern. Conversion still routes through
+       WRODetail's onConvert -> NewClientModal flow. */
+    var wroDetailTuple = useState(null);
+    var wroDetailId = wroDetailTuple[0];
+    var setWroDetailId = wroDetailTuple[1];
+    var wroConvertTuple = useState(null);
+    var wroConvert = wroConvertTuple[0];
+    var setWroConvert = wroConvertTuple[1];
+
     /* Phase 3b-A2: payroll master-detail. selectedTrainerForPayroll names
        the trainer whose card is open via TeamHoursView drill-down. Cleared
        when the user navigates to a different sidebar tab (effect below) so
@@ -18354,6 +18447,39 @@
       var clz = ctx.classes.find(function(c){ return c.id === classDetailId; });
       if (!clz) { setClassDetailId(null); return null; }
       return e(ClassDetail, { ctx: ctx, cls: clz, onBack: function(){ setClassDetailId(null); }, canEdit: true });
+    }
+    /* Patch J: WRO detail + conversion swap from the Leads hub. The
+       conversion modal mounts inside the WRODetail return so it sits
+       above the detail view, matching AdminWROsView's pattern. */
+    if (wroDetailId) {
+      var wro = (ctx.wros || []).find(function(x){ return x.id === wroDetailId; });
+      if (!wro) { setWroDetailId(null); return null; }
+      return e('div', null,
+        e(WRODetail, {
+          ctx: ctx,
+          wro: wro,
+          onBack: function(){ setWroDetailId(null); },
+          onConvert: function(w){ setWroConvert(w); }
+        }),
+        wroConvert && e(NewClientModal, {
+          ctx: ctx,
+          prefill: {
+            name: wroConvert.participantName,
+            phone: wroConvert.phone,
+            email: wroConvert.email,
+            location: wroConvert.location,
+            referralSource: 'wro'
+          },
+          onClose: function(){ setWroConvert(null); },
+          onCreate: function(c){
+            ctx.auditedUpsertClient(c, 'create');
+            ctx.upsertWRO(Object.assign({}, wroConvert, { convertedToClientId: c.id }));
+            setWroConvert(null);
+            setWroDetailId(null);
+            ctx.toast('WRO converted to PT client ✓');
+          }
+        })
+      );
     }
 
     /* Hoisted navigation helper. Used by AdminOverview's "see all"
@@ -18402,7 +18528,11 @@
     } else if (tab === 'queue') {
       tabView = e(ConsultQueueView, {
         ctx: ctx,
-        onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Pipeline */
+        onNavigate: navigateTab,  /* Cleanup-A: surfaces a fold link to Pipeline */
+        /* Patch J: triage hub click-through. WRO swaps via wroDetailId,
+           consult swaps via clientDetailId. */
+        onOpenWRO: function(id){ setWroDetailId(id); },
+        onOpenClient: function(id){ setClientDetailId(id); }
       });
     } else if (tab === 'pipeline') {
       tabView = e(PipelineView, { ctx: ctx });
