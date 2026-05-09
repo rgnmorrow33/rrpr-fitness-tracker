@@ -1779,25 +1779,31 @@
      .trainer-content because admin views (no .trainer-content wrapper)
      also need to surface it. */
   .ann-banner {
-    background: var(--ink);
-    color: var(--paper);
+    /* Patch E: warm gold heritage palette. Breaks the visual pattern
+       against the dark navy trainer-bar above and the cream content
+       below. Bottom border + subtle navy-tinted shadow lift it off the
+       header on the trainer surface specifically. */
+    background: var(--brass-soft);
+    color: var(--ink);
     padding: 10px 22px;
     font-size: 13px;
+    font-weight: 600;
     line-height: 1.4;
     display: flex;
     align-items: center;
     gap: 10px;
-    border-bottom: 1px solid var(--ink-2);
+    border-bottom: 2px solid var(--brass);
+    box-shadow: 0 2px 4px rgba(21, 36, 58, 0.08);
   }
   .ann-banner .ann-icon {
-    font-size: 14px;
-    color: var(--side-brand);
+    font-size: 16px;
     flex-shrink: 0;
   }
   .ann-banner .ann-body { flex: 1; min-width: 0; }
   .ann-banner .ann-meta {
     font-size: 11px;
-    color: var(--side-text);
+    color: var(--brass);
+    font-weight: 500;
     margin-left: auto;
     white-space: nowrap;
     flex-shrink: 0;
@@ -6420,31 +6426,68 @@
     /* Spec 2 (B): announcement banner mutators. Upsert covers both new
        and edit; deactivate is a "stop now" shortcut that sets endsAt to
        now without preserving full edit history. Delete is hard-delete
-       since these are short-lived ops broadcasts. */
+       since these are short-lived ops broadcasts.
+
+       Patch E: direct Supabase upsert/delete + Promise-returning mutators
+       so callers can await persist before showing success toasts. Mirrors
+       Patch A's persistTimeOffRow pattern. localStorage mode is a no-op
+       so the existing save useEffect handles persistence as before. */
+    function persistBannerRow(stamped){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.announcementBanners.toSupabase(stamped);
+      return supabaseClient.from('announcement_banners')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+    function persistBannerDelete(id){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      return supabaseClient.from('announcement_banners')
+        .delete()
+        .eq('id', id)
+        .then(function(res){ if (res.error) throw res.error; });
+    }
     function upsertBanner(b){
       var hadId = !!(b && b.id);
       var withMeta = Object.assign({ id: hadId ? b.id : uid() }, b, {
         createdBy: b.createdBy || ctxCurrentUserName() || 'unknown',
         createdAt: b.createdAt || new Date().toISOString()
       });
-      setAnnouncementBanners(function(list){
-        if (hadId) return list.map(function(x){ return x.id === withMeta.id ? withMeta : x; });
-        return list.concat([withMeta]);
+      return persistBannerRow(withMeta).then(function(){
+        setAnnouncementBanners(function(list){
+          var next = hadId
+            ? list.map(function(x){ return x.id === withMeta.id ? withMeta : x; })
+            : list.concat([withMeta]);
+          /* Suppress the redundant save useEffect: row is already persisted. */
+          announcementBannersRef.current = next;
+          return next;
+        });
+        return withMeta;
       });
-      return withMeta;
     }
     function deactivateBanner(id){
-      var nowIso = new Date().toISOString();
-      setAnnouncementBanners(function(list){
-        return list.map(function(x){
-          if (x.id !== id) return x;
-          return Object.assign({}, x, { endsAt: nowIso });
+      var before = (announcementBanners || []).find(function(x){ return x.id === id; });
+      if (!before) return Promise.reject(new Error('Banner not found'));
+      var after = Object.assign({}, before, { endsAt: new Date().toISOString() });
+      return persistBannerRow(after).then(function(){
+        setAnnouncementBanners(function(list){
+          var next = list.map(function(x){ return x.id === id ? after : x; });
+          announcementBannersRef.current = next;
+          return next;
         });
+        return after;
       });
     }
     function deleteBanner(id){
-      setAnnouncementBanners(function(list){
-        return list.filter(function(x){ return x.id !== id; });
+      /* Patch E: previously this only filtered local state. The save
+         useEffect upserts only the remaining rows, leaving the deleted
+         row in Supabase indefinitely. Now issues a real DELETE so
+         server-side state matches local. */
+      return persistBannerDelete(id).then(function(){
+        setAnnouncementBanners(function(list){
+          var next = list.filter(function(x){ return x.id !== id; });
+          announcementBannersRef.current = next;
+          return next;
+        });
       });
     }
 
@@ -7734,13 +7777,18 @@
       if (isNaN(Date.parse(endIso))) { setError('Invalid end date'); return; }
       if (Date.parse(endIso) <= Date.now()) { setError('End must be in the future'); return; }
       setError(null);
+      /* Patch E: await persist before success toast; suppress on failure. */
       ctx.upsertBanner({
         body: trimmed,
         startsAt: new Date().toISOString(),
         endsAt: endIso
+      }).then(function(){
+        ctx.toast('Banner posted ✓');
+        setBody('');
+      }).catch(function(err){
+        var msg = err && err.message ? err.message : 'unknown error';
+        ctx.toast('Could not save banner: ' + msg, 'error');
       });
-      ctx.toast('Banner posted ✓');
-      setBody('');
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -7804,12 +7852,18 @@
                 }, status.label)
               ),
               e('div', { style: { display: 'flex', gap: '6px', marginTop: '8px' } },
+                /* Patch E: await persist before success toast on both paths;
+                   surface-specific error wording on failure. */
                 status.label === 'Active' && e('button', {
                   className: 'btn btn-ghost btn-sm',
                   onClick: function(){
                     if (!window.confirm('End this banner now?')) return;
-                    ctx.deactivateBanner(b.id);
-                    ctx.toast('Banner ended', 'info');
+                    ctx.deactivateBanner(b.id).then(function(){
+                      ctx.toast('Banner ended', 'info');
+                    }).catch(function(err){
+                      var msg = err && err.message ? err.message : 'unknown error';
+                      ctx.toast('Could not end banner: ' + msg, 'error');
+                    });
                   }
                 }, 'End now'),
                 e('button', {
@@ -7817,8 +7871,12 @@
                   style: { color: 'var(--brick)' },
                   onClick: function(){
                     if (!window.confirm('Delete this banner permanently?')) return;
-                    ctx.deleteBanner(b.id);
-                    ctx.toast('Banner deleted', 'error');
+                    ctx.deleteBanner(b.id).then(function(){
+                      ctx.toast('Banner deleted', 'error');
+                    }).catch(function(err){
+                      var msg = err && err.message ? err.message : 'unknown error';
+                      ctx.toast('Could not delete banner: ' + msg, 'error');
+                    });
                   }
                 }, 'Delete')
               )
