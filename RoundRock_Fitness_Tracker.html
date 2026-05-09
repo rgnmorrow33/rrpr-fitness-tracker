@@ -4076,6 +4076,20 @@
     no_show: 'var(--red)',
     excused: 'var(--slate)'
   };
+  /* Patch L: surface unassigned-consult sessions distinctly from
+     normal scheduled sessions. A session counts as 'awaiting trainer'
+     when it's still in 'scheduled' state and neither the session nor
+     the parent client has a trainer name. Once a trainer is claimed
+     (Scope 2 inline assign or via ClientDetail edit), this returns
+     the normal 'Scheduled' label automatically - no migration. */
+  function sessionStatusLabel(s, client){
+    if (s && s.status === 'scheduled') {
+      var sessTrainer = s.trainerName && String(s.trainerName).trim();
+      var clientTrainer = client && client.trainerName && String(client.trainerName).trim();
+      if (!sessTrainer && !clientTrainer) return 'Awaiting Trainer';
+    }
+    return SESSION_STATUS_LABEL[s && s.status] || (s && s.status) || '';
+  }
   function sessionCountsAsStrike(s){
     return s && (s.status === 'late_cancel' || s.status === 'no_show');
   }
@@ -7243,6 +7257,26 @@
       });
       upsertClient(stamped);
     }
+    /* Patch L: claim an unassigned consult. Used by both admin inline
+       Assign (any trainer) and trainer self-claim from Leads. Updates
+       the client trainerName and stamps any scheduled session with an
+       empty trainerName so all rendering surfaces agree without
+       relying on the s.trainerName || client.trainerName fallback. */
+    function claimConsult(clientId, trainerName){
+      var name = (trainerName || '').trim();
+      if (!clientId || !name) return false;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return false;
+      var sessions = (before.sessions || []).map(function(s){
+        if (s.status === 'scheduled' && !(s.trainerName && String(s.trainerName).trim())) {
+          return Object.assign({}, s, { trainerName: name });
+        }
+        return s;
+      });
+      var after = Object.assign({}, before, { trainerName: name, sessions: sessions });
+      auditedUpsertClient(after, 'consult_claim', { before: before, after: after });
+      return true;
+    }
     function restoreClient(id){
       var before = clients.find(function(x){ return x.id === id; });
       if (!before) return;
@@ -7513,6 +7547,7 @@
       upsertWRO: upsertWRO,
       claimWRO: claimWRO,
       unclaimWRO: unclaimWRO,
+      claimConsult: claimConsult,
       deleteWRO: deleteWRO,
       referrals: referrals,
       upsertReferral: upsertReferral,
@@ -9424,7 +9459,7 @@
       var client = item.client;
       var status = sess.status || 'attended';
       var stColor = SESSION_STATUS_COLOR[status] || 'var(--slate)';
-      var stLabel = SESSION_STATUS_LABEL[status] || status;
+      var stLabel = sessionStatusLabel(sess, client);
       var isScheduled = status === 'scheduled';
       var isOverdueScheduled = isScheduled && sess.date < todayYMD;
       var stripeColor = isOverdueScheduled ? 'var(--brick)' : (isScheduled ? 'var(--brass-soft)' : stColor);
@@ -11431,7 +11466,7 @@
               (c.sessions || []).slice().reverse().map(function(s){
                 var st = s.status || 'attended';
                 var stColor = SESSION_STATUS_COLOR[st];
-                var stLabel = SESSION_STATUS_LABEL[st];
+                var stLabel = sessionStatusLabel(s, c);
                 var isAttended = st === 'attended';
                 return e('div', {
                   key: s.id,
@@ -12732,7 +12767,7 @@
     var client = props.client;
     var status = s.status || 'attended';
     var stColor = SESSION_STATUS_COLOR[status] || 'var(--slate)';
-    var stLabel = (SESSION_STATUS_LABEL[status] || status).toUpperCase();
+    var stLabel = sessionStatusLabel(s, client).toUpperCase();
     var bothSigned = !!(s.trainerSig && s.clientSig);
     var isAdmin = ctx.session && ctx.session.role === 'admin';
     var canEditAnySession = ctx.can('canEditAnySession');
@@ -17307,6 +17342,11 @@
     var statusFilter = statusFilterTuple[0]; var setStatusFilter = statusFilterTuple[1];
     var leadDetailTuple = useState(null);
     var leadDetail = leadDetailTuple[0]; var setLeadDetail = leadDetailTuple[1];
+    /* Patch L: per-card trainer-pick drafts for inline Assign on
+       unassigned consult cards. Keyed by client id. */
+    var assignDraftsTuple = useState({});
+    var assignDrafts = assignDraftsTuple[0]; var setAssignDrafts = assignDraftsTuple[1];
+    var trainerNames = (ctx.trainers || []).slice().sort();
 
     /* Patch J: triage hub. Two new sections sit above the existing
        leads queue: unconverted WROs and unassigned consultations.
@@ -17509,9 +17549,9 @@
             var when = s.date
               ? (formatShort(parseYMD(s.date)) + (s.time ? (' \u00b7 ' + formatTime12(s.time)) : ''))
               : 'No date set';
+            var draft = assignDrafts[c.id] || '';
             return e('div', {
               key: 'consult-' + c.id,
-              onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
               style: {
                 background: '#fff',
                 border: '1.5px solid var(--rule)',
@@ -17519,23 +17559,80 @@
                 borderRadius: '8px',
                 padding: '12px 14px',
                 marginBottom: '8px',
-                cursor: 'pointer',
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px'
+                display: 'flex', flexDirection: 'column', gap: '10px'
               }
             },
-              e('div', { style: { flex: 1 } },
+              /* Body: click routes to ClientDetail for full intake review. */
+              e('div', {
+                onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
+                style: { cursor: 'pointer' }
+              },
                 e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, c.name),
                 e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
                   when + ' \u00b7 ' + (c.location || 'CMRC')
                 )
               ),
-              e('span', {
-                style: {
-                  fontSize: '10px', padding: '4px 10px', borderRadius: '999px',
-                  background: 'var(--ochre)', color: '#fff', fontWeight: 700,
-                  textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap'
-                }
-              }, 'Assign trainer \u2192')
+              /* Patch L: inline assign row. stopPropagation on the
+                 controls so clicks don't trigger the body-click route. */
+              e('div', {
+                onClick: function(ev){ ev.stopPropagation(); },
+                style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }
+              },
+                e('select', {
+                  value: draft,
+                  onChange: function(ev){
+                    var v = ev.target.value;
+                    setAssignDrafts(function(prev){
+                      var next = Object.assign({}, prev);
+                      next[c.id] = v;
+                      return next;
+                    });
+                  },
+                  style: {
+                    flex: 1, minWidth: '140px', padding: '8px 10px',
+                    border: '1.5px solid var(--rule)', borderRadius: '6px',
+                    background: '#fff', fontSize: '13px', color: 'var(--ink)'
+                  }
+                },
+                  e('option', { value: '' }, 'Pick a trainer...'),
+                  trainerNames.map(function(t){
+                    return e('option', { key: t, value: t }, t);
+                  })
+                ),
+                e('button', {
+                  disabled: !draft,
+                  onClick: function(){
+                    if (!draft) { ctx.toast && ctx.toast('Pick a trainer first.'); return; }
+                    var ok = ctx.claimConsult(c.id, draft);
+                    if (ok) {
+                      ctx.toast && ctx.toast(c.name + ' assigned to ' + draft + '.');
+                      setAssignDrafts(function(prev){
+                        var next = Object.assign({}, prev);
+                        delete next[c.id];
+                        return next;
+                      });
+                    } else {
+                      ctx.toast && ctx.toast('Could not assign trainer.');
+                    }
+                  },
+                  style: {
+                    padding: '8px 14px', borderRadius: '6px',
+                    border: 'none',
+                    background: draft ? 'var(--moss)' : 'var(--rule)',
+                    color: '#fff', fontWeight: 700, fontSize: '12px',
+                    textTransform: 'uppercase', letterSpacing: '0.04em',
+                    cursor: draft ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap'
+                  }
+                }, 'Assign'),
+                e('button', {
+                  onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
+                  style: {
+                    padding: '8px 10px', borderRadius: '6px',
+                    border: '1px solid var(--rule)', background: '#fff',
+                    color: 'var(--slate)', fontSize: '12px', cursor: 'pointer', whiteSpace: 'nowrap'
+                  }
+                }, 'Details \u2192')
+              )
             );
           }),
 
@@ -17983,6 +18080,33 @@
       return ad < bd ? 1 : -1;
     });
 
+    /* Patch L: unassigned consultations (Front Desk created, no
+       trainer yet). Trainers self-claim from here. Mirrors the admin
+       hub filter; uses claimConsult to assign self + stamp the
+       scheduled session. */
+    var todayY_L = todayStr();
+    var unassignedConsults = (function(){
+      var rows = [];
+      (ctx.clients || []).forEach(function(c){
+        if (c.deleted_at) return;
+        var hasTrainer = c.trainerName && String(c.trainerName).trim();
+        if (hasTrainer) return;
+        var upcoming = (c.sessions || []).filter(function(s){
+          return s.status === 'scheduled' && (!s.date || s.date >= todayY_L);
+        }).sort(function(a, b){
+          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+          return (a.time || '') < (b.time || '') ? -1 : 1;
+        });
+        if (upcoming.length === 0) return;
+        rows.push({ client: c, next: upcoming[0] });
+      });
+      rows.sort(function(a, b){
+        if (a.next.date !== b.next.date) return a.next.date < b.next.date ? -1 : 1;
+        return (a.next.time || '') < (b.next.time || '') ? -1 : 1;
+      });
+      return rows;
+    })();
+
     function leadRow(q, opts){
       opts = opts || {};
       var aged = isQueueLeadAged(q);
@@ -18058,6 +18182,63 @@
       mine.length > 0 && e('div', { style: { marginBottom: '20px' } },
         e('h3', { style: { fontSize: '15px', color: 'var(--slate)', marginBottom: '10px' } }, 'My pipeline (assigned, contacted, scheduled)'),
         mine.map(function(q){ return leadRow(q, { background: 'var(--teal-bg)', stripeColor: 'var(--teal)' }); })
+      ),
+
+      /* Patch L: Unassigned Consultations - Front Desk booked a consult
+         but no trainer is assigned. Tap Claim to take it; the consult
+         then shows up in your Today/Week views. */
+      unassignedConsults.length > 0 && e('div', { style: { marginBottom: '20px' } },
+        e('h3', {
+          style: {
+            fontSize: '15px', color: 'var(--ochre)', marginBottom: '4px',
+            display: 'flex', alignItems: 'center', gap: '6px'
+          }
+        }, '📅 Unassigned consultations (' + unassignedConsults.length + ')'),
+        e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '10px', lineHeight: 1.4 } },
+          'Front Desk booked these but no trainer is assigned yet. Tap "I\'ll take it" to claim - the consult will show up in your schedule.'
+        ),
+        unassignedConsults.map(function(row){
+          var c = row.client; var s = row.next;
+          var when = s.date
+            ? (formatShort(parseYMD(s.date)) + (s.time ? (' · ' + formatTime12(s.time)) : ''))
+            : 'No date set';
+          return e('div', {
+            key: 'tlv-consult-' + c.id,
+            className: 't-session',
+            style: { '--stripe-color': 'var(--ochre)', cursor: 'default' }
+          },
+            e('div', { className: 't-session-row' },
+              e('div', { className: 't-session-title' }, c.name),
+              e('span', {
+                style: {
+                  fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+                  background: 'var(--ochre)', color: '#fff',
+                  fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em'
+                }
+              }, 'Awaiting Trainer')
+            ),
+            e('div', { className: 't-session-meta' },
+              e('span', null, when),
+              e('span', null, '·'),
+              e('span', null, c.location || 'CMRC'),
+              c.phone && e('span', null, '·'),
+              c.phone && e('span', null, c.phone)
+            ),
+            (c.goals && c.goals.length > 0) && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+              'Goals: ' + c.goals.join(', ')
+            ),
+            e('div', { className: 't-session-actions' },
+              e('button', {
+                className: 'btn btn-gold btn-sm',
+                onClick: function(){
+                  var ok = ctx.claimConsult(c.id, trainerName);
+                  if (ok) ctx.toast && ctx.toast('Claimed for ' + trainerName, 'success');
+                  else ctx.toast && ctx.toast('Could not claim consult.');
+                }
+              }, 'I\'ll take it')
+            )
+          );
+        })
       ),
 
       /* WROs - three sections by state (v2.5) */
