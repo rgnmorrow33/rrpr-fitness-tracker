@@ -2200,6 +2200,7 @@
       onStatus: onStatus || null
     };
     _activeChannels.set(key, entry);
+    console.info('[realtime] subscribed ' + key);
     initialChannel.subscribe(function(status){
       _handleChannelStatus(key, status);
     });
@@ -2212,15 +2213,20 @@
     };
   }
 
-  /* Sweep live channels and force resubscribe any not in SUBSCRIBED.
-     Called by window 'online' and document visibilitychange:visible
-     listeners installed at App level. Idempotent - already-SUBSCRIBED
-     channels are skipped. */
+  /* Sweep live channels and force resubscribe. Called by window
+     'online', document visibilitychange:visible, and window 'pageshow'
+     listeners installed at App level.
+
+     Patch K: dropped the lastStatus === 'SUBSCRIBED' skip. iOS sleep
+     can sever the WebSocket without Supabase emitting CHANNEL_ERROR /
+     TIMED_OUT / CLOSED, leaving lastStatus stuck at SUBSCRIBED while
+     the channel is actually dead. Always force-reconnect on sweep -
+     the cost is one extra reconnect cycle (~200-500ms) per visibility
+     change; the benefit is guaranteed liveness. */
   function sweepReconnectChannels(reason){
     if (STORAGE_MODE !== 'supabase' || !supabaseClient) return;
     _activeChannels.forEach(function(entry, key){
-      if (entry.lastStatus === 'SUBSCRIBED') return;
-      console.info('[realtime] sweep (' + reason + ') resubscribing ' + key);
+      console.info('[realtime] sweep (' + reason + ') resubscribing ' + key + ' (was: ' + (entry.lastStatus || 'unknown') + ')');
       if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
       entry.backoffMs = BACKOFF_INITIAL_MS;
       _reconnectChannel(key);
@@ -5622,13 +5628,19 @@
          online event both trigger an idempotent sweep. */
       function onVisible(){ if (document.visibilityState === 'visible') sweepReconnectChannels('visible'); }
       function onOnline(){ sweepReconnectChannels('online'); }
+      /* Patch K: pageshow as a backup wake signal. iOS Safari fires
+         pageshow when restoring from BFCache (deep sleep recovery)
+         where visibilitychange may not fire reliably. */
+      function onPageShow(){ sweepReconnectChannels('pageshow'); }
       window.addEventListener('online', onOnline);
       document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('pageshow', onPageShow);
 
       return function(){
         unsubscribe();
         window.removeEventListener('online', onOnline);
         document.removeEventListener('visibilitychange', onVisible);
+        window.removeEventListener('pageshow', onPageShow);
         setSyncStatus(STORAGE_MODE === 'supabase' ? 'disconnected' : 'idle');
       };
     }, []);
