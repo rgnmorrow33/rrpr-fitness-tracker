@@ -4578,6 +4578,17 @@
     return tFirst === cFirst && tFirst.length >= 3;
   }
 
+  /* Patch H: single source of truth for "this client has no trainer
+     yet" rendering. Front-desk consultations and admin/lead clients
+     created without a trainer assignment carry trainerName=''; the
+     AdminScheduleView "Unassigned consultations" panel surfaces those
+     for trainer assignment. Standardizes vocabulary across surfaces
+     that previously rendered '—' / 'Unknown' / 'unassigned' / blank
+     concatenations. */
+  function displayTrainerName(c){
+    return (c && c.trainerName && String(c.trainerName).trim()) || 'Awaiting Trainer';
+  }
+
   /* Patch D (Spec 2): only approved time-off renders on schedules.
      Pending awaits a lead/admin decision. Denied is a closed event.
      Legacy rows lack a status field; the DB default backfilled them
@@ -11132,7 +11143,7 @@
               }
             }, 'stale (' + flags.daysSince + 'd)')
           ),
-          e('div', { className: 'sub' }, 'Trainer: ' + c.trainerName + ' · Purchased ' + formatDate(c.datePurchased))
+          e('div', { className: 'sub' }, 'Trainer: ' + displayTrainerName(c) + ' · Purchased ' + formatDate(c.datePurchased))
         ),
         e('span', { className: 'pill pill-' + (c.location === 'CMRC' ? 'cmrc' : 'baca') }, c.location)
       ),
@@ -11288,7 +11299,7 @@
       !props.hideHeader && e('div', { className: 'header' },
         e('div', null,
           e('h1', null, c.name),
-          e('div', { className: 'sub' }, c.trainerName + ' · ' + c.location)
+          e('div', { className: 'sub' }, displayTrainerName(c) + ' · ' + c.location)
         ),
         e('div', { className: 'header-right' },
           e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
@@ -12188,7 +12199,12 @@
         membershipVerified: false,
         membershipType: 'Non-Member',
         membershipEnd: '',
-        trainerName: props.lockTrainer || ctx.trainers[0] || '',
+        /* Patch H: default to empty (Awaiting Trainer). Previously
+           defaulted to ctx.trainers[0] which auto-assigned the first
+           trainer alphabetically when the picker was hidden (Front
+           Desk consult mode) or when admin/lead created without
+           explicit selection. */
+        trainerName: props.lockTrainer || '',
         referralSource: prefill.referralSource || ''
       };
     });
@@ -12248,9 +12264,10 @@
       var errs = intakeFieldErrors(form);
       setErrors(errs);
       if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
-      /* Patch: trainer is hidden in consult mode (assigned post-
-         consultation) so skip the trainer-required check. */
-      if (!isConsult && !form.trainerName) { ctx.toast('Trainer is required', 'error'); return; }
+      /* Patch H: trainerName='' is now valid in all modes. Empty maps
+         to "Awaiting Trainer" via displayTrainerName + the picker's
+         first option. AdminScheduleView's Unassigned consultations
+         panel surfaces these for later assignment. */
       var pkg = selectedPkg;
       var pkgRecord = {
         sessions: pkg.sessions,
@@ -12427,7 +12444,10 @@
             )
           ),
           /* Trainer assignment hidden in consult mode - admin or Carlos
-             assigns post-consult via ClientDetail edit. */
+             assigns post-consult via ClientDetail edit. Patch H: first
+             option is "Awaiting Trainer" (value='') so admin/lead can
+             create a client without forcing a trainer pick; the
+             AdminScheduleView Unassigned panel surfaces these for later. */
           !isConsult && e('div', { className: 'field' },
             e('label', null, 'Trainer'),
             e('select', {
@@ -12435,6 +12455,7 @@
               disabled: !!props.lockTrainer,
               onChange: function(ev){ update('trainerName', ev.target.value); }
             },
+              e('option', { key: '__unassigned', value: '' }, 'Awaiting Trainer'),
               ctx.trainers.map(function(t){ return e('option', { key: t, value: t }, t); })
             )
           ),
@@ -12811,7 +12832,7 @@
           e('div', { className: 'row2', style: { marginBottom: '14px' } },
             e('div', null,
               e('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate-soft)', fontWeight: 700, marginBottom: '4px' } }, 'Trainer'),
-              e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '6px' } }, client.trainerName || '—'),
+              e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '6px' } }, displayTrainerName(client)),
               s.trainerSig
                 ? e('img', { src: s.trainerSig, style: { maxHeight: '60px', maxWidth: '160px', border: '1px solid var(--border)', borderRadius: '6px', background: '#fff' } })
                 : e('span', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No signature')
@@ -16488,7 +16509,7 @@
     CONTACT_TOPICS.forEach(function(t){ byTopic[t] = 0; });
 
     filtered.forEach(function(c){
-      var t = c.trainerName || 'Unknown';
+      var t = displayTrainerName(c);
       if (!byTrainer[t]) byTrainer[t] = { total: 0, byType: { quick: 0, substantive: 0, educational: 0 }, byTopic: {} };
       byTrainer[t].total++;
       if (byType[c.type] != null) {
@@ -16722,7 +16743,7 @@
           },
             e('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '8px' } },
               e('div', { style: { color: 'var(--navy)', fontWeight: 600 } },
-                c.trainerName + ' \u00b7 ' + formatShort(parseYMD(c.date))
+                displayTrainerName(c) + ' \u00b7 ' + formatShort(parseYMD(c.date))
               ),
               e('div', { style: { display: 'flex', gap: '6px' } },
                 e('span', {
@@ -18757,7 +18778,7 @@
           time: formatTime12(s.time),
           relative: relLabel(sm - nowMin),
           who: c.name,
-          meta: 'PT \u00b7 with ' + (c.trainerName || 'unassigned'),
+          meta: 'PT \u00b7 with ' + displayTrainerName(c),
           status: s.status === 'attended' ? 'logged' : (s.status ? s.status : 'scheduled'),
           alert: false,
           onClick: function(){ onClientClick(c.id); }
@@ -22480,7 +22501,7 @@
               e('div', null,
                 e('div', { style: { fontWeight: 700 } }, c.name),
                 e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-                  c.trainerName + ' · ' + c.location +
+                  displayTrainerName(c) + ' · ' + c.location +
                   (c.phone ? ' · ' + c.phone : '')
                 )
               ),
@@ -22580,7 +22601,7 @@
             e('div', null,
               e('div', { style: { fontWeight: 700 } }, c.name),
               e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-                c.trainerName + ' · ' + c.location + ' · last visit ' +
+                displayTrainerName(c) + ' · ' + c.location + ' · last visit ' +
                 (c.sessions && c.sessions.length ? formatDate(c.sessions[c.sessions.length-1].date) : '-')
               )
             ),
@@ -22652,7 +22673,7 @@
             e('div', null,
               e('div', { style: { fontWeight: 700 } }, c.name),
               e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-                c.trainerName + ' · ' + c.location +
+                displayTrainerName(c) + ' · ' + c.location +
                 ' · ' + x.strikes.lateCancels + ' late cancel' + (x.strikes.lateCancels !== 1 ? 's' : '') +
                 ', ' + x.strikes.noShows + ' no-show' + (x.strikes.noShows !== 1 ? 's' : '')
               )
@@ -22686,7 +22707,7 @@
             e('div', null,
               e('div', { style: { fontWeight: 700 } }, c.name),
               e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
-                c.trainerName + ' · ' + c.location +
+                displayTrainerName(c) + ' · ' + c.location +
                 ' · ' + sessionsRemaining(c) + ' sessions remaining' +
                 (c.phone ? ' · ' + c.phone : '')
               )
