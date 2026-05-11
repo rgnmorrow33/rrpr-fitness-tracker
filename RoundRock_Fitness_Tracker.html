@@ -2390,7 +2390,11 @@
     ], { drop: [
       /* Local-only fields (no Supabase column). Round-trip via localStorage
          only; absent on the in-memory record after a Supabase load. */
-      'followUpBy', 'rectracMemberId', 'packageInfo', 'lostAt'
+      'followUpBy', 'rectracMemberId', 'packageInfo', 'lostAt',
+      /* Patch P: 'date' was redundant with createdAt and had no column
+         on the leads table. Dropped defensively in case any legacy
+         in-memory lead carries it through a different code path. */
+      'date'
     ]}),
 
     /* Trainers: real table in Supabase (id, name, role, role_tier, pin,
@@ -7115,6 +7119,32 @@
         return list.concat([q]);
       });
     }
+    /* Patch P: direct Supabase upsert of one lead row. Mirrors
+       persistTimeOffRow. localStorage mode is a no-op so the existing
+       save useEffect handles persistence as before. */
+    function persistQueueEntryRow(stamped){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.leads.toSupabase(stamped);
+      return supabaseClient.from('leads')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+    /* Patch P: lead-create with persist-then-toast sequencing. Persists
+       first, then advances local state. On reject, no optimistic state
+       lands and the caller's .catch surfaces the error. Mirrors the
+       requestTimeOff shape from Spec 1 (B). */
+    function createQueueEntry(entry){
+      return persistQueueEntryRow(entry).then(function(){
+        setQueue(function(list){
+          var next = list.concat([entry]);
+          /* Advance the dirty-check ref so the save useEffect skips a
+             redundant follow-up write. */
+          queueRef.current = next;
+          return next;
+        });
+        return entry;
+      });
+    }
     function deleteQueueEntry(id){
       setQueue(function(list){ return list.filter(function(x){ return x.id !== id; }); });
     }
@@ -7848,6 +7878,7 @@
       deleteItem: deleteItem,
       queue: queue,
       upsertQueueEntry: upsertQueueEntry,
+      createQueueEntry: createQueueEntry,
       deleteQueueEntry: deleteQueueEntry,
       claimQueueEntry: claimQueueEntry,
       transitionQueueEntry: transitionQueueEntry,
@@ -15681,11 +15712,17 @@
     /* Follow-up by: defaults to capture date + 3 days. */
     var followUpTuple = useState(defaultFollowUpYMD());
     var followUp = followUpTuple[0]; var setFollowUp = followUpTuple[1];
+    /* Patch P: in-flight save flag. Disables the submit button so a fast
+       double-tap can't fire two creates while the first is still
+       awaiting persist. */
+    var savingTuple = useState(false);
+    var saving = savingTuple[0]; var setSaving = savingTuple[1];
 
     function submit(){
       var errs = intakeFieldErrors({ name: name, phone: phone, email: email });
       setErrors(errs);
       if (hasErrors(errs)) { ctx.toast('Please fix the highlighted fields', 'error'); return; }
+      if (saving) return;
       var nowIso = new Date().toISOString();
       var entry = {
         id: uid(),
@@ -15694,7 +15731,6 @@
         email: email.trim() || null,
         note: note.trim() || null,
         addedBy: (ctx.session && ctx.session.name) || 'admin',
-        date: todayStr(),
         status: 'waiting',
         source: source,
         sourceTag: sourceTag.trim() || null,
@@ -15714,9 +15750,19 @@
         }],
         createdAt: nowIso
       };
-      ctx.upsertQueueEntry(entry);
-      ctx.toast('Lead added to queue \u2713');
-      props.onClose();
+      /* Patch P: persist-then-toast. No optimistic setQueue - the lead
+         only lands in state after the write resolves. On reject the
+         modal stays open so the user can retry without re-entering. */
+      setSaving(true);
+      ctx.createQueueEntry(entry).then(function(){
+        setSaving(false);
+        ctx.toast('Lead added to queue \u2713');
+        props.onClose();
+      }).catch(function(err){
+        setSaving(false);
+        var msg = err && err.message ? err.message : 'unknown error';
+        ctx.toast('Could not save lead: ' + msg, 'error');
+      });
     }
 
     return e('div', { className: 'modal-backdrop' },
@@ -15781,8 +15827,8 @@
           )
         ),
         e('div', { className: 'modal-footer' },
-          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
-          e('button', { className: 'btn btn-gold', onClick: submit }, 'Add to Queue')
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose, disabled: saving }, 'Cancel'),
+          e('button', { className: 'btn btn-gold', onClick: submit, disabled: saving }, saving ? 'Saving…' : 'Add to Queue')
         )
       )
     );
@@ -18516,7 +18562,7 @@
                     'Source: ' + (QUEUE_SOURCE_LABEL[q.source] || q.source || 'Unknown') +
                     (q.sourceTag ? (' (' + q.sourceTag + ')') : '') +
                     ' \u00b7 Added by ' + (q.addedBy || 'unknown') +
-                    ' \u00b7 ' + formatShort(parseYMD(q.date || todayStr())) +
+                    ' \u00b7 ' + formatShort(parseYMD(q.date || (q.createdAt || '').slice(0, 10) || todayStr())) +
                     ' \u00b7 Age ' + queueLeadAgeDays(q) + 'd'
                   ),
                   q.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '6px', fontStyle: 'italic' } }, '\u201c' + q.note + '\u201d'),

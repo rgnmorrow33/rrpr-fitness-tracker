@@ -227,6 +227,17 @@ when convenient.
 - Phantom 'claimed' sub_assignments: if sub_request flow ever
   leaves orphaned claimed entries, write a one-time cleanup
   query.
+- Pattern B audit (Patch G2 scope). Most ctx mutators are
+  fire-and-forget setX with the global _saveIfDirty useEffect
+  handling async persistence: upsertClient/auditedUpsertClient,
+  upsertClass/auditedUpsertClass, addSession, addAttendance,
+  addCancellation, addSubAssignment, upsertContact, upsertReferral,
+  upsertWRO, addClosure, etc. Their callers fire green toasts
+  before the save resolves, so a translator/schema mismatch on
+  any of them surfaces as Reagan's "green then red" bug pattern
+  (the one Patch P just fixed for leads). G2 should sweep them
+  with the requestTimeOff / createQueueEntry persist-then-toast
+  shape.
 
 ## Deferred features
 
