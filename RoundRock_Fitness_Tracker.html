@@ -4483,17 +4483,47 @@
     return toYMD(addDays(d, n));
   }
 
-  /* Sprint M: scan a recurring series for collision with facility
-     closures or approved trainer time-off. Pure function over the
-     current closures + timeOff snapshots. Returns one row per
-     conflicting occurrence with a human-readable reason.
+  /* Spec 1: build a recurring series' dates from a weekday set.
+     Walks forward day-by-day from startDate, emitting dates whose
+     weekday (0=Sun ... 6=Sat) is in the selected set. Stops once
+     `count` dates have been emitted. If startDate is not on a
+     selected weekday, the first emission lands on the first match
+     on or after startDate.
 
+       startDate  - YMD ('YYYY-MM-DD')
+       weekdays   - array of integers 0-6
+       count      - desired number of session dates
+
+     Empty weekdays or count=0 returns []. Safety-capped at 730
+     iterations (~2 years) so a pathological caller with very
+     sparse weekdays can't spin forever. */
+  function generateSeriesDates(opts){
+    var startDate = opts.startDate;
+    var weekdays = opts.weekdays || [];
+    var count = Math.max(0, parseInt(opts.count, 10) || 0);
+    if (!startDate || weekdays.length === 0 || count === 0) return [];
+    var pickSet = {};
+    weekdays.forEach(function(w){ pickSet[w] = true; });
+    var cursor = parseYMD(startDate);
+    if (!cursor) return [];
+    var out = [];
+    for (var i = 0; out.length < count && i < 730; i++) {
+      if (pickSet[cursor.getDay()]) out.push(toYMD(cursor));
+      cursor = addDays(cursor, 1);
+    }
+    return out;
+  }
+
+  /* Sprint M (Spec 1 rewrite): scan a pre-computed series of session
+     dates for collision with facility closures or approved trainer
+     time-off. Date generation happens upstream via generateSeriesDates
+     so this function is a pure date-array iterator. Returns one row
+     per conflicting occurrence with a human-readable reason.
+
+       dates        - array of YMD strings to scan
        trainerName  - regular trainer for the series (string)
        trainerId    - resolved id for time-off lookup (nullable)
        facility     - 'CMRC' | 'Baca' | etc (matches closure.facility scope)
-       startDate    - first occurrence YMD
-       cadenceDays  - integer >= 1
-       count        - number of occurrences in the series
        closures     - ctx.closures
        timeOff      - ctx.timeOff
 
@@ -4501,19 +4531,18 @@
      the literal facility name. Time-off label includes the trainer
      name + kind so the warning block reads naturally. */
   function scanSeriesConflicts(opts){
+    var dates = opts.dates || [];
+    if (dates.length === 0) return [];
     var closures = opts.closures || [];
     var timeOff = opts.timeOff || [];
     var trainerId = opts.trainerId || null;
     var trainerName = opts.trainerName || '';
     var facility = opts.facility || null;
-    var startDate = opts.startDate;
-    var cadenceDays = Math.max(1, parseInt(opts.cadenceDays, 10) || 1);
-    var count = Math.max(0, parseInt(opts.count, 10) || 0);
-    if (!startDate || count === 0) return [];
 
     var out = [];
-    for (var i = 0; i < count; i++) {
-      var ymd = addDaysYMD(startDate, cadenceDays * i);
+    for (var i = 0; i < dates.length; i++) {
+      var ymd = dates[i];
+      if (!ymd) continue;
 
       var closure = findFacilityClosure(closures, ymd, facility);
       if (closure) {
@@ -6323,37 +6352,43 @@
     }
 
     /* Sprint M: bulk-create a recurring session series. Generates one
-       seriesId, builds `count` session rows spaced by cadenceDays, and
-       writes them as one audited mutation on the client record. The
-       caller is responsible for confirming package balance before
+       seriesId, builds `count` session rows on the picked weekdays,
+       and writes them as one audited mutation on the client record.
+       The caller is responsible for confirming package balance before
        calling - we don't re-check inside since this is a single
        atomic write and a partial commit isn't possible.
 
          clientId, trainerName, startDate ('YYYY-MM-DD'), time ('HH:MM'),
-         durationMin (number, optional), cadenceDays, count, note (optional)
+         durationMin (number, optional), weekdays (int[] 0-6),
+         count, note (optional)
 
-       Returns the new seriesId (caller toasts on success). */
+       Returns the new seriesId (caller toasts on success). Spec 1:
+       cadenceDays replaced with weekdays; date generation goes
+       through generateSeriesDates so 'Tue + Thu' renders as alternating
+       Tue/Thu rather than rigid N-day spacing. */
     function createRecurringSessions(opts){
       var clientId = opts.clientId;
       var trainerName = opts.trainerName || null;
       var startDate = opts.startDate;
       var time = opts.time;
       var durationMin = opts.durationMin || null;
-      var cadenceDays = Math.max(1, parseInt(opts.cadenceDays, 10) || 7);
+      var weekdays = opts.weekdays || [];
       var count = Math.max(0, parseInt(opts.count, 10) || 0);
       var note = opts.note || null;
-      if (!clientId || !startDate || !time || count === 0) return null;
+      if (!clientId || !startDate || !time || count === 0 || weekdays.length === 0) return null;
       var before = clients.find(function(x){ return x.id === clientId; });
       if (!before) return null;
+
+      var dates = generateSeriesDates({ startDate: startDate, weekdays: weekdays, count: count });
+      if (dates.length === 0) return null;
 
       var seriesId = uid();
       var nowIso = new Date().toISOString();
       var scheduledBy = (session && session.name) || null;
-      var newSessions = [];
-      for (var i = 0; i < count; i++) {
+      var newSessions = dates.map(function(ymd){
         var row = {
           id: uid(),
-          date: addDaysYMD(startDate, cadenceDays * i),
+          date: ymd,
           time: time,
           status: 'scheduled',
           note: note,
@@ -6363,8 +6398,8 @@
           series_id: seriesId
         };
         if (durationMin) row.durationHours = durationMin / 60;
-        newSessions.push(row);
-      }
+        return row;
+      });
       var after = Object.assign({}, before, {
         sessions: (before.sessions || []).concat(newSessions)
       });
@@ -6375,17 +6410,18 @@
     /* Sprint M: "this and all future" reschedule. Deletes every
        session in the same series with date >= the anchor session's
        original date, then recreates `count` new sessions starting
-       at newStartDate with the new cadence. Same seriesId is reused
-       so the family stays linked. One atomic write, one audit
-       entry. The caller provides the new date/time/cadence; we keep
-       trainerName / durationHours / note off the anchor row. */
+       at newStartDate on the picked weekdays. Same seriesId is
+       reused so the family stays linked. One atomic write, one audit
+       entry. The caller provides the new date/time/weekdays; we keep
+       trainerName / durationHours / note off the anchor row.
+       Spec 1: newCadenceDays replaced with newWeekdays. */
     function rescheduleSeriesFromHere(opts){
       var clientId = opts.clientId;
       var fromSessionId = opts.fromSessionId;
       var newStartDate = opts.newStartDate;
       var newTime = opts.newTime;
-      var newCadenceDays = Math.max(1, parseInt(opts.newCadenceDays, 10) || 7);
-      if (!clientId || !fromSessionId || !newStartDate || !newTime) return false;
+      var newWeekdays = opts.newWeekdays || [];
+      if (!clientId || !fromSessionId || !newStartDate || !newTime || newWeekdays.length === 0) return false;
       var before = clients.find(function(x){ return x.id === clientId; });
       if (!before) return false;
       var anchor = (before.sessions || []).find(function(s){ return s.id === fromSessionId; });
@@ -6408,13 +6444,15 @@
       var kept = (before.sessions || []).filter(function(s){
         return !(s.series_id === seriesId && s.date >= anchorDate);
       });
+      var dates = generateSeriesDates({ startDate: newStartDate, weekdays: newWeekdays, count: count });
+      if (dates.length === 0) return false;
+
       var nowIso = new Date().toISOString();
       var scheduledBy = (session && session.name) || null;
-      var newSessions = [];
-      for (var i = 0; i < count; i++) {
+      var newSessions = dates.map(function(ymd){
         var row = {
           id: uid(),
-          date: addDaysYMD(newStartDate, newCadenceDays * i),
+          date: ymd,
           time: newTime,
           status: 'scheduled',
           note: note,
@@ -6424,8 +6462,8 @@
           series_id: seriesId
         };
         if (durationHours) row.durationHours = durationHours;
-        newSessions.push(row);
-      }
+        return row;
+      });
       var after = Object.assign({}, before, { sessions: kept.concat(newSessions) });
       auditedUpsertClient(after, 'recurring_reschedule', { before: before, after: after });
       return true;
@@ -12897,13 +12935,15 @@
     var time = timeTuple[0]; var setTime = timeTuple[1];
     var noteTuple = useState('');
     var note = noteTuple[0]; var setNote = noteTuple[1];
-    /* Sprint M: recurring booking state. When recurring is on, the
-       date field is also the start date; count is the remaining
-       package balance (no auto-extend) and is read-only. */
+    /* Sprint M (Spec 1 rewrite): recurring booking state. weekdays is
+       the set of selected days-of-week (0=Sun ... 6=Sat). When recurring
+       toggles on, seed with the start-date's weekday so the user gets
+       a sensible starting point; they can add/remove from there. count
+       is the remaining package balance (no auto-extend), read-only. */
     var recurringTuple = useState(false);
     var recurring = recurringTuple[0]; var setRecurring = recurringTuple[1];
-    var cadenceTuple = useState(7);
-    var cadenceDays = cadenceTuple[0]; var setCadenceDays = cadenceTuple[1];
+    var weekdaysTuple = useState([]);
+    var weekdays = weekdaysTuple[0]; var setWeekdays = weekdaysTuple[1];
     var confirmConflictsTuple = useState(false);
     var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
 
@@ -12918,28 +12958,47 @@
       if (prof) trainerId = prof.id;
     }
 
-    var seriesCount = recurring ? remaining : 1;
-    var lastDate = recurring && seriesCount > 1
-      ? addDaysYMD(date, cadenceDays * (seriesCount - 1))
-      : date;
+    /* Seed weekdays from the start date when recurring is toggled on
+       (and the user hasn't touched the picker yet). Re-seeds whenever
+       date changes and weekdays is still empty - so flipping recurring
+       off, changing date, flipping back on, picks the new weekday. */
+    useEffect(function(){
+      if (!recurring || weekdays.length > 0) return;
+      var d = parseYMD(date);
+      if (!d) return;
+      setWeekdays([d.getDay()]);
+    }, [recurring, date]);
+
+    var dates = useMemo(function(){
+      if (!recurring) return [];
+      return generateSeriesDates({ startDate: date, weekdays: weekdays, count: remaining });
+    }, [recurring, date, weekdays, remaining]);
+
+    var seriesCount = recurring ? dates.length : 1;
+    var lastDate = (recurring && dates.length > 0) ? dates[dates.length - 1] : date;
 
     var conflicts = useMemo(function(){
-      if (!recurring || !date || seriesCount === 0) return [];
+      if (!recurring || dates.length === 0) return [];
       return scanSeriesConflicts({
+        dates: dates,
         closures: ctx.closures || [],
         timeOff: ctx.timeOff || [],
         trainerId: trainerId,
         trainerName: client.trainerName,
-        facility: client.location,
-        startDate: date,
-        cadenceDays: cadenceDays,
-        count: seriesCount
+        facility: client.location
       });
-    }, [recurring, date, cadenceDays, seriesCount, trainerId, client.location, ctx.closures, ctx.timeOff]);
+    }, [recurring, dates, trainerId, client.trainerName, client.location, ctx.closures, ctx.timeOff]);
 
     /* Reset the confirmation gate whenever the conflict shape changes,
-       so the user has to re-acknowledge after editing cadence/date. */
-    useEffect(function(){ setConfirmConflicts(false); }, [recurring, date, cadenceDays, seriesCount]);
+       so the user has to re-acknowledge after editing weekdays/date. */
+    useEffect(function(){ setConfirmConflicts(false); }, [recurring, date, weekdays]);
+
+    function toggleWeekday(idx){
+      setWeekdays(function(prev){
+        if (prev.indexOf(idx) >= 0) return prev.filter(function(x){ return x !== idx; });
+        return prev.concat([idx]).sort(function(a, b){ return a - b; });
+      });
+    }
 
     function save(){
       if (!date) { ctx.toast('Date is required', 'error'); return; }
@@ -12947,6 +13006,7 @@
       if (remaining <= 0) { ctx.toast('No sessions remaining in package', 'error'); return; }
 
       if (recurring) {
+        if (weekdays.length === 0) { ctx.toast('Pick at least one weekday', 'error'); return; }
         /* Sprint M: locked mechanic 4 - warning-only at scan time, not
            hard-block. User confirms via the checkbox once conflicts
            render. The HOLIDAY chip on the schedule view is the safety
@@ -12960,7 +13020,7 @@
           trainerName: client.trainerName,
           startDate: date,
           time: time,
-          cadenceDays: cadenceDays,
+          weekdays: weekdays,
           count: seriesCount,
           note: note || null
         });
@@ -13034,28 +13094,39 @@
               e(TimePicker, { value: time, onChange: setTime })
             )
           ),
-          recurring && e('div', { className: 'row2' },
-            e('div', { className: 'field' },
-              e('label', null, 'Cadence (days between sessions)'),
-              e('input', {
-                type: 'number',
-                min: '1',
-                max: '90',
-                value: cadenceDays,
-                onChange: function(ev){
-                  var n = parseInt(ev.target.value, 10);
-                  setCadenceDays(isNaN(n) || n < 1 ? 1 : n);
-                }
+          recurring && e('div', { className: 'field' },
+            e('label', null, 'Repeat on'),
+            e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+              ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(function(lbl, idx){
+                var selected = weekdays.indexOf(idx) >= 0;
+                return e('button', {
+                  key: 'dow-' + idx,
+                  type: 'button',
+                  onClick: function(){ toggleWeekday(idx); },
+                  style: {
+                    flex: '1 1 0',
+                    minWidth: '40px',
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: '1.5px solid ' + (selected ? 'var(--navy)' : 'var(--border)'),
+                    background: selected ? 'var(--navy)' : '#fff',
+                    color: selected ? 'var(--cream)' : 'var(--slate)',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                    cursor: 'pointer'
+                  }
+                }, lbl);
               })
             ),
-            e('div', { className: 'field' },
-              e('label', null, 'Total sessions'),
-              e('input', { type: 'text', value: seriesCount, readOnly: true, style: { background: 'var(--cream-2)' } })
+            weekdays.length === 0 && e('div', { style: { fontSize: '11px', color: 'var(--red)', marginTop: '6px', fontStyle: 'italic' } },
+              'Pick at least one weekday.'
             )
           ),
-          recurring && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '-4px', marginBottom: '8px' } },
-            'Last session: ', e('b', null, formatShort(parseYMD(lastDate))),
-            '  ·  Series uses the remaining ', seriesCount, ' session', seriesCount === 1 ? '' : 's', ' on this package.'
+          recurring && weekdays.length > 0 && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '8px' } },
+            'Total sessions: ', e('b', null, seriesCount),
+            '  ·  Last session: ', e('b', null, formatShort(parseYMD(lastDate))),
+            '  ·  Uses the remaining ', seriesCount, ' session', seriesCount === 1 ? '' : 's', ' on this package.'
           ),
           e('div', { className: 'field' },
             e('label', null, 'Note (optional)'),
@@ -13105,7 +13176,8 @@
           e('button', {
             className: 'btn btn-primary',
             onClick: save,
-            disabled: !date || !time || remaining <= 0 || (recurring && conflicts.length > 0 && !confirmConflicts)
+            disabled: !date || !time || remaining <= 0 ||
+              (recurring && (weekdays.length === 0 || (conflicts.length > 0 && !confirmConflicts)))
           }, recurring ? ('Schedule ' + seriesCount + ' sessions') : 'Schedule')
         )
       )
@@ -13126,25 +13198,30 @@
     var s = props.session;
     var inSeries = !!s.series_id;
 
-    /* Derive cadence from the spacing between the anchor and the next
-       same-series occurrence. Falls back to 7 days when this is the
-       only/last remaining session in the series. */
-    function deriveCadence(){
-      if (!inSeries) return 7;
-      var fam = (client.sessions || [])
-        .filter(function(x){ return x.series_id === s.series_id; })
-        .map(function(x){ return x.date; })
-        .sort();
-      var idx = fam.indexOf(s.date);
-      if (idx >= 0 && idx < fam.length - 1) {
-        var d1 = parseYMD(fam[idx]);
-        var d2 = parseYMD(fam[idx + 1]);
-        if (d1 && d2) {
-          var diff = Math.round((d2.getTime() - d1.getTime()) / 86400000);
-          if (diff >= 1) return diff;
-        }
+    /* Spec 1: derive the default weekday set from the future-only
+       sessions in this series. Unique day-of-week values sorted Sun-Sat.
+       Single-future-session fallback uses that session's weekday so the
+       picker isn't empty. Non-series sessions seed with the anchor's
+       weekday in case the user picks "future" scope on a fresh series
+       creation later. */
+    function deriveWeekdays(){
+      if (!inSeries) {
+        var d0 = parseYMD(s.date);
+        return d0 ? [d0.getDay()] : [];
       }
-      return 7;
+      var seen = {};
+      (client.sessions || []).forEach(function(x){
+        if (x.series_id !== s.series_id) return;
+        if (x.date < s.date) return;
+        var d = parseYMD(x.date);
+        if (d) seen[d.getDay()] = true;
+      });
+      var out = Object.keys(seen).map(function(k){ return parseInt(k, 10); }).sort(function(a, b){ return a - b; });
+      if (out.length === 0) {
+        var d1 = parseYMD(s.date);
+        if (d1) out.push(d1.getDay());
+      }
+      return out;
     }
 
     var scopeTuple = useState('one');
@@ -13153,8 +13230,8 @@
     var date = dateTuple[0]; var setDate = dateTuple[1];
     var timeTuple = useState(s.time || '08:00');
     var time = timeTuple[0]; var setTime = timeTuple[1];
-    var cadenceTuple = useState(deriveCadence());
-    var cadenceDays = cadenceTuple[0]; var setCadenceDays = cadenceTuple[1];
+    var weekdaysTuple = useState(deriveWeekdays());
+    var weekdays = weekdaysTuple[0]; var setWeekdays = weekdaysTuple[1];
     var confirmConflictsTuple = useState(false);
     var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
 
@@ -13172,21 +13249,31 @@
       if (prof) trainerId = prof.id;
     }
 
+    var dates = useMemo(function(){
+      if (scope !== 'future') return [];
+      return generateSeriesDates({ startDate: date, weekdays: weekdays, count: seriesCount });
+    }, [scope, date, weekdays, seriesCount]);
+
     var conflicts = useMemo(function(){
-      if (scope !== 'future' || !date || seriesCount === 0) return [];
+      if (scope !== 'future' || dates.length === 0) return [];
       return scanSeriesConflicts({
+        dates: dates,
         closures: ctx.closures || [],
         timeOff: ctx.timeOff || [],
         trainerId: trainerId,
         trainerName: s.trainerName || client.trainerName,
-        facility: client.location,
-        startDate: date,
-        cadenceDays: cadenceDays,
-        count: seriesCount
+        facility: client.location
       });
-    }, [scope, date, cadenceDays, seriesCount, trainerId, client.location, ctx.closures, ctx.timeOff]);
+    }, [scope, dates, trainerId, client.trainerName, client.location, ctx.closures, ctx.timeOff]);
 
-    useEffect(function(){ setConfirmConflicts(false); }, [scope, date, cadenceDays]);
+    useEffect(function(){ setConfirmConflicts(false); }, [scope, date, weekdays]);
+
+    function toggleWeekday(idx){
+      setWeekdays(function(prev){
+        if (prev.indexOf(idx) >= 0) return prev.filter(function(x){ return x !== idx; });
+        return prev.concat([idx]).sort(function(a, b){ return a - b; });
+      });
+    }
 
     function save(){
       if (!date) { ctx.toast('Date is required', 'error'); return; }
@@ -13197,6 +13284,7 @@
         ctx.toast('Session rescheduled ✓');
         return;
       }
+      if (weekdays.length === 0) { ctx.toast('Pick at least one weekday', 'error'); return; }
       /* Future-scope: warning-only conflict gate, same as booking. */
       if (conflicts.length > 0 && !confirmConflicts) {
         ctx.toast('Acknowledge the listed conflicts to continue', 'error');
@@ -13207,7 +13295,7 @@
         fromSessionId: s.id,
         newStartDate: date,
         newTime: time,
-        newCadenceDays: cadenceDays
+        newWeekdays: weekdays
       });
       if (ok) {
         ctx.toast(seriesCount + ' sessions rescheduled ✓');
@@ -13248,17 +13336,33 @@
             )
           ),
           scope === 'future' && e('div', { className: 'field' },
-            e('label', null, 'Cadence (days between sessions)'),
-            e('input', {
-              type: 'number',
-              min: '1',
-              max: '90',
-              value: cadenceDays,
-              onChange: function(ev){
-                var n = parseInt(ev.target.value, 10);
-                setCadenceDays(isNaN(n) || n < 1 ? 1 : n);
-              }
-            })
+            e('label', null, 'Repeat on'),
+            e('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+              ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(function(lbl, idx){
+                var selected = weekdays.indexOf(idx) >= 0;
+                return e('button', {
+                  key: 'rdow-' + idx,
+                  type: 'button',
+                  onClick: function(){ toggleWeekday(idx); },
+                  style: {
+                    flex: '1 1 0',
+                    minWidth: '40px',
+                    padding: '8px 4px',
+                    borderRadius: '8px',
+                    border: '1.5px solid ' + (selected ? 'var(--navy)' : 'var(--border)'),
+                    background: selected ? 'var(--navy)' : '#fff',
+                    color: selected ? 'var(--cream)' : 'var(--slate)',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                    cursor: 'pointer'
+                  }
+                }, lbl);
+              })
+            ),
+            weekdays.length === 0 && e('div', { style: { fontSize: '11px', color: 'var(--red)', marginTop: '6px', fontStyle: 'italic' } },
+              'Pick at least one weekday.'
+            )
           ),
           scope === 'future' && conflicts.length > 0 && e('div', {
             style: {
@@ -13294,7 +13398,8 @@
           e('button', {
             className: 'btn btn-primary',
             onClick: save,
-            disabled: !date || !time || (scope === 'future' && conflicts.length > 0 && !confirmConflicts)
+            disabled: !date || !time ||
+              (scope === 'future' && (weekdays.length === 0 || (conflicts.length > 0 && !confirmConflicts)))
           }, scope === 'future' ? ('Reschedule ' + seriesCount + ' sessions') : 'Save')
         )
       )
