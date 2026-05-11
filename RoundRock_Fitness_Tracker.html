@@ -7277,6 +7277,20 @@
       auditedUpsertClient(after, 'consult_claim', { before: before, after: after });
       return true;
     }
+    /* Patch N: admin inline picker reset. Clears the client trainerName
+       so the consult drops back into the unassigned queue. Scheduled
+       sessions are left as-is - if a trainer was explicitly stamped
+       on a session, unassigning the consult shouldn't yank them off
+       it. Re-assignment via claimConsult will re-stamp any sessions
+       whose trainerName is still empty. */
+    function unassignConsult(clientId){
+      if (!clientId) return false;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return false;
+      var after = Object.assign({}, before, { trainerName: '' });
+      auditedUpsertClient(after, 'consult_unassign', { before: before, after: after });
+      return true;
+    }
     function restoreClient(id){
       var before = clients.find(function(x){ return x.id === id; });
       if (!before) return;
@@ -7548,6 +7562,7 @@
       claimWRO: claimWRO,
       unclaimWRO: unclaimWRO,
       claimConsult: claimConsult,
+      unassignConsult: unassignConsult,
       deleteWRO: deleteWRO,
       referrals: referrals,
       upsertReferral: upsertReferral,
@@ -13346,7 +13361,7 @@
           e('div', { className: 'meta' }, myClasses.length + ' classes · ' + myClasses.reduce(function(s,c){ return s + (c.attendance || []).length; }, 0) + ' sessions logged')
         ),
         e('div', { style: { display: 'flex', gap: '8px' } },
-          e('button', { className: 'btn btn-amber btn-sm', onClick: function(){ setCoverOpen(true); } }, 'Cover a Class'),
+          e('button', { className: 'btn btn-amber btn-sm', onClick: function(){ setCoverOpen(true); } }, 'Pick up a class'),
           ctx.can('canAddClass') && e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setNewOpen(true); } }, '+ New Class')
         )
       ),
@@ -13402,7 +13417,7 @@
     );
   }
 
-  /* ============ COVER A CLASS MODAL ============ */
+  /* ============ PICK UP A CLASS MODAL ============ */
   function CoverClassModal(props){
     var ctx = props.ctx;
     var dateTuple = useState(todayStr());
@@ -13421,7 +13436,7 @@
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
-          e('h2', null, 'Cover a Class'),
+          e('h2', null, 'Pick up a class'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' },
@@ -17342,10 +17357,11 @@
     var statusFilter = statusFilterTuple[0]; var setStatusFilter = statusFilterTuple[1];
     var leadDetailTuple = useState(null);
     var leadDetail = leadDetailTuple[0]; var setLeadDetail = leadDetailTuple[1];
-    /* Patch L: per-card trainer-pick drafts for inline Assign on
-       unassigned consult cards. Keyed by client id. */
-    var assignDraftsTuple = useState({});
-    var assignDrafts = assignDraftsTuple[0]; var setAssignDrafts = assignDraftsTuple[1];
+    /* Patch N: inline picker writes through ctx.claimConsult /
+       ctx.unassignConsult on change. No local draft state - the
+       <select> reads its value off the client's current trainerName
+       (always '' for rows that surface here, since these are the
+       unassigned consults) and applies the assignment immediately. */
     var trainerNames = (ctx.trainers || []).slice().sort();
 
     /* Patch J: triage hub. Two new sections sit above the existing
@@ -17549,7 +17565,7 @@
             var when = s.date
               ? (formatShort(parseYMD(s.date)) + (s.time ? (' \u00b7 ' + formatTime12(s.time)) : ''))
               : 'No date set';
-            var draft = assignDrafts[c.id] || '';
+            var currentTrainer = (c.trainerName && String(c.trainerName).trim()) || '';
             return e('div', {
               key: 'consult-' + c.id,
               style: {
@@ -17572,21 +17588,29 @@
                   when + ' \u00b7 ' + (c.location || 'CMRC')
                 )
               ),
-              /* Patch L: inline assign row. stopPropagation on the
-                 controls so clicks don't trigger the body-click route. */
+              /* Patch N: select-and-go picker. First option is
+                 "Awaiting Trainer" (value='') and clears trainerName
+                 via ctx.unassignConsult. Picking a name fires
+                 ctx.claimConsult immediately. stopPropagation keeps
+                 the body-click route from firing. */
               e('div', {
                 onClick: function(ev){ ev.stopPropagation(); },
                 style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }
               },
                 e('select', {
-                  value: draft,
+                  value: currentTrainer,
                   onChange: function(ev){
                     var v = ev.target.value;
-                    setAssignDrafts(function(prev){
-                      var next = Object.assign({}, prev);
-                      next[c.id] = v;
-                      return next;
-                    });
+                    if (v === currentTrainer) return;
+                    if (v === '') {
+                      var cleared = ctx.unassignConsult(c.id);
+                      if (cleared) ctx.toast && ctx.toast(c.name + ' set to Awaiting Trainer.');
+                      else ctx.toast && ctx.toast('Could not clear trainer.');
+                      return;
+                    }
+                    var ok = ctx.claimConsult(c.id, v);
+                    if (ok) ctx.toast && ctx.toast(c.name + ' assigned to ' + v + '.');
+                    else ctx.toast && ctx.toast('Could not assign trainer.');
                   },
                   style: {
                     flex: 1, minWidth: '140px', padding: '8px 10px',
@@ -17594,36 +17618,11 @@
                     background: '#fff', fontSize: '13px', color: 'var(--ink)'
                   }
                 },
-                  e('option', { value: '' }, 'Pick a trainer...'),
+                  e('option', { value: '' }, 'Awaiting Trainer'),
                   trainerNames.map(function(t){
                     return e('option', { key: t, value: t }, t);
                   })
                 ),
-                e('button', {
-                  disabled: !draft,
-                  onClick: function(){
-                    if (!draft) { ctx.toast && ctx.toast('Pick a trainer first.'); return; }
-                    var ok = ctx.claimConsult(c.id, draft);
-                    if (ok) {
-                      ctx.toast && ctx.toast(c.name + ' assigned to ' + draft + '.');
-                      setAssignDrafts(function(prev){
-                        var next = Object.assign({}, prev);
-                        delete next[c.id];
-                        return next;
-                      });
-                    } else {
-                      ctx.toast && ctx.toast('Could not assign trainer.');
-                    }
-                  },
-                  style: {
-                    padding: '8px 14px', borderRadius: '6px',
-                    border: 'none',
-                    background: draft ? 'var(--moss)' : 'var(--rule)',
-                    color: '#fff', fontWeight: 700, fontSize: '12px',
-                    textTransform: 'uppercase', letterSpacing: '0.04em',
-                    cursor: draft ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap'
-                  }
-                }, 'Assign'),
                 e('button', {
                   onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
                   style: {
