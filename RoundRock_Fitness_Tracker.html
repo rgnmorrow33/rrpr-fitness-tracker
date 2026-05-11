@@ -2608,6 +2608,24 @@
         if (STORAGE_MODE === 'supabase') {
           var rows = (arr || []).map(translator.toSupabase);
           if (rows.length === 0) return Promise.resolve();
+          /* Patch P followup: belt-and-suspenders strip of any 'date'
+             key that leaked past the translator for leads. Logs a
+             warning naming the offending row id so we can trace the
+             source. Schemas other than leads are left alone here -
+             they may legitimately have a 'date' column. */
+          if (supabaseTable === 'leads') {
+            rows.forEach(function(r){
+              if ('date' in r) {
+                console.warn('[bulk-save leads] unexpected date key on row', r.id, '- stripping');
+                delete r.date;
+              }
+            });
+          }
+          /* Patch P followup: per-save observability log of the first
+             row's keys + row count. Mirrors the Patch G1 [save] ok
+             log pattern; helps trace schema-mismatch bugs without
+             requiring smoke screenshots. */
+          console.info('[bulk-save]', supabaseTable, 'rows=' + rows.length, 'keys=' + Object.keys(rows[0]).join(','));
           return supabaseClient.from(supabaseTable).upsert(rows, { onConflict: 'id' })
             .then(function(res){ if (res.error) throw res.error; });
         }
@@ -7121,10 +7139,23 @@
     }
     /* Patch P: direct Supabase upsert of one lead row. Mirrors
        persistTimeOffRow. localStorage mode is a no-op so the existing
-       save useEffect handles persistence as before. */
+       save useEffect handles persistence as before.
+
+       Patch P followup: belt-and-suspenders strip of 'date' (and any
+       other key the leads schema doesn't recognize - 'date' is the only
+       one observed today). Translator's drop list should have already
+       filtered it; if it didn't, this strip catches it AND logs a
+       warning naming the leak so we can trace the source. Temporary
+       observability log of the final row keys helps us see exactly
+       what's hitting the wire. */
     function persistQueueEntryRow(stamped){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
       var supabaseRow = translate.leads.toSupabase(stamped);
+      if ('date' in supabaseRow) {
+        console.warn('[leads-persist] unexpected date key on row', supabaseRow.id, '- stripping');
+        delete supabaseRow.date;
+      }
+      console.info('[leads-persist]', Object.keys(supabaseRow).join(','));
       return supabaseClient.from('leads')
         .upsert(supabaseRow, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
