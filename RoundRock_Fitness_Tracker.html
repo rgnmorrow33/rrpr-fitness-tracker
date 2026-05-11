@@ -9346,6 +9346,7 @@
           },
             e('div', { className: 't-session-row' },
               e('div', { className: 't-session-title' },
+                sess.series_id && e('span', { title: 'Recurring series', style: { color: 'var(--slate-soft)', marginRight: '4px', fontWeight: 500 } }, '\u21bb'),
                 item.client.name + (isSignedAttended ? ' \u2713' : '')
               ),
               e('div', { className: 't-session-time' },
@@ -9771,7 +9772,10 @@
       },
         e('div', { className: 't-session-row' },
           e('div', { className: 't-session-title' }, client.name + (isSignedAttended ? ' ✓' : '')),
-          e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, 'PT')
+          e('span', {
+            title: sess.series_id ? 'PT (recurring series)' : 'PT',
+            style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' }
+          }, sess.series_id ? 'PT ↻' : 'PT')
         ),
         e('div', { className: 't-session-meta' },
           e('span', null, sess.time ? formatTime12(sess.time) : '—'),
@@ -10237,6 +10241,7 @@
             color: getSessionColor('pt', client.location),
             label: client.name,
             location: client.location || '',
+            isSeries: !!s.series_id,
             onClick: function(){
               if (s.status === 'scheduled') {
                 setSignOff({ client: client, session: s });
@@ -10611,7 +10616,10 @@
                         lineHeight: 1.2
                       }
                     },
-                      e('div', { style: { fontWeight: 700, fontSize: '12px' } }, ev.label),
+                      e('div', { style: { fontWeight: 700, fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' } },
+                        e('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, ev.label),
+                        ev.isSeries && e('span', { title: 'Recurring series', style: { opacity: 0.85, fontSize: '11px' } }, '↻')
+                      ),
                       e('div', { style: { opacity: 0.92 } }, timeRange),
                       ev.location && e('div', { style: { opacity: 0.85 } }, ev.location)
                     );
@@ -10739,7 +10747,10 @@
                             gap: '1px'
                           }
                         },
-                          e('div', { style: { fontWeight: 700, fontSize: '11.5px' } }, ev.label),
+                          e('div', { style: { fontWeight: 700, fontSize: '11.5px', display: 'flex', alignItems: 'center', gap: '4px' } },
+                            e('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, ev.label),
+                            ev.isSeries && e('span', { title: 'Recurring series', style: { opacity: 0.85, fontSize: '10.5px' } }, '↻')
+                          ),
                           e('div', { style: { opacity: 0.92 } }, timeRange),
                           ev.location && e('div', { style: { opacity: 0.85 } }, ev.location)
                         );
@@ -11769,6 +11780,7 @@
                 },
                   e('div', null,
                     formatDate(s.date),
+                    s.series_id && e('span', { title: 'Recurring series', style: { color: 'var(--slate-soft)', marginLeft: '6px', fontWeight: 500 } }, '↻'),
                     !isAttended && e('div', {
                       style: {
                         display: 'inline-block',
