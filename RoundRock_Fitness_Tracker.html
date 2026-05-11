@@ -6305,15 +6305,21 @@
         });
       });
     }
+    /* Spec 3: route single-session delete through auditedUpsertClient
+       so the audit log captures who removed which session. Behavior
+       unchanged - same hard-remove (sessionsRemaining recomputes live
+       from row presence, so the package credit returns automatically).
+       Action name 'session_delete' matches the package_deleted /
+       recurring_cancel_all vocabulary on this entity. */
     function deleteSession(clientId, sessId){
-      setClients(function(list){
-        return list.map(function(c){
-          if (c.id !== clientId) return c;
-          var copy = Object.assign({}, c);
-          copy.sessions = (c.sessions || []).filter(function(s){ return s.id !== sessId; });
-          return copy;
-        });
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      var sess = (before.sessions || []).find(function(s){ return s.id === sessId; });
+      if (!sess) return;
+      var after = Object.assign({}, before, {
+        sessions: (before.sessions || []).filter(function(s){ return s.id !== sessId; })
       });
+      auditedUpsertClient(after, 'session_delete', { before: before, after: after });
     }
 
     /* Sprint M: bulk-create a recurring session series. Generates one
