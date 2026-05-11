@@ -71,7 +71,14 @@
     --border: var(--rule);
     --shadow: 0 2px 8px rgba(26,46,74,0.08);
     --shadow-lg: 0 8px 32px rgba(26,46,74,0.18);
+
+    /* Sticky-header offset. Used by .log-row.header inside ClientDetail
+       and ClassDetail tables to stop below the admin .header nav.
+       Trainer shell overrides to 0 below since .trainer-content is its
+       own scroll container and the nav sits outside it. */
+    --nav-height: calc(88px + env(safe-area-inset-top));
   }
+  .trainer-content { --nav-height: 0px; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
     margin: 0;
@@ -601,6 +608,12 @@
     text-transform: uppercase;
     color: var(--slate);
     letter-spacing: 0.05em;
+    /* Stick below the navigation bar. .header / .trainer-bar are
+       z-index 40; this is lower so partial-scroll states never let a
+       column-header label peek above the nav. */
+    position: sticky;
+    top: var(--nav-height);
+    z-index: 30;
   }
   .sig-thumb {
     max-width: 80px;
