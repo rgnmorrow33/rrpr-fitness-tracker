@@ -4462,6 +4462,80 @@
     });
   }
 
+  /* Sprint M: shift a YMD string by N days. parseYMD + addDays + toYMD
+     in one shot for the recurring-series math. */
+  function addDaysYMD(ymd, n){
+    var d = parseYMD(ymd);
+    if (!d) return ymd;
+    return toYMD(addDays(d, n));
+  }
+
+  /* Sprint M: scan a recurring series for collision with facility
+     closures or approved trainer time-off. Pure function over the
+     current closures + timeOff snapshots. Returns one row per
+     conflicting occurrence with a human-readable reason.
+
+       trainerName  - regular trainer for the series (string)
+       trainerId    - resolved id for time-off lookup (nullable)
+       facility     - 'CMRC' | 'Baca' | etc (matches closure.facility scope)
+       startDate    - first occurrence YMD
+       cadenceDays  - integer >= 1
+       count        - number of occurrences in the series
+       closures     - ctx.closures
+       timeOff      - ctx.timeOff
+
+     Closure scope label: 'all' renders as 'all facilities', otherwise
+     the literal facility name. Time-off label includes the trainer
+     name + kind so the warning block reads naturally. */
+  function scanSeriesConflicts(opts){
+    var closures = opts.closures || [];
+    var timeOff = opts.timeOff || [];
+    var trainerId = opts.trainerId || null;
+    var trainerName = opts.trainerName || '';
+    var facility = opts.facility || null;
+    var startDate = opts.startDate;
+    var cadenceDays = Math.max(1, parseInt(opts.cadenceDays, 10) || 1);
+    var count = Math.max(0, parseInt(opts.count, 10) || 0);
+    if (!startDate || count === 0) return [];
+
+    var out = [];
+    for (var i = 0; i < count; i++) {
+      var ymd = addDaysYMD(startDate, cadenceDays * i);
+
+      var closure = findFacilityClosure(closures, ymd, facility);
+      if (closure) {
+        var fac = closure.facility || 'all';
+        var scopeLabel = fac === 'all' ? 'all facilities' : (fac + ' closed');
+        out.push({
+          date: ymd,
+          reason: closure.reason || 'Facility closure',
+          scope: scopeLabel,
+          kind: 'closure'
+        });
+        continue;
+      }
+
+      if (trainerId) {
+        var dayStartIso = ymd + 'T00:00:00';
+        var dayEndIso = ymd + 'T23:59:59';
+        var hits = listTimeOffForTrainer(timeOff, trainerId, dayStartIso, dayEndIso)
+          .filter(isTimeOffApproved);
+        if (hits.length > 0) {
+          var t = hits[0];
+          var kindLabel = t.kind ? (t.kind.charAt(0).toUpperCase() + t.kind.slice(1)) : 'Time off';
+          var who = trainerName || 'Trainer';
+          out.push({
+            date: ymd,
+            reason: who + ' ' + kindLabel.toLowerCase(),
+            scope: kindLabel,
+            kind: 'time_off'
+          });
+        }
+      }
+    }
+    return out;
+  }
+
   function occurrencesInWindow(classes, startDate, endDate, closures){
     /* Spec 2 (A): closures are now facility-scoped. Multiple closures can
        coexist on the same date (e.g., separate CMRC + Baca rows). Build
@@ -6229,6 +6303,142 @@
       });
     }
 
+    /* Sprint M: bulk-create a recurring session series. Generates one
+       seriesId, builds `count` session rows spaced by cadenceDays, and
+       writes them as one audited mutation on the client record. The
+       caller is responsible for confirming package balance before
+       calling - we don't re-check inside since this is a single
+       atomic write and a partial commit isn't possible.
+
+         clientId, trainerName, startDate ('YYYY-MM-DD'), time ('HH:MM'),
+         durationMin (number, optional), cadenceDays, count, note (optional)
+
+       Returns the new seriesId (caller toasts on success). */
+    function createRecurringSessions(opts){
+      var clientId = opts.clientId;
+      var trainerName = opts.trainerName || null;
+      var startDate = opts.startDate;
+      var time = opts.time;
+      var durationMin = opts.durationMin || null;
+      var cadenceDays = Math.max(1, parseInt(opts.cadenceDays, 10) || 7);
+      var count = Math.max(0, parseInt(opts.count, 10) || 0);
+      var note = opts.note || null;
+      if (!clientId || !startDate || !time || count === 0) return null;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return null;
+
+      var seriesId = uid();
+      var nowIso = new Date().toISOString();
+      var scheduledBy = (session && session.name) || null;
+      var newSessions = [];
+      for (var i = 0; i < count; i++) {
+        var row = {
+          id: uid(),
+          date: addDaysYMD(startDate, cadenceDays * i),
+          time: time,
+          status: 'scheduled',
+          note: note,
+          trainerName: trainerName,
+          scheduledBy: scheduledBy,
+          scheduledAt: nowIso,
+          series_id: seriesId
+        };
+        if (durationMin) row.durationHours = durationMin / 60;
+        newSessions.push(row);
+      }
+      var after = Object.assign({}, before, {
+        sessions: (before.sessions || []).concat(newSessions)
+      });
+      auditedUpsertClient(after, 'recurring_create', { before: before, after: after });
+      return seriesId;
+    }
+
+    /* Sprint M: "this and all future" reschedule. Deletes every
+       session in the same series with date >= the anchor session's
+       original date, then recreates `count` new sessions starting
+       at newStartDate with the new cadence. Same seriesId is reused
+       so the family stays linked. One atomic write, one audit
+       entry. The caller provides the new date/time/cadence; we keep
+       trainerName / durationHours / note off the anchor row. */
+    function rescheduleSeriesFromHere(opts){
+      var clientId = opts.clientId;
+      var fromSessionId = opts.fromSessionId;
+      var newStartDate = opts.newStartDate;
+      var newTime = opts.newTime;
+      var newCadenceDays = Math.max(1, parseInt(opts.newCadenceDays, 10) || 7);
+      if (!clientId || !fromSessionId || !newStartDate || !newTime) return false;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return false;
+      var anchor = (before.sessions || []).find(function(s){ return s.id === fromSessionId; });
+      if (!anchor || !anchor.series_id) return false;
+
+      var seriesId = anchor.series_id;
+      var anchorDate = anchor.date;
+      /* Carry forward fields from the anchor so the recreated rows
+         look like a continuation, not a fresh booking. */
+      var trainerName = anchor.trainerName || null;
+      var note = anchor.note || null;
+      var durationHours = anchor.durationHours || null;
+
+      var toDelete = (before.sessions || []).filter(function(s){
+        return s.series_id === seriesId && s.date >= anchorDate;
+      });
+      var count = toDelete.length;
+      if (count === 0) return false;
+
+      var kept = (before.sessions || []).filter(function(s){
+        return !(s.series_id === seriesId && s.date >= anchorDate);
+      });
+      var nowIso = new Date().toISOString();
+      var scheduledBy = (session && session.name) || null;
+      var newSessions = [];
+      for (var i = 0; i < count; i++) {
+        var row = {
+          id: uid(),
+          date: addDaysYMD(newStartDate, newCadenceDays * i),
+          time: newTime,
+          status: 'scheduled',
+          note: note,
+          trainerName: trainerName,
+          scheduledBy: scheduledBy,
+          scheduledAt: nowIso,
+          series_id: seriesId
+        };
+        if (durationHours) row.durationHours = durationHours;
+        newSessions.push(row);
+      }
+      var after = Object.assign({}, before, { sessions: kept.concat(newSessions) });
+      auditedUpsertClient(after, 'recurring_reschedule', { before: before, after: after });
+      return true;
+    }
+
+    /* Sprint M: "this and all future" cancel. Hard-removes every
+       session in the same series with date >= the anchor session's
+       date. Hard-delete mirrors single-session deletion - package
+       balance recomputes live from row presence, so credits return
+       automatically without a separate refund step. */
+    function cancelSeriesFromHere(opts){
+      var clientId = opts.clientId;
+      var fromSessionId = opts.fromSessionId;
+      if (!clientId || !fromSessionId) return 0;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return 0;
+      var anchor = (before.sessions || []).find(function(s){ return s.id === fromSessionId; });
+      if (!anchor || !anchor.series_id) return 0;
+      var seriesId = anchor.series_id;
+      var anchorDate = anchor.date;
+      var toDelete = (before.sessions || []).filter(function(s){
+        return s.series_id === seriesId && s.date >= anchorDate;
+      });
+      if (toDelete.length === 0) return 0;
+      var kept = (before.sessions || []).filter(function(s){
+        return !(s.series_id === seriesId && s.date >= anchorDate);
+      });
+      var after = Object.assign({}, before, { sessions: kept });
+      auditedUpsertClient(after, 'recurring_cancel_all', { before: before, after: after });
+      return toDelete.length;
+    }
+
     /* ---- class CRUD ---- */
     function upsertClass(cl){
       /* Default is_active=true when missing. The classes table has
@@ -7534,6 +7744,9 @@
       addSession: addSession,
       updateSession: updateSession,
       deleteSession: deleteSession,
+      createRecurringSessions: createRecurringSessions,
+      rescheduleSeriesFromHere: rescheduleSeriesFromHere,
+      cancelSeriesFromHere: cancelSeriesFromHere,
       upsertClass: upsertClass,
       auditedUpsertClass: auditedUpsertClass,
       softDeleteClass: softDeleteClass,
@@ -11201,6 +11414,14 @@
     var detailSessionTuple = useState(null);
     var detailSession = detailSessionTuple[0];
     var setDetailSession = detailSessionTuple[1];
+    /* Sprint M: targets for the new series-aware reschedule / cancel
+       modals. Set to the session row; cleared on modal close. */
+    var rescheduleTargetTuple = useState(null);
+    var rescheduleTarget = rescheduleTargetTuple[0];
+    var setRescheduleTarget = rescheduleTargetTuple[1];
+    var cancelTargetTuple = useState(null);
+    var cancelTarget = cancelTargetTuple[0];
+    var setCancelTarget = cancelTargetTuple[1];
 
     /* Audit history viewer + Show-deleted-packages toggle. Both admin-only. */
     var auditOpenTuple = useState(false);
@@ -11619,7 +11840,27 @@
                admin re-do status/sigs and writes through updateSession. */
             setDetailSession(null);
             setSignOff(s);
+          },
+          onReschedule: function(s){
+            setDetailSession(null);
+            setRescheduleTarget(s);
+          },
+          onCancelSeries: function(s){
+            setDetailSession(null);
+            setCancelTarget(s);
           }
+        }),
+        rescheduleTarget && e(RescheduleSessionModal, {
+          ctx: ctx,
+          client: c,
+          session: rescheduleTarget,
+          onClose: function(){ setRescheduleTarget(null); }
+        }),
+        cancelTarget && e(CancelSessionModal, {
+          ctx: ctx,
+          client: c,
+          session: cancelTarget,
+          onClose: function(){ setCancelTarget(null); }
         }),
         scheduleOpen && e(ScheduleSessionModal, {
           ctx: ctx,
@@ -11630,6 +11871,12 @@
             ctx.addSession(c.id, sess);
             setScheduleOpen(false);
             ctx.toast('Session scheduled ✓');
+          },
+          onScheduleSeries: function(opts){
+            var seriesId = ctx.createRecurringSessions(opts);
+            setScheduleOpen(false);
+            if (seriesId) ctx.toast(opts.count + ' sessions scheduled ✓');
+            else ctx.toast('Could not schedule series', 'error');
           }
         }),
         editOpen && e(NewClientModal, {
@@ -12631,13 +12878,78 @@
     var time = timeTuple[0]; var setTime = timeTuple[1];
     var noteTuple = useState('');
     var note = noteTuple[0]; var setNote = noteTuple[1];
+    /* Sprint M: recurring booking state. When recurring is on, the
+       date field is also the start date; count is the remaining
+       package balance (no auto-extend) and is read-only. */
+    var recurringTuple = useState(false);
+    var recurring = recurringTuple[0]; var setRecurring = recurringTuple[1];
+    var cadenceTuple = useState(7);
+    var cadenceDays = cadenceTuple[0]; var setCadenceDays = cadenceTuple[1];
+    var confirmConflictsTuple = useState(false);
+    var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
+
+    /* Resolve trainerId from name for time-off scan. trainerProfiles
+       is the source of truth; client.trainerName is the regular trainer
+       for the series. Empty name (Awaiting Trainer) yields null and the
+       scan skips time-off checks for the series. */
+    var trainerProfiles = ctx.trainerProfiles || [];
+    var trainerId = null;
+    if (client.trainerName) {
+      var prof = trainerProfiles.find(function(p){ return p.name === client.trainerName; });
+      if (prof) trainerId = prof.id;
+    }
+
+    var seriesCount = recurring ? remaining : 1;
+    var lastDate = recurring && seriesCount > 1
+      ? addDaysYMD(date, cadenceDays * (seriesCount - 1))
+      : date;
+
+    var conflicts = useMemo(function(){
+      if (!recurring || !date || seriesCount === 0) return [];
+      return scanSeriesConflicts({
+        closures: ctx.closures || [],
+        timeOff: ctx.timeOff || [],
+        trainerId: trainerId,
+        trainerName: client.trainerName,
+        facility: client.location,
+        startDate: date,
+        cadenceDays: cadenceDays,
+        count: seriesCount
+      });
+    }, [recurring, date, cadenceDays, seriesCount, trainerId, client.location, ctx.closures, ctx.timeOff]);
+
+    /* Reset the confirmation gate whenever the conflict shape changes,
+       so the user has to re-acknowledge after editing cadence/date. */
+    useEffect(function(){ setConfirmConflicts(false); }, [recurring, date, cadenceDays, seriesCount]);
 
     function save(){
       if (!date) { ctx.toast('Date is required', 'error'); return; }
       if (!time) { ctx.toast('Time is required', 'error'); return; }
       if (remaining <= 0) { ctx.toast('No sessions remaining in package', 'error'); return; }
-      /* Patch F: block scheduling on a facility-matched closure date.
-         Mirror's the class-creation and attendance-log validation pattern. */
+
+      if (recurring) {
+        /* Sprint M: locked mechanic 4 - warning-only at scan time, not
+           hard-block. User confirms via the checkbox once conflicts
+           render. The HOLIDAY chip on the schedule view is the safety
+           net for the day-of view. */
+        if (conflicts.length > 0 && !confirmConflicts) {
+          ctx.toast('Acknowledge the listed conflicts to continue', 'error');
+          return;
+        }
+        props.onScheduleSeries && props.onScheduleSeries({
+          clientId: client.id,
+          trainerName: client.trainerName,
+          startDate: date,
+          time: time,
+          cadenceDays: cadenceDays,
+          count: seriesCount,
+          note: note || null
+        });
+        return;
+      }
+
+      /* Single-session path: existing Patch F closure hard-block stays.
+         The recurring path uses the warning-block scan instead. */
       var blockingClosure = findFacilityClosure(ctx.closures || [], date, client.location);
       if (blockingClosure) {
         var fac = blockingClosure.facility || 'all';
@@ -12662,28 +12974,69 @@
       props.onSchedule(sess);
     }
 
+    var recurringDisabled = remaining <= 0;
+
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
-          e('h3', null, 'Schedule Session'),
+          e('h3', null, recurring ? 'Schedule Recurring Series' : 'Schedule Session'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' },
           e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
-            'Pre-booking a session for ', e('b', null, client.name), '.'
+            'Pre-booking ', recurring ? 'a series' : 'a session', ' for ', e('b', null, client.name), '.'
           ),
-          remaining === 1 && e('div', { className: 'banner amber' },
+          remaining === 1 && !recurring && e('div', { className: 'banner amber' },
             '⚠ This is the LAST session in their package. Discuss renewal at sign-off.'
+          ),
+          /* Recurring toggle. Disabled with tooltip when package balance is 0. */
+          e('div', {
+            className: 'field',
+            title: recurringDisabled ? 'No sessions left on package.' : null,
+            style: { opacity: recurringDisabled ? 0.55 : 1 }
+          },
+            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: recurringDisabled ? 'not-allowed' : 'pointer' } },
+              e('input', {
+                type: 'checkbox',
+                checked: recurring,
+                disabled: recurringDisabled,
+                onChange: function(ev){ setRecurring(ev.target.checked); }
+              }),
+              e('span', null, 'Recurring series')
+            )
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
-              e('label', null, 'Date'),
+              e('label', null, recurring ? 'Start date' : 'Date'),
               e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'Time'),
               e(TimePicker, { value: time, onChange: setTime })
             )
+          ),
+          recurring && e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Cadence (days between sessions)'),
+              e('input', {
+                type: 'number',
+                min: '1',
+                max: '90',
+                value: cadenceDays,
+                onChange: function(ev){
+                  var n = parseInt(ev.target.value, 10);
+                  setCadenceDays(isNaN(n) || n < 1 ? 1 : n);
+                }
+              })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Total sessions'),
+              e('input', { type: 'text', value: seriesCount, readOnly: true, style: { background: 'var(--cream-2)' } })
+            )
+          ),
+          recurring && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '-4px', marginBottom: '8px' } },
+            'Last session: ', e('b', null, formatShort(parseYMD(lastDate))),
+            '  ·  Series uses the remaining ', seriesCount, ' session', seriesCount === 1 ? '' : 's', ' on this package.'
           ),
           e('div', { className: 'field' },
             e('label', null, 'Note (optional)'),
@@ -12693,13 +13046,307 @@
               placeholder: 'e.g. focus on lower body'
             })
           ),
-          e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
+          /* Conflict warning block - recurring only. Reads from
+             scanSeriesConflicts; first hit per date wins. User
+             acknowledges via the checkbox before save unblocks. */
+          recurring && conflicts.length > 0 && e('div', {
+            style: {
+              padding: '12px', marginTop: '8px',
+              background: 'var(--amber-bg)',
+              border: '1.5px solid var(--amber)',
+              borderRadius: '8px'
+            }
+          },
+            e('div', { style: { fontWeight: 700, color: 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
+              'Heads up: ' + conflicts.length + ' of your ' + seriesCount + ' sessions have conflicts.'
+            ),
+            e('ul', { style: { margin: 0, paddingLeft: '18px', fontSize: '12px', color: 'var(--navy)', lineHeight: 1.5 } },
+              conflicts.map(function(c){
+                return e('li', { key: c.date },
+                  formatShort(parseYMD(c.date)) + ' - ' + c.reason +
+                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '')
+                );
+              })
+            ),
+            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
+              e('input', {
+                type: 'checkbox',
+                checked: confirmConflicts,
+                onChange: function(ev){ setConfirmConflicts(ev.target.checked); }
+              }),
+              e('span', null, 'I\'ve reviewed the conflicts and want to book all ' + seriesCount + ' sessions anyway.')
+            )
+          ),
+          !recurring && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
             remaining + ' session' + (remaining === 1 ? '' : 's') + ' remaining after this is consumed.'
           )
         ),
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
-          e('button', { className: 'btn btn-primary', onClick: save, disabled: !date || !time || remaining <= 0 }, 'Schedule')
+          e('button', {
+            className: 'btn btn-primary',
+            onClick: save,
+            disabled: !date || !time || remaining <= 0 || (recurring && conflicts.length > 0 && !confirmConflicts)
+          }, recurring ? ('Schedule ' + seriesCount + ' sessions') : 'Schedule')
+        )
+      )
+    );
+  }
+
+  /* Sprint M: Reschedule a single PT session. When the session belongs
+     to a series (series_id set), the modal offers a radio for
+     "this only" vs "this and all future". "This only" updates the
+     row via ctx.updateSession (no series mutation). "This and all
+     future" deletes the tail of the series and bulk-creates a new
+     tail with the new cadence via ctx.rescheduleSeriesFromHere.
+     For non-series sessions the radio is hidden and the modal acts
+     as a pure single-row date/time editor. */
+  function RescheduleSessionModal(props){
+    var ctx = props.ctx;
+    var client = props.client;
+    var s = props.session;
+    var inSeries = !!s.series_id;
+
+    /* Derive cadence from the spacing between the anchor and the next
+       same-series occurrence. Falls back to 7 days when this is the
+       only/last remaining session in the series. */
+    function deriveCadence(){
+      if (!inSeries) return 7;
+      var fam = (client.sessions || [])
+        .filter(function(x){ return x.series_id === s.series_id; })
+        .map(function(x){ return x.date; })
+        .sort();
+      var idx = fam.indexOf(s.date);
+      if (idx >= 0 && idx < fam.length - 1) {
+        var d1 = parseYMD(fam[idx]);
+        var d2 = parseYMD(fam[idx + 1]);
+        if (d1 && d2) {
+          var diff = Math.round((d2.getTime() - d1.getTime()) / 86400000);
+          if (diff >= 1) return diff;
+        }
+      }
+      return 7;
+    }
+
+    var scopeTuple = useState('one');
+    var scope = scopeTuple[0]; var setScope = scopeTuple[1];
+    var dateTuple = useState(s.date || todayStr());
+    var date = dateTuple[0]; var setDate = dateTuple[1];
+    var timeTuple = useState(s.time || '08:00');
+    var time = timeTuple[0]; var setTime = timeTuple[1];
+    var cadenceTuple = useState(deriveCadence());
+    var cadenceDays = cadenceTuple[0]; var setCadenceDays = cadenceTuple[1];
+    var confirmConflictsTuple = useState(false);
+    var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
+
+    var seriesCount = inSeries
+      ? (client.sessions || []).filter(function(x){
+          return x.series_id === s.series_id && x.date >= s.date;
+        }).length
+      : 1;
+
+    var trainerProfiles = ctx.trainerProfiles || [];
+    var trainerId = null;
+    if (s.trainerName || client.trainerName) {
+      var lookupName = s.trainerName || client.trainerName;
+      var prof = trainerProfiles.find(function(p){ return p.name === lookupName; });
+      if (prof) trainerId = prof.id;
+    }
+
+    var conflicts = useMemo(function(){
+      if (scope !== 'future' || !date || seriesCount === 0) return [];
+      return scanSeriesConflicts({
+        closures: ctx.closures || [],
+        timeOff: ctx.timeOff || [],
+        trainerId: trainerId,
+        trainerName: s.trainerName || client.trainerName,
+        facility: client.location,
+        startDate: date,
+        cadenceDays: cadenceDays,
+        count: seriesCount
+      });
+    }, [scope, date, cadenceDays, seriesCount, trainerId, client.location, ctx.closures, ctx.timeOff]);
+
+    useEffect(function(){ setConfirmConflicts(false); }, [scope, date, cadenceDays]);
+
+    function save(){
+      if (!date) { ctx.toast('Date is required', 'error'); return; }
+      if (!time) { ctx.toast('Time is required', 'error'); return; }
+      if (scope === 'one') {
+        ctx.updateSession(client.id, s.id, { date: date, time: time });
+        props.onClose();
+        ctx.toast('Session rescheduled ✓');
+        return;
+      }
+      /* Future-scope: warning-only conflict gate, same as booking. */
+      if (conflicts.length > 0 && !confirmConflicts) {
+        ctx.toast('Acknowledge the listed conflicts to continue', 'error');
+        return;
+      }
+      var ok = ctx.rescheduleSeriesFromHere({
+        clientId: client.id,
+        fromSessionId: s.id,
+        newStartDate: date,
+        newTime: time,
+        newCadenceDays: cadenceDays
+      });
+      if (ok) {
+        ctx.toast(seriesCount + ' sessions rescheduled ✓');
+        props.onClose();
+      } else {
+        ctx.toast('Could not reschedule series', 'error');
+      }
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Reschedule Session'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          inSeries && e('div', { className: 'field' },
+            e('label', null, 'Scope'),
+            e('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
+                e('input', { type: 'radio', checked: scope === 'one', onChange: function(){ setScope('one'); } }),
+                e('span', null, 'Reschedule this session only')
+              ),
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
+                e('input', { type: 'radio', checked: scope === 'future', onChange: function(){ setScope('future'); } }),
+                e('span', null, 'Reschedule this and all future sessions in the series (' + seriesCount + ' total)')
+              )
+            )
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, scope === 'future' ? 'New start date' : 'Date'),
+              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Time'),
+              e(TimePicker, { value: time, onChange: setTime })
+            )
+          ),
+          scope === 'future' && e('div', { className: 'field' },
+            e('label', null, 'Cadence (days between sessions)'),
+            e('input', {
+              type: 'number',
+              min: '1',
+              max: '90',
+              value: cadenceDays,
+              onChange: function(ev){
+                var n = parseInt(ev.target.value, 10);
+                setCadenceDays(isNaN(n) || n < 1 ? 1 : n);
+              }
+            })
+          ),
+          scope === 'future' && conflicts.length > 0 && e('div', {
+            style: {
+              padding: '12px', marginTop: '8px',
+              background: 'var(--amber-bg)',
+              border: '1.5px solid var(--amber)',
+              borderRadius: '8px'
+            }
+          },
+            e('div', { style: { fontWeight: 700, color: 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
+              'Heads up: ' + conflicts.length + ' of your ' + seriesCount + ' sessions have conflicts.'
+            ),
+            e('ul', { style: { margin: 0, paddingLeft: '18px', fontSize: '12px', color: 'var(--navy)', lineHeight: 1.5 } },
+              conflicts.map(function(c){
+                return e('li', { key: c.date },
+                  formatShort(parseYMD(c.date)) + ' - ' + c.reason +
+                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '')
+                );
+              })
+            ),
+            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
+              e('input', {
+                type: 'checkbox',
+                checked: confirmConflicts,
+                onChange: function(ev){ setConfirmConflicts(ev.target.checked); }
+              }),
+              e('span', null, 'I\'ve reviewed the conflicts and want to reschedule all ' + seriesCount + ' sessions anyway.')
+            )
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', {
+            className: 'btn btn-primary',
+            onClick: save,
+            disabled: !date || !time || (scope === 'future' && conflicts.length > 0 && !confirmConflicts)
+          }, scope === 'future' ? ('Reschedule ' + seriesCount + ' sessions') : 'Save')
+        )
+      )
+    );
+  }
+
+  /* Sprint M: Cancel a PT session with optional series fan-out.
+     For series sessions, offers "this only" vs "this and all future"
+     radio. Hard-delete in both modes - sessionsRemaining recomputes
+     live from row presence so credits return automatically. For
+     non-series sessions the radio is hidden and the modal acts as a
+     simple confirm dialog. */
+  function CancelSessionModal(props){
+    var ctx = props.ctx;
+    var client = props.client;
+    var s = props.session;
+    var inSeries = !!s.series_id;
+
+    var scopeTuple = useState('one');
+    var scope = scopeTuple[0]; var setScope = scopeTuple[1];
+
+    var seriesCount = inSeries
+      ? (client.sessions || []).filter(function(x){
+          return x.series_id === s.series_id && x.date >= s.date;
+        }).length
+      : 1;
+
+    function confirm(){
+      if (scope === 'one') {
+        ctx.deleteSession(client.id, s.id);
+        ctx.toast('Session cancelled ✓');
+        props.onClose();
+        return;
+      }
+      var count = ctx.cancelSeriesFromHere({ clientId: client.id, fromSessionId: s.id });
+      if (count > 0) ctx.toast(count + ' sessions cancelled ✓');
+      else ctx.toast('Could not cancel series', 'error');
+      props.onClose();
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Cancel Session'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '12px' } },
+            inSeries
+              ? 'This session is part of a recurring series. Pick a scope below.'
+              : 'Cancel this session for ' + client.name + '? The session credit returns to the package.'
+          ),
+          inSeries && e('div', { className: 'field' },
+            e('label', null, 'Scope'),
+            e('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
+                e('input', { type: 'radio', checked: scope === 'one', onChange: function(){ setScope('one'); } }),
+                e('span', null, 'Cancel this session only (1 credit returns)')
+              ),
+              e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
+                e('input', { type: 'radio', checked: scope === 'future', onChange: function(){ setScope('future'); } }),
+                e('span', null, 'Cancel this and all future sessions in the series (' + seriesCount + ' credits return)')
+              )
+            )
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Keep session'),
+          e('button', { className: 'btn btn-primary', style: { background: 'var(--red)' }, onClick: confirm },
+            scope === 'future' ? ('Cancel ' + seriesCount + ' sessions') : 'Cancel session'
+          )
         )
       )
     );
@@ -12791,9 +13438,18 @@
     var recovery = s.serviceRecovery || null;
     var hasRecoveryDescription = !!(recovery && (recovery.description || recovery.note));
     var hasRecoveryActions = !!(recovery && recovery.actions && recovery.actions.length > 0);
+    var inSeries = !!s.series_id;
+    var canReschedule = status === 'scheduled' && !bothSigned && canEditAnySession;
 
     function doDelete(){
       if (!canDelete) return;
+      /* Sprint M: series-aware delete prompts. Non-series sessions keep
+         the current window.confirm path. Series sessions hand off to
+         CancelSessionModal where the trainer picks scope. */
+      if (inSeries) {
+        props.onCancelSeries && props.onCancelSeries(s);
+        return;
+      }
       if (!window.confirm('Delete this session?')) return;
       ctx.deleteSession(client.id, s.id);
       props.onClose();
@@ -12852,6 +13508,10 @@
         ),
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
+          canReschedule && props.onReschedule && e('button', {
+            className: 'btn btn-outline',
+            onClick: function(){ props.onReschedule(s); }
+          }, 'Reschedule'),
           canEditAnySession && props.onEdit && e('button', { className: 'btn btn-outline', onClick: function(){ props.onEdit(s); } }, 'Edit'),
           canDeleteSession && e('button', {
             className: 'btn btn-ghost btn-sm',
@@ -12859,7 +13519,7 @@
             disabled: !canDelete,
             title: canDelete ? 'Delete session' : 'Both signatures present - cannot be deleted',
             onClick: doDelete
-          }, 'Delete')
+          }, inSeries ? 'Cancel' : 'Delete')
         )
       )
     );
