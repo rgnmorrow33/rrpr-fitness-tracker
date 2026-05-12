@@ -3009,40 +3009,60 @@
      EditPackageModal, NewClientModal. Selecting a template stamps
      template_id on the package; the synthesized `type` value (e.g.
      'CMRC-10', 'Baca-3-Intro') is what existing code groups by. */
-  /* validDays drives the package_expiring sweep. Consult rows omit it -
-     sessions=0 short-circuits the sweep so they never need a policy.
-     Sprint K.5 reconciliation: every row except Baca pairs aligns to
-     RecTrac's 365-day (12-month) policy. Baca pairs 4/8 are short-window
-     by design (30/60). Prices match RecTrac source-of-truth. */
+  /* Patch T (May 12 2026): standardized 17-entry taxonomy. Path B
+     locked naming - CMRC solo PT uses CMRC-PT-N, Baca solo PT uses
+     Baca-PT-N, Baca intro pack is Baca-1stTime-3. Consult rows are
+     zero-session zero-price; pairs are 4/8 only (no Pairs-12 or
+     Group-* tiers). Each entry carries the meta flags downstream
+     code keys off of: location, is_pairs, is_consult, is_intro.
+     validDays still drives the package_expiring sweep - consults
+     and zero-session rows skip it; PT and pairs default to 365
+     except Baca pairs which keep their RecTrac 30/60 windows.
+     Prices source-of-truth: RecTrac (CMRC pairs $60 + Baca pairs
+     $50/$90 diverge intentionally). */
   var PT_PACKAGES_BY_FACILITY = {
     CMRC: [
-      { id: 'cmrc-consult',  label: 'Consultation (45 min)', sessions: 0,  price: 0,   type: 'CMRC-Consult' },
-      { id: 'cmrc-1',        label: '1 session',             sessions: 1,  price: 38,  type: 'CMRC-1',       validDays: 365 },
-      { id: 'cmrc-3',        label: '3 sessions',            sessions: 3,  price: 105, type: 'CMRC-3',       validDays: 365 },
-      { id: 'cmrc-5',        label: '5 sessions',            sessions: 5,  price: 175, type: 'CMRC-5',       validDays: 365 },
-      { id: 'cmrc-10',       label: '10 sessions',           sessions: 10, price: 330, type: 'CMRC-10',      validDays: 365 },
-      { id: 'cmrc-15',       label: '15 sessions',           sessions: 15, price: 495, type: 'CMRC-15',      validDays: 365 },
-      { id: 'cmrc-20',       label: '20 sessions',           sessions: 20, price: 630, type: 'CMRC-20',      validDays: 365 },
-      { id: 'cmrc-pairs-4',  label: 'Pairs - 4 sessions',    sessions: 4,  price: 60,  type: 'CMRC-Pairs-4', validDays: 365 },
-      { id: 'cmrc-pairs-8',  label: 'Pairs - 8 sessions',    sessions: 8,  price: 105, type: 'CMRC-Pairs-8', validDays: 365 },
-      { id: 'cmrc-pairs-12', label: 'Pairs - 12 sessions',   sessions: 12, price: 145, type: 'CMRC-Pairs-12',validDays: 365 },
-      { id: 'cmrc-group-4',  label: 'Group - 4 sessions',    sessions: 4,  price: 48,  type: 'CMRC-Group-4', validDays: 365 },
-      { id: 'cmrc-group-8',  label: 'Group - 8 sessions',    sessions: 8,  price: 80,  type: 'CMRC-Group-8', validDays: 365 },
-      { id: 'cmrc-group-12', label: 'Group - 12 sessions',   sessions: 12, price: 100, type: 'CMRC-Group-12',validDays: 365 }
+      { id: 'cmrc-consult', label: 'Consultation (45 min)', sessions: 0,  price: 0,   type: 'CMRC-Consult', location: 'CMRC', is_pairs: false, is_consult: true,  is_intro: false },
+      { id: 'cmrc-pt-1',    label: '1 session',             sessions: 1,  price: 38,  type: 'CMRC-PT-1',    location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pt-3',    label: '3 sessions',            sessions: 3,  price: 105, type: 'CMRC-PT-3',    location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pt-5',    label: '5 sessions',            sessions: 5,  price: 175, type: 'CMRC-PT-5',    location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pt-10',   label: '10 sessions',           sessions: 10, price: 330, type: 'CMRC-PT-10',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pt-15',   label: '15 sessions',           sessions: 15, price: 495, type: 'CMRC-PT-15',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pt-20',   label: '20 sessions',           sessions: 20, price: 630, type: 'CMRC-PT-20',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pairs-4', label: 'Pairs - 4 sessions',    sessions: 4,  price: 60,  type: 'CMRC-Pairs-4', location: 'CMRC', is_pairs: true,  is_consult: false, is_intro: false, validDays: 365 }
     ],
     Baca: [
-      { id: 'baca-consult',  label: 'Consultation (45 min)',     sessions: 0,  price: 0,   type: 'Baca-Consult' },
-      { id: 'baca-1',        label: '1 session',                 sessions: 1,  price: 28,  type: 'Baca-1',       validDays: 365 },
-      { id: 'baca-3-intro',  label: '3 sessions (Introductory)', sessions: 3,  price: 40,  type: 'Baca-3-Intro', validDays: 365 },
-      { id: 'baca-3',        label: '3 sessions',                sessions: 3,  price: 75,  type: 'Baca-3',       validDays: 365 },
-      { id: 'baca-5',        label: '5 sessions',                sessions: 5,  price: 115, type: 'Baca-5',       validDays: 365 },
-      { id: 'baca-10',       label: '10 sessions',               sessions: 10, price: 225, type: 'Baca-10',      validDays: 365 },
-      { id: 'baca-15',       label: '15 sessions',               sessions: 15, price: 315, type: 'Baca-15',      validDays: 365 },
-      { id: 'baca-20',       label: '20 sessions',               sessions: 20, price: 400, type: 'Baca-20',      validDays: 365 },
-      { id: 'baca-pairs-4',  label: 'Pairs - 4 sessions',        sessions: 4,  price: 50,  type: 'Baca-Pairs-4', validDays: 30 },
-      { id: 'baca-pairs-8',  label: 'Pairs - 8 sessions',        sessions: 8,  price: 90,  type: 'Baca-Pairs-8', validDays: 60 }
+      { id: 'baca-consult',    label: 'Consultation (45 min)',  sessions: 0,  price: 0,   type: 'Baca-Consult',    location: 'Baca', is_pairs: false, is_consult: true,  is_intro: false },
+      { id: 'baca-1sttime-3',  label: '3 sessions (1st Time)',  sessions: 3,  price: 40,  type: 'Baca-1stTime-3',  location: 'Baca', is_pairs: false, is_consult: false, is_intro: true,  validDays: 365 },
+      { id: 'baca-pt-3',       label: '3 sessions',             sessions: 3,  price: 75,  type: 'Baca-PT-3',       location: 'Baca', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'baca-pt-5',       label: '5 sessions',             sessions: 5,  price: 115, type: 'Baca-PT-5',       location: 'Baca', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'baca-pt-10',      label: '10 sessions',            sessions: 10, price: 225, type: 'Baca-PT-10',      location: 'Baca', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'baca-pt-15',      label: '15 sessions',            sessions: 15, price: 315, type: 'Baca-PT-15',      location: 'Baca', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'baca-pt-20',      label: '20 sessions',            sessions: 20, price: 400, type: 'Baca-PT-20',      location: 'Baca', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'baca-pairs-4',    label: 'Pairs - 4 sessions',     sessions: 4,  price: 50,  type: 'Baca-Pairs-4',    location: 'Baca', is_pairs: true,  is_consult: false, is_intro: false, validDays: 30 },
+      { id: 'baca-pairs-8',    label: 'Pairs - 8 sessions',     sessions: 8,  price: 90,  type: 'Baca-Pairs-8',    location: 'Baca', is_pairs: true,  is_consult: false, is_intro: false, validDays: 60 }
     ]
   };
+
+  /* Patch T: flat type → meta lookup table built from the by-facility
+     map. Indexes by the human-facing `type` string so the bulk CSV
+     import (and any other caller) can validate / price-resolve in
+     one O(1) lookup without juggling facility. */
+  var PACKAGE_META_BY_TYPE = (function(){
+    var out = {};
+    Object.keys(PT_PACKAGES_BY_FACILITY).forEach(function(loc){
+      PT_PACKAGES_BY_FACILITY[loc].forEach(function(p){ out[p.type] = p; });
+    });
+    return out;
+  })();
+  function getPackageMeta(type){
+    return PACKAGE_META_BY_TYPE[type] || null;
+  }
+  function getPriceForPackageType(type){
+    var meta = PACKAGE_META_BY_TYPE[type];
+    if (!meta) throw new Error('Unknown package type: ' + type);
+    return meta.price;
+  }
 
   /* Returns { list, fallback } where fallback is true when the requested
      location was missing or unrecognized and we fell back to CMRC. UI
@@ -3207,6 +3227,25 @@
     'Marcellus Moore',
     'Melanie Gomez',
     'Teri Egan'
+  ];
+  /* Patch T (May 12 2026): the 10 client-facing trainers Reagan
+     locked for the pre-alpha CSV import validation. Distinct from
+     SEED_TRAINERS (12-name localStorage bootstrap) and the live
+     trainers table (which can include retired or non-client-facing
+     accounts). Bulk CSV import validates trainer_name against this
+     hardcoded list exactly - case-sensitive, no fuzz matching.
+     Update on team roster changes. */
+  var CLIENT_FACING_TRAINERS_V1 = [
+    'Alejandra Vargas Guzman',
+    'Carlos Vega',
+    'Christa Yarbrough',
+    'Heather Fox',
+    'Joseph Ughi',
+    'Kathy Kaimanesh',
+    'Marcellus Moore',
+    'Melanie Gomez',
+    'Teri Egan',
+    'Victor Leak'
   ];
   /* First-name / short-name to full-name lookup used when seeding from flyers */
   var TRAINER_SHORT = {
@@ -7191,6 +7230,19 @@
         .upsert(filtered, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
     }
+    /* Patch T: direct Supabase upsert of one client row. Used by the
+       bulk CSV import so per-row failures can halt the loop with a
+       specific error instead of swallowing into the global bulk save.
+       localStorage mode is a no-op - the existing save useEffect
+       handles persistence as before. Mirrors persistQueueEntryRow /
+       persistTimeOffRow. */
+    function persistClientRow(client){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.clients.toSupabase(client);
+      return supabaseClient.from('clients')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
     /* Patch P: lead-create with persist-then-toast sequencing. Persists
        first, then advances local state. On reject, no optimistic state
        lands and the caller's .catch surfaces the error. Mirrors the
@@ -7941,6 +7993,7 @@
       queue: queue,
       upsertQueueEntry: upsertQueueEntry,
       createQueueEntry: createQueueEntry,
+      persistClientRow: persistClientRow,
       deleteQueueEntry: deleteQueueEntry,
       claimQueueEntry: claimQueueEntry,
       transitionQueueEntry: transitionQueueEntry,
@@ -20296,7 +20349,15 @@
     var importOpen = importOpenTuple[0];
     var setImportOpen = importOpenTuple[1];
 
+    /* Patch T: pre-alpha bulk CSV import. Admin-only via canBulkImport
+       (same permission the RecTrac importer should also gate on - flagged
+       for the deferred pile). */
+    var bulkImportOpenTuple = useState(false);
+    var bulkImportOpen = bulkImportOpenTuple[0];
+    var setBulkImportOpen = bulkImportOpenTuple[1];
+
     var canRestoreDeleted = ctx.can('canRestoreDeleted');
+    var canBulkImport = ctx.can('canBulkImport');
 
     /* Counts for the alert chips (computed against full client set) */
     var alertCounts = (function(){
@@ -20436,6 +20497,7 @@
           e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTClientsCSV, title: 'Export filtered clients to CSV' }, '↓ Export Clients CSV'),
           e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTSessionsCSV, title: 'Export all sessions across all clients to CSV' }, '↓ Export Sessions CSV'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setImportOpen(true); } }, '↑ Import from RecTrac'),
+          canBulkImport && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setBulkImportOpen(true); }, title: 'Pre-alpha bulk CSV import' }, '↑ Import CSV (alpha)'),
           e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New Client')
         )
       ),
@@ -20501,7 +20563,480 @@
       importOpen && e(ImportClientsModal, {
         ctx: ctx,
         onClose: function(){ setImportOpen(false); }
+      }),
+      bulkImportOpen && e(BulkImportClientsModal, {
+        ctx: ctx,
+        onClose: function(){ setBulkImportOpen(false); }
       })
+    );
+  }
+
+  /* ============ BULK CSV IMPORT MODAL (Patch T - pre-alpha) ============
+     Admin-only fixed-schema CSV importer for Carlos/Heather's binder data.
+     Distinct from ImportClientsModal (the RecTrac auto-detect flow).
+     Locked column order: name, trainer_name, location, package_type,
+     sessions_remaining, purchase_date, email, phone, notes. Each row
+     validates against the standardized package taxonomy + the 10
+     client-facing trainer list. Rows sharing a name collapse into one
+     client with multiple packages.
+
+     Three phases: drop file -> preview/validate -> confirm + run.
+     Sequential persist loop with halt-on-failure (per-row error
+     reporting). Belt-and-suspenders: skips localStorage in either mode
+     since the alpha import targets Supabase post-wipe; the local save
+     useEffect picks up the resulting client array on the next render. */
+  function BulkImportClientsModal(props){
+    var ctx = props.ctx;
+    useBodyScrollLock();
+
+    var REQUIRED_HEADERS = ['name', 'trainer_name', 'location', 'package_type', 'sessions_remaining', 'purchase_date', 'email', 'phone', 'notes'];
+
+    var stepTuple = useState(1); /* 1=drop, 2=preview, 3=running, 4=done */
+    var step = stepTuple[0]; var setStep = stepTuple[1];
+    var fileMetaTuple = useState(null);
+    var fileMeta = fileMetaTuple[0]; var setFileMeta = fileMetaTuple[1];
+    var isDraggingTuple = useState(false);
+    var isDragging = isDraggingTuple[0]; var setIsDragging = isDraggingTuple[1];
+    var parseErrorTuple = useState('');
+    var parseError = parseErrorTuple[0]; var setParseError = parseErrorTuple[1];
+    var rowsTuple = useState([]); /* [{ raw, errors, index }] */
+    var rows = rowsTuple[0]; var setRows = rowsTuple[1];
+    var clientsByNameTuple = useState([]); /* [{ name, errors, rowIndices, payload? }] */
+    var clientsByName = clientsByNameTuple[0]; var setClientsByName = clientsByNameTuple[1];
+    var runStateTuple = useState({ current: null, errored: null });
+    var runState = runStateTuple[0]; var setRunState = runStateTuple[1];
+    var resultTuple = useState({ clientsImported: 0, packagesImported: 0, failedRow: null, failedError: null });
+    var result = resultTuple[0]; var setResult = resultTuple[1];
+
+    var fileInputRef = useRef(null);
+
+    function clearAll(){
+      setFileMeta(null); setParseError(''); setRows([]); setClientsByName([]);
+      setRunState({ current: null, errored: null });
+      setResult({ clientsImported: 0, packagesImported: 0, failedRow: null, failedError: null });
+    }
+
+    /* Per-row validation. Returns { errors: string[], normalized: {...} }. */
+    function validateRow(rawRow, headerIndex){
+      var errs = [];
+      function field(name){
+        var idx = headerIndex[name];
+        if (idx == null) return '';
+        return (rawRow[idx] || '').trim();
+      }
+      var name = field('name');
+      var trainer = field('trainer_name');
+      var location = field('location');
+      var packageType = field('package_type');
+      var sessionsStr = field('sessions_remaining');
+      var purchaseDate = field('purchase_date');
+      var email = field('email');
+      var phone = field('phone');
+      var notes = field('notes');
+
+      if (!name) errs.push('name is required');
+      if (!trainer) errs.push('trainer_name is required');
+      else if (CLIENT_FACING_TRAINERS_V1.indexOf(trainer) === -1) {
+        errs.push('trainer_name "' + trainer + '" is not in the active 10 client-facing trainers');
+      }
+      if (!location) errs.push('location is required');
+      else if (location !== 'CMRC' && location !== 'Baca') errs.push('location must be CMRC or Baca');
+      if (!packageType) errs.push('package_type is required');
+      else if (!getPackageMeta(packageType)) errs.push('package_type "' + packageType + '" is not in the standardized list');
+      var sessionsNum = null;
+      if (!sessionsStr) errs.push('sessions_remaining is required');
+      else {
+        sessionsNum = parseInt(sessionsStr, 10);
+        if (isNaN(sessionsNum) || sessionsNum < 0 || String(sessionsNum) !== sessionsStr.replace(/^0+(?=\d)/, '')) {
+          errs.push('sessions_remaining must be a non-negative integer');
+        }
+      }
+      if (purchaseDate && !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate)) {
+        errs.push('purchase_date must be YYYY-MM-DD');
+      }
+      if (email && email.indexOf('@') === -1) {
+        errs.push('email must contain @');
+      }
+      return {
+        errors: errs,
+        normalized: {
+          name: name, trainer: trainer, location: location, packageType: packageType,
+          sessionsRemaining: sessionsNum, purchaseDate: purchaseDate || null,
+          email: email || null, phone: phone || null, notes: notes || null
+        }
+      };
+    }
+
+    /* Collapse rows by name. Surfaces inconsistent trainer/location and
+       duplicate package_type across rows for the same person. */
+    function buildClientsByName(parsedRows){
+      var byName = {};
+      parsedRows.forEach(function(r){
+        if (r.errors.length > 0) return;
+        var key = r.normalized.name;
+        if (!byName[key]) {
+          byName[key] = {
+            name: key,
+            trainer: r.normalized.trainer,
+            location: r.normalized.location,
+            email: r.normalized.email,
+            phone: r.normalized.phone,
+            notes: [],
+            packages: [],
+            errors: [],
+            rowIndices: []
+          };
+        }
+        var c = byName[key];
+        c.rowIndices.push(r.index);
+        if (c.trainer !== r.normalized.trainer) {
+          c.errors.push('inconsistent trainer_name across rows for "' + key + '" (' + c.trainer + ' vs ' + r.normalized.trainer + ')');
+        }
+        if (c.location !== r.normalized.location) {
+          c.errors.push('inconsistent location across rows for "' + key + '" (' + c.location + ' vs ' + r.normalized.location + ')');
+        }
+        if (c.packages.some(function(p){ return p.type === r.normalized.packageType; })) {
+          c.errors.push('duplicate package_type "' + r.normalized.packageType + '" for "' + key + '" (one row per package)');
+        }
+        c.packages.push({
+          type: r.normalized.packageType,
+          sessionsRemaining: r.normalized.sessionsRemaining,
+          purchaseDate: r.normalized.purchaseDate
+        });
+        if (r.normalized.notes) c.notes.push(r.normalized.notes);
+        /* Take the first non-empty email/phone seen if duplicates differ */
+        if (!c.email && r.normalized.email) c.email = r.normalized.email;
+        if (!c.phone && r.normalized.phone) c.phone = r.normalized.phone;
+      });
+      return Object.keys(byName).map(function(k){ return byName[k]; });
+    }
+
+    function ingestFile(file){
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function(ev){
+        var text = (ev.target && ev.target.result) || '';
+        var parsedLines = parseCSV(text);
+        if (parsedLines.length < 2) {
+          setParseError('CSV needs a header row and at least one data row');
+          setRows([]); setClientsByName([]);
+          return;
+        }
+        var headers = parsedLines[0].map(function(h){ return (h || '').trim().toLowerCase(); });
+        var missing = REQUIRED_HEADERS.filter(function(h){ return headers.indexOf(h) === -1; });
+        if (missing.length > 0) {
+          setParseError('Missing required column(s): ' + missing.join(', '));
+          setRows([]); setClientsByName([]);
+          return;
+        }
+        var headerIndex = {};
+        REQUIRED_HEADERS.forEach(function(h){ headerIndex[h] = headers.indexOf(h); });
+        var dataRows = parsedLines.slice(1).filter(function(r){ return r.some(function(c){ return (c || '').trim(); }); });
+        var validated = dataRows.map(function(r, i){
+          var v = validateRow(r, headerIndex);
+          return { raw: r, errors: v.errors, normalized: v.normalized, index: i + 2 };
+        });
+        var grouped = buildClientsByName(validated);
+        setParseError('');
+        setRows(validated);
+        setClientsByName(grouped);
+        setFileMeta({ name: file.name, size: file.size });
+        setStep(2);
+      };
+      reader.onerror = function(){
+        setParseError('Could not read file');
+      };
+      reader.readAsText(file);
+    }
+
+    function onDropZoneClick(){ if (fileInputRef.current) fileInputRef.current.click(); }
+    function onFilePicked(ev){
+      var f = ev.target && ev.target.files && ev.target.files[0];
+      if (f) ingestFile(f);
+      if (ev.target) ev.target.value = '';
+    }
+    function onDragOver(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      if (!isDragging) setIsDragging(true);
+    }
+    function onDragLeave(ev){ ev.preventDefault(); ev.stopPropagation(); setIsDragging(false); }
+    function onDrop(ev){
+      ev.preventDefault(); ev.stopPropagation(); setIsDragging(false);
+      var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (f) ingestFile(f);
+    }
+
+    var rowErrorCount = rows.reduce(function(n, r){ return n + (r.errors.length > 0 ? 1 : 0); }, 0);
+    var clientErrorCount = clientsByName.reduce(function(n, c){ return n + (c.errors.length > 0 ? 1 : 0); }, 0);
+    var totalErrors = rowErrorCount + clientErrorCount;
+    var totalPackages = clientsByName.reduce(function(n, c){ return n + c.packages.length; }, 0);
+    var canConfirm = step === 2 && clientsByName.length > 0 && totalErrors === 0;
+
+    /* Build the persisted client payload for one grouped row. Earliest
+       purchase_date across this client's packages wins for date_purchased.
+       template_id sourced from getPackageMeta so the imported package
+       shape matches NewClientModal rows for downstream code. */
+    function buildClientPayload(group){
+      var earliestPurchase = group.packages.reduce(function(min, p){
+        if (!p.purchaseDate) return min;
+        if (!min) return p.purchaseDate;
+        return p.purchaseDate < min ? p.purchaseDate : min;
+      }, null);
+      var nowIso = new Date().toISOString();
+      var packageRecords = group.packages.map(function(p){
+        var meta = getPackageMeta(p.type);
+        var price = meta ? meta.price : 0;
+        return {
+          id: uid(),
+          type: p.type,
+          template_id: meta ? meta.id : null,
+          sessions: p.sessionsRemaining,
+          price: price,
+          amountPaid: price,
+          paymentType: 'Card',
+          purchaseDate: p.purchaseDate || null,
+          source: 'import_alpha_v1'
+        };
+      });
+      return {
+        id: uid(),
+        name: group.name,
+        trainerName: group.trainer,
+        location: group.location,
+        email: group.email || '',
+        phone: group.phone || '',
+        notes: group.notes.join(' / ') || null,
+        membershipType: 'Member',
+        membershipVerified: false,
+        is_active: true,
+        paymentType: 'Card',
+        packages: packageRecords,
+        sessions: [],
+        parQ: {},
+        auditLog: [],
+        createdBy: 'import_alpha_v1',
+        datePurchased: earliestPurchase,
+        lastPackageAddedAt: nowIso,
+        createdAt: nowIso
+      };
+    }
+
+    function runImport(){
+      if (!canConfirm) return;
+      setStep(3);
+      var payloads = clientsByName.map(buildClientPayload);
+      var clientsImported = 0;
+      var packagesImported = 0;
+      var chain = Promise.resolve();
+      payloads.forEach(function(payload, i){
+        chain = chain.then(function(){
+          if (runState.errored) return;
+          setRunState({ current: { name: payload.name, idx: i + 1, total: payloads.length }, errored: null });
+          return ctx.persistClientRow(payload).then(function(){
+            ctx.auditedUpsertClient(payload, 'create');
+            clientsImported++;
+            packagesImported += payload.packages.length;
+          }).catch(function(err){
+            var msg = (err && err.message) || 'unknown error';
+            setRunState({ current: null, errored: { name: payload.name, idx: i + 1, total: payloads.length, message: msg } });
+            setResult({
+              clientsImported: clientsImported,
+              packagesImported: packagesImported,
+              failedRow: { name: payload.name, idx: i + 1, total: payloads.length },
+              failedError: msg
+            });
+            setStep(4);
+            throw err;
+          });
+        });
+      });
+      chain.then(function(){
+        setResult({ clientsImported: clientsImported, packagesImported: packagesImported, failedRow: null, failedError: null });
+        setRunState({ current: null, errored: null });
+        ctx.toast('Imported ' + clientsImported + ' clients with ' + packagesImported + ' packages ✓');
+        setStep(4);
+      }).catch(function(){ /* error already set in inner catch */ });
+    }
+
+    function header(title){
+      return e('div', { className: 'modal-header' },
+        e('h2', null, title),
+        e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+      );
+    }
+
+    /* Step 1: file drop */
+    if (step === 1) {
+      return e('div', { className: 'modal-overlay' },
+        e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '640px' } },
+          header('Bulk Import Clients (alpha CSV)'),
+          e('div', { className: 'modal-body' },
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px', lineHeight: 1.5 } },
+              'Drop a CSV with the locked alpha column order: ',
+              e('code', { style: { fontSize: '11px', color: 'var(--navy)' } }, 'name, trainer_name, location, package_type, sessions_remaining, purchase_date, email, phone, notes'),
+              '. Each row = one package on one client. Multiple rows with the same name collapse into one client with multiple packages.'
+            ),
+            parseError && e('div', { className: 'banner red', style: { marginBottom: '10px' } }, '⚠ ' + parseError),
+            e('input', {
+              ref: fileInputRef, type: 'file', accept: '.csv,text/csv',
+              onChange: onFilePicked, style: { display: 'none' }
+            }),
+            e('div', {
+              onClick: onDropZoneClick,
+              onDragEnter: onDragOver, onDragOver: onDragOver,
+              onDragLeave: onDragLeave, onDrop: onDrop,
+              style: {
+                border: '2px dashed ' + (isDragging ? 'var(--teal)' : 'var(--border)'),
+                background: isDragging ? 'var(--teal-bg)' : 'var(--cream-2)',
+                borderRadius: '12px', padding: '32px 18px', textAlign: 'center',
+                cursor: 'pointer'
+              }
+            },
+              e('div', { style: { fontSize: '14px', color: 'var(--navy)', marginBottom: '4px' } }, 'Drop a .csv file here, or click to pick one'),
+              e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)' } }, 'admin only · pre-alpha import')
+            )
+          ),
+          e('div', { className: 'modal-footer' },
+            e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel')
+          )
+        )
+      );
+    }
+
+    /* Step 2: preview + validation */
+    if (step === 2) {
+      return e('div', { className: 'modal-overlay' },
+        e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '900px' } },
+          header('Bulk Import Clients - Preview'),
+          e('div', { className: 'modal-body' },
+            fileMeta && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '8px' } },
+              '📄 ' + fileMeta.name + ' · ' + Math.max(1, Math.round(fileMeta.size / 1024)) + ' KB'
+            ),
+            e('div', {
+              style: {
+                display: 'flex', gap: '12px', flexWrap: 'wrap',
+                padding: '10px 12px', borderRadius: '8px',
+                background: totalErrors === 0 ? 'var(--moss-bg)' : 'var(--ochre-bg)',
+                border: '1.5px solid ' + (totalErrors === 0 ? 'var(--moss)' : 'var(--ochre)'),
+                marginBottom: '12px', fontSize: '13px', color: 'var(--navy)'
+              }
+            },
+              e('span', null, e('b', null, rows.length), ' rows parsed'),
+              e('span', null, e('b', null, clientsByName.length), ' unique clients'),
+              e('span', null, e('b', null, totalPackages), ' packages'),
+              e('span', { style: { color: totalErrors === 0 ? 'var(--moss)' : 'var(--brick)' } },
+                e('b', null, totalErrors), ' validation error' + (totalErrors === 1 ? '' : 's')
+              )
+            ),
+            rowErrorCount > 0 && e('div', { style: { marginBottom: '12px' } },
+              e('div', { style: { fontWeight: 700, color: 'var(--navy)', marginBottom: '6px', fontSize: '13px' } },
+                'Per-row errors (' + rowErrorCount + ')'
+              ),
+              rows.filter(function(r){ return r.errors.length > 0; }).map(function(r){
+                return e('div', { key: 'r-' + r.index, style: { fontSize: '12px', color: 'var(--brick)', marginBottom: '4px' } },
+                  'row ' + r.index + ' (' + (r.normalized.name || '?') + '): ' + r.errors.join('; ')
+                );
+              })
+            ),
+            clientErrorCount > 0 && e('div', { style: { marginBottom: '12px' } },
+              e('div', { style: { fontWeight: 700, color: 'var(--navy)', marginBottom: '6px', fontSize: '13px' } },
+                'Cross-row errors (' + clientErrorCount + ')'
+              ),
+              clientsByName.filter(function(c){ return c.errors.length > 0; }).map(function(c){
+                return e('div', { key: 'c-' + c.name, style: { fontSize: '12px', color: 'var(--brick)', marginBottom: '4px' } },
+                  c.name + ' (rows ' + c.rowIndices.join(',') + '): ' + c.errors.join('; ')
+                );
+              })
+            ),
+            e('div', { style: { maxHeight: '320px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px' } },
+              e('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: '12px' } },
+                e('thead', null,
+                  e('tr', { style: { background: 'var(--paper-2)' } },
+                    ['Name', 'Trainer', 'Location', 'Packages', 'Email/Phone'].map(function(h){
+                      return e('th', { key: h, style: { textAlign: 'left', padding: '6px 8px', color: 'var(--slate)', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.04em' } }, h);
+                    })
+                  )
+                ),
+                e('tbody', null,
+                  clientsByName.map(function(c){
+                    var hasErr = c.errors.length > 0;
+                    return e('tr', { key: c.name, style: { background: hasErr ? '#fff5f5' : '#fff', borderTop: '1px solid var(--border)' } },
+                      e('td', { style: { padding: '6px 8px', color: 'var(--navy)', fontWeight: 600 } }, c.name),
+                      e('td', { style: { padding: '6px 8px' } }, c.trainer),
+                      e('td', { style: { padding: '6px 8px' } }, c.location),
+                      e('td', { style: { padding: '6px 8px' } },
+                        c.packages.map(function(p){ return p.type + ' (' + p.sessionsRemaining + ')'; }).join(', ')
+                      ),
+                      e('td', { style: { padding: '6px 8px', color: 'var(--slate)' } },
+                        (c.email || '') + (c.phone ? ' / ' + c.phone : '')
+                      )
+                    );
+                  })
+                )
+              )
+            )
+          ),
+          e('div', { className: 'modal-footer' },
+            e('button', { className: 'btn btn-ghost', onClick: function(){ clearAll(); setStep(1); } }, '← Back'),
+            e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+            e('button', {
+              className: 'btn btn-gold', onClick: runImport, disabled: !canConfirm
+            }, 'Import ' + clientsByName.length + ' client' + (clientsByName.length === 1 ? '' : 's'))
+          )
+        )
+      );
+    }
+
+    /* Step 3: running */
+    if (step === 3) {
+      var cur = runState.current;
+      return e('div', { className: 'modal-overlay' },
+        e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '560px' } },
+          header('Importing...'),
+          e('div', { className: 'modal-body' },
+            e('div', { style: { fontSize: '14px', color: 'var(--navy)' } },
+              cur ? ('Persisting ' + cur.idx + ' of ' + cur.total + ': ' + cur.name) : 'Starting...'
+            ),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
+              'Sequential persist - any failure halts the loop and surfaces the row that failed.'
+            )
+          )
+        )
+      );
+    }
+
+    /* Step 4: result */
+    var failed = result.failedRow;
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '560px' } },
+        header(failed ? 'Import halted' : 'Import complete'),
+        e('div', { className: 'modal-body' },
+          failed
+            ? e('div', null,
+                e('div', { className: 'banner red', style: { marginBottom: '10px' } },
+                  '⚠ Failed on ' + failed.idx + ' of ' + failed.total + ': ' + failed.name
+                ),
+                e('div', { style: { fontSize: '13px', color: 'var(--brick)', marginBottom: '8px' } }, result.failedError),
+                e('div', { style: { fontSize: '13px', color: 'var(--navy)' } },
+                  e('b', null, result.clientsImported), ' clients (',
+                  e('b', null, result.packagesImported), ' packages) were persisted before the failure. ',
+                  'They are saved - re-running the import will skip none, so prune the CSV before retry.'
+                )
+              )
+            : e('div', null,
+                e('div', { className: 'banner', style: { background: 'var(--moss-bg)', border: '1.5px solid var(--moss)', color: 'var(--navy)', marginBottom: '10px' } },
+                  '✓ Imported ', e('b', null, result.clientsImported), ' clients with ',
+                  e('b', null, result.packagesImported), ' packages'
+                ),
+                e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
+                  'Refresh the All Clients view or check the Audit History to verify.'
+                )
+              )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-primary', onClick: props.onClose }, 'Close')
+        )
+      )
     );
   }
 
