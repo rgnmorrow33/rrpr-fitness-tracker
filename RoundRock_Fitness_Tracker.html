@@ -2583,6 +2583,31 @@
     ])
   };
 
+  /* Patch R: whitelist filter on leads writes. Patch P (drop 'date'
+     from translator) and the Patch P followup (defensive delete +
+     observability) didn't kill the PGRST204 errors on lead create:
+     the 'date' key kept appearing in the upsert columns parameter
+     from a path I couldn't trace from source. Switching from
+     blacklist to whitelist: only fields in this list survive the
+     filter, every other key is dropped at the wire boundary. List
+     matches the leads schema columns confirmed via the
+     information_schema query on May 11, 2026. */
+  var LEADS_ALLOWED_COLUMNS = [
+    'id', 'name', 'email', 'phone', 'source', 'interest_area',
+    'status', 'status_history', 'assigned_to', 'notes',
+    'created_at', 'updated_at', 'consult_date', 'converted_at',
+    'converted_to_client_id', 'source_tag', 'added_by',
+    'assigned_at', 'assigned_by', 'lost_reason', 'from_wro_id',
+    'audit_log', 'created_by'
+  ];
+  function filterLeadsAllowed(row){
+    var out = {};
+    Object.keys(row).forEach(function(k){
+      if (LEADS_ALLOWED_COLUMNS.indexOf(k) !== -1) out[k] = row[k];
+    });
+    return out;
+  }
+
   /* Entity factory: localStorage-key + Supabase-table + translator =
      {load, save}. Save is upsert-everything (idempotent, simple). Diff
      strategy is a session 2b optimization. */
@@ -2612,7 +2637,11 @@
              key that leaked past the translator for leads. Logs a
              warning naming the offending row id so we can trace the
              source. Schemas other than leads are left alone here -
-             they may legitimately have a 'date' column. */
+             they may legitimately have a 'date' column.
+             Patch R: whitelist filter applied per row after the strip.
+             The strip stays so we still get the warn signal naming
+             the source row, but the whitelist is the actual wire-side
+             defense. */
           if (supabaseTable === 'leads') {
             rows.forEach(function(r){
               if ('date' in r) {
@@ -2620,6 +2649,7 @@
                 delete r.date;
               }
             });
+            rows = rows.map(filterLeadsAllowed);
           }
           /* Patch P followup: per-save observability log of the first
              row's keys + row count. Mirrors the Patch G1 [save] ok
@@ -7155,9 +7185,14 @@
         console.warn('[leads-persist] unexpected date key on row', supabaseRow.id, '- stripping');
         delete supabaseRow.date;
       }
-      console.info('[leads-persist]', Object.keys(supabaseRow).join(','));
+      /* Patch R: whitelist filter is now the primary defense. The
+         strip above stays so we still see a console.warn naming the
+         source row when 'date' leaks; the whitelist below catches
+         anything else (known or future) the schema doesn't accept. */
+      var filtered = filterLeadsAllowed(supabaseRow);
+      console.info('[leads-persist]', Object.keys(filtered).join(','));
       return supabaseClient.from('leads')
-        .upsert(supabaseRow, { onConflict: 'id' })
+        .upsert(filtered, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
     }
     /* Patch P: lead-create with persist-then-toast sequencing. Persists
