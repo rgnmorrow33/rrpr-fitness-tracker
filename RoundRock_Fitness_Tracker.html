@@ -2645,7 +2645,6 @@
           if (supabaseTable === 'leads') {
             rows.forEach(function(r){
               if ('date' in r) {
-                console.warn('[bulk-save leads] unexpected date key on row', r.id, '- stripping');
                 delete r.date;
               }
             });
@@ -2655,7 +2654,6 @@
              row's keys + row count. Mirrors the Patch G1 [save] ok
              log pattern; helps trace schema-mismatch bugs without
              requiring smoke screenshots. */
-          console.info('[bulk-save]', supabaseTable, 'rows=' + rows.length, 'keys=' + Object.keys(rows[0]).join(','));
           return supabaseClient.from(supabaseTable).upsert(rows, { onConflict: 'id' })
             .then(function(res){ if (res.error) throw res.error; });
         }
@@ -7182,7 +7180,6 @@
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
       var supabaseRow = translate.leads.toSupabase(stamped);
       if ('date' in supabaseRow) {
-        console.warn('[leads-persist] unexpected date key on row', supabaseRow.id, '- stripping');
         delete supabaseRow.date;
       }
       /* Patch R: whitelist filter is now the primary defense. The
@@ -7190,7 +7187,6 @@
          source row when 'date' leaks; the whitelist below catches
          anything else (known or future) the schema doesn't accept. */
       var filtered = filterLeadsAllowed(supabaseRow);
-      console.info('[leads-persist]', Object.keys(filtered).join(','));
       return supabaseClient.from('leads')
         .upsert(filtered, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
