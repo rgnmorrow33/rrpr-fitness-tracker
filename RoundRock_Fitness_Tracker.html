@@ -2634,14 +2634,12 @@
           var rows = (arr || []).map(translator.toSupabase);
           if (rows.length === 0) return Promise.resolve();
           /* Patch P followup: belt-and-suspenders strip of any 'date'
-             key that leaked past the translator for leads. Logs a
-             warning naming the offending row id so we can trace the
-             source. Schemas other than leads are left alone here -
-             they may legitimately have a 'date' column.
-             Patch R: whitelist filter applied per row after the strip.
-             The strip stays so we still get the warn signal naming
-             the source row, but the whitelist is the actual wire-side
-             defense. */
+             key that leaked past the translator for leads. Schemas
+             other than leads are left alone - they may legitimately
+             have a 'date' column.
+             Patch R: whitelist filter applied per row after the strip
+             is the actual wire-side defense; the strip stays as the
+             first line of filtering. */
           if (supabaseTable === 'leads') {
             rows.forEach(function(r){
               if ('date' in r) {
@@ -2650,10 +2648,6 @@
             });
             rows = rows.map(filterLeadsAllowed);
           }
-          /* Patch P followup: per-save observability log of the first
-             row's keys + row count. Mirrors the Patch G1 [save] ok
-             log pattern; helps trace schema-mismatch bugs without
-             requiring smoke screenshots. */
           return supabaseClient.from(supabaseTable).upsert(rows, { onConflict: 'id' })
             .then(function(res){ if (res.error) throw res.error; });
         }
@@ -7208,23 +7202,19 @@
        persistTimeOffRow. localStorage mode is a no-op so the existing
        save useEffect handles persistence as before.
 
-       Patch P followup: belt-and-suspenders strip of 'date' (and any
-       other key the leads schema doesn't recognize - 'date' is the only
-       one observed today). Translator's drop list should have already
-       filtered it; if it didn't, this strip catches it AND logs a
-       warning naming the leak so we can trace the source. Temporary
-       observability log of the final row keys helps us see exactly
-       what's hitting the wire. */
+       Patch P followup: belt-and-suspenders strip of 'date' (the only
+       key observed leaking past the translator). Translator's drop
+       list should have already filtered it; this strip is the second
+       layer.
+       Patch R: whitelist filter below is the actual wire-side defense,
+       catching 'date' and anything else the leads schema doesn't
+       accept. */
     function persistQueueEntryRow(stamped){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
       var supabaseRow = translate.leads.toSupabase(stamped);
       if ('date' in supabaseRow) {
         delete supabaseRow.date;
       }
-      /* Patch R: whitelist filter is now the primary defense. The
-         strip above stays so we still see a console.warn naming the
-         source row when 'date' leaks; the whitelist below catches
-         anything else (known or future) the schema doesn't accept. */
       var filtered = filterLeadsAllowed(supabaseRow);
       return supabaseClient.from('leads')
         .upsert(filtered, { onConflict: 'id' })
@@ -20350,8 +20340,7 @@
     var setImportOpen = importOpenTuple[1];
 
     /* Patch T: pre-alpha bulk CSV import. Admin-only via canBulkImport
-       (same permission the RecTrac importer should also gate on - flagged
-       for the deferred pile). */
+       (same permission gates the RecTrac importer below). */
     var bulkImportOpenTuple = useState(false);
     var bulkImportOpen = bulkImportOpenTuple[0];
     var setBulkImportOpen = bulkImportOpenTuple[1];
@@ -20496,7 +20485,7 @@
         e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
           e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTClientsCSV, title: 'Export filtered clients to CSV' }, '↓ Export Clients CSV'),
           e('button', { className: 'btn btn-ghost btn-sm', onClick: exportPTSessionsCSV, title: 'Export all sessions across all clients to CSV' }, '↓ Export Sessions CSV'),
-          e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setImportOpen(true); } }, '↑ Import from RecTrac'),
+          canBulkImport && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setImportOpen(true); } }, '↑ Import from RecTrac'),
           canBulkImport && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setBulkImportOpen(true); }, title: 'Pre-alpha bulk CSV import' }, '↑ Import CSV (alpha)'),
           e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New Client')
         )
@@ -25591,6 +25580,31 @@
     });
     var nextDates = Object.keys(nextByDate).sort();
 
+    /* Day-header closure label. Resolves every closure landing on the
+       given date (not just the one matched against the first occ's
+       facility). Renders scopes in priority order ('all' first, then
+       LOCATIONS order); same-scope reasons concatenate with ' / '. */
+    function dayClosureLabel(ymd){
+      var dayCl = closuresOnDate(ctx.closures || [], ymd);
+      if (dayCl.length === 0) return '';
+      var order = { 'all': 0 };
+      LOCATIONS.forEach(function(l, i){ order[l] = i + 1; });
+      var sorted = dayCl.slice().sort(function(a, b){
+        var oa = order[a.facility || 'all']; if (oa == null) oa = 99;
+        var ob = order[b.facility || 'all']; if (ob == null) ob = 99;
+        return oa - ob;
+      });
+      var bucket = {}; var keys = [];
+      sorted.forEach(function(cl){
+        var fac = cl.facility || 'all';
+        var label = fac === 'all' ? 'All facilities' : fac;
+        if (!bucket[label]) { bucket[label] = []; keys.push(label); }
+        bucket[label].push(cl.reason || 'closed');
+      });
+      var parts = keys.map(function(k){ return k + ': ' + bucket[k].join(' / '); });
+      return ' · CLOSED (' + parts.join('; ') + ')';
+    }
+
     /* ---- CSV export (full audit) ---- */
     function exportScheduleAuditCSV(){
       var rows = [];
@@ -26073,12 +26087,8 @@
           : periodDates.map(function(d){
               var occs = periodByDate[d];
               var dObj = parseYMD(d);
-              var firstOcc = occs[0];
-              var dayClosed = firstOcc.isClosed;
               return e('div', { key: d, className: 'audit-day-group' },
-                e('div', { className: 'day-head' }, formatShort(dObj) +
-                  (dayClosed ? ' \u00b7 CLOSED (' + (firstOcc.closure.reason || '') + ')' : '')
-                ),
+                e('div', { className: 'day-head' }, formatShort(dObj) + dayClosureLabel(d)),
                 occs.map(function(o){
                   var instructorLabel = o.actualInstructor || o.scheduledInstructor || o.cls.instructor;
                   return e('div', { key: o.cls.id, className: 'day-row' },
@@ -26122,12 +26132,8 @@
           : nextDates.map(function(d){
               var occs = nextByDate[d];
               var dObj = parseYMD(d);
-              var firstOcc = occs[0];
-              var dayClosed = firstOcc.isClosed;
               return e('div', { key: d, className: 'audit-day-group' },
-                e('div', { className: 'day-head' }, formatShort(dObj) +
-                  (dayClosed ? ' \u00b7 CLOSED (' + (firstOcc.closure.reason || '') + ')' : '')
-                ),
+                e('div', { className: 'day-head' }, formatShort(dObj) + dayClosureLabel(d)),
                 occs.map(function(o){
                   return e('div', { key: o.cls.id, className: 'day-row' },
                     e('div', { className: 'time' }, formatTime12(o.cls.startTime)),
