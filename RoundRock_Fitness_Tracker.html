@@ -6319,6 +6319,39 @@
       } catch(_){}
     }
 
+    /* Lead view-mode toggle. Lead-tier users can flip between the lead
+       cockpit (AdminDashboard) and the trainer execution surface
+       (TrainerView). Persisted per-device, keyed by trainer_id, so the
+       same lead lands where they left off on the iPad they signed in on.
+       Hydrated synchronously from localStorage so a reload doesn't flash
+       through the wrong shell. The useEffect re-reads when the signed-in
+       user changes (sign-out / PIN switch). Non-lead sessions ignore the
+       value entirely. */
+    var viewModeTuple = useState(function(){
+      try {
+        if (!session || session.role !== 'lead') return 'lead';
+        var stored = localStorage.getItem('viewMode:' + (session.trainer_id || 'unknown'));
+        return stored === 'trainer' ? 'trainer' : 'lead';
+      } catch(_){ return 'lead'; }
+    });
+    var viewMode = viewModeTuple[0];
+    var _setViewModeRaw = viewModeTuple[1];
+    useEffect(function(){
+      if (!session || session.role !== 'lead') { _setViewModeRaw('lead'); return; }
+      var key = 'viewMode:' + (session.trainer_id || 'unknown');
+      try {
+        var stored = localStorage.getItem(key);
+        _setViewModeRaw(stored === 'trainer' ? 'trainer' : 'lead');
+      } catch(_){ _setViewModeRaw('lead'); }
+    }, [session && session.trainer_id, session && session.role]);
+    function setViewMode(next){
+      _setViewModeRaw(next);
+      if (session && session.role === 'lead') {
+        var key = 'viewMode:' + (session.trainer_id || 'unknown');
+        try { localStorage.setItem(key, next); } catch(_){}
+      }
+    }
+
     /* Sync session name into the module-level accessor used by translators
        (e.g., schedule_versions.created_by) when no local equivalent exists
        on the record being saved. */
@@ -8045,7 +8078,11 @@
       notifications: notifications,
       unreadCount: unreadCount,
       markNotificationRead: markNotificationRead,
-      markAllNotificationsRead: markAllNotificationsRead
+      markAllNotificationsRead: markAllNotificationsRead,
+      /* Lead view-mode toggle. Only meaningful for role === 'lead'; other
+         tiers see no toggle and the value is ignored. */
+      viewMode: viewMode,
+      setViewMode: setViewMode
     };
 
     /* Loading / error screen. Initial Promise.all hits Supabase over the
@@ -8085,11 +8122,17 @@
       view = e(Login, { ctx: ctx });
     } else if (session.role === 'kiosk_wro') {
       view = e(KioskWROView, { ctx: ctx });
-    } else if (session.role === 'admin' || session.role === 'lead') {
-      /* Patch V: lead routes to AdminDashboard alongside admin.
-         Admin-only surfaces inside it are gated per-perm; lead sees
-         what their permission table allows. */
+    } else if (session.role === 'admin') {
       view = e(AdminDashboard, { ctx: ctx });
+    } else if (session.role === 'lead') {
+      /* Patch V: lead routes to AdminDashboard. Lead view-mode toggle:
+         a lead can flip into the trainer execution surface so the same
+         person can run their own clients, group ex, and sub coverage
+         without losing the lead cockpit. ctx.can() is unchanged; lead
+         retains lead-tier permissions in either mode. */
+      view = viewMode === 'trainer'
+        ? e(TrainerView, { ctx: ctx })
+        : e(AdminDashboard, { ctx: ctx });
     } else {
       view = e(TrainerView, { ctx: ctx });
     }
@@ -10950,6 +10993,56 @@
      Admin still uses .topbar (Phase 1) - this component is trainer/lead
      only. Facility is intentionally optional (session payload doesn't
      carry it yet; clock omits it gracefully when absent). */
+  /* Lead view-mode pill. Renders the Lead / Trainer toggle so a lead-tier
+     user can flip between the lead cockpit and the trainer execution
+     surface. Returns null for any other tier - the toggle is invisible
+     to trainers and admins. Two visual variants: 'dark' for the navy
+     trainer-bar, 'light' for the cream sidebar. */
+  function ViewModeToggle(props){
+    var ctx = props.ctx;
+    if (!ctx || !ctx.session || ctx.session.role !== 'lead') return null;
+    var variant = props.variant === 'light' ? 'light' : 'dark';
+    var mode = ctx.viewMode === 'trainer' ? 'trainer' : 'lead';
+    var wrapStyle = {
+      display: 'inline-flex',
+      borderRadius: 999,
+      overflow: 'hidden',
+      border: variant === 'dark' ? '1px solid rgba(255,255,255,0.28)' : '1px solid var(--border)',
+      background: variant === 'dark' ? 'rgba(255,255,255,0.06)' : '#fff'
+    };
+    function seg(value, label){
+      var active = mode === value;
+      var bg, fg;
+      if (variant === 'dark') {
+        bg = active ? '#fff' : 'transparent';
+        fg = active ? 'var(--navy)' : '#fff';
+      } else {
+        bg = active ? 'var(--navy)' : 'transparent';
+        fg = active ? '#fff' : 'var(--navy)';
+      }
+      return e('button', {
+        type: 'button',
+        onClick: function(){ if (mode !== value) ctx.setViewMode(value); },
+        style: {
+          padding: '4px 10px',
+          fontSize: 11,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          fontWeight: 700,
+          fontFamily: 'inherit',
+          cursor: 'pointer',
+          border: 'none',
+          background: bg,
+          color: fg
+        }
+      }, label);
+    }
+    return e('div', { style: wrapStyle, title: 'View as lead or as trainer' },
+      seg('lead', 'Lead'),
+      seg('trainer', 'Trainer')
+    );
+  }
+
   function TrainerBar(props){
     var userName = props.userName || '';
     var firstName = props.firstName || userName.split(' ')[0] || '';
@@ -10960,6 +11053,7 @@
     var onTabSelect = props.onTabSelect;
     var notificationsNode = props.notificationsNode;
     var signOutNode = props.signOutNode;
+    var viewModeToggleNode = props.viewModeToggleNode || null;
 
     var initials = userName.split(' ').map(function(p){ return p && p[0]; }).filter(Boolean).slice(0, 2).join('');
     var now = new Date();
@@ -11004,6 +11098,7 @@
               }
             }, roleLabel)
           ),
+          viewModeToggleNode || null,
           signOutNode || null
         )
       ),
@@ -11085,12 +11180,19 @@
       setNavGen(function(g){ return g + 1; });
     }
 
+    /* Lead view-mode toggle: when a lead-tier user has flipped to trainer
+       mode, the lead-only trainer-bar affordances (View-as dropdown, Time
+       Off + Banner buttons inside it, Team hours tab) hide so the surface
+       matches what a real trainer sees. ctx.can() stays untouched - lead
+       still has lead-tier perms for the actions themselves. */
+    var isLeadInTrainerMode = ctx.session && ctx.session.role === 'lead' && ctx.viewMode === 'trainer';
+
     /* Cross-trainer schedule view (admin/lead only). null = self, '__all__'
        = stacked view of every active trainer, else a specific trainer name.
        In-memory only - resets on sign-out by design (component unmounts).
        Only flows through to Today/Schedule's body. The pay-period chip,
        lead badge, and other side widgets stay tied to the signed-in user. */
-    var canViewAnyTrainerSchedule = ctx.can('canViewAnyTrainerSchedule');
+    var canViewAnyTrainerSchedule = ctx.can('canViewAnyTrainerSchedule') && !isLeadInTrainerMode;
     var viewAsTuple = useState(null);
     var viewAs = viewAsTuple[0]; var setViewAs = viewAsTuple[1];
 
@@ -11186,7 +11288,7 @@
       { id: 'leads',     label: 'Leads', badge: leadBadge > 0 ? leadBadge : null },
       { id: 'time_card', label: 'Time card' }
     ];
-    if (ctx.can('canViewAllTimeCards')) {
+    if (ctx.can('canViewAllTimeCards') && !isLeadInTrainerMode) {
       trainerTabs.push({ id: 'team_hours', label: 'Team hours' });
     }
 
@@ -11200,6 +11302,7 @@
         activeTabId: tab,
         onTabSelect: function(id){ navigate(id); },
         notificationsNode: e(NotificationsBell, { ctx: ctx }),
+        viewModeToggleNode: e(ViewModeToggle, { ctx: ctx, variant: 'dark' }),
         signOutNode: e('button', {
           className: 'logout-btn',
           onClick: function(){ ctx.setSession(null); }
@@ -19450,6 +19553,7 @@
     var secondary = props.secondary || [];
     var onSelect = props.onSelect;
     var name = props.name || '';
+    var viewModeToggleNode = props.viewModeToggleNode || null;
 
     function renderItem(it, isSecondary){
       var className = 'nav-item' + (isSecondary ? ' secondary' : '') + (it.id === active ? ' active' : '');
@@ -19488,6 +19592,9 @@
           )
         )
       ),
+      viewModeToggleNode
+        ? e('div', { style: { padding: '10px 14px 6px' } }, viewModeToggleNode)
+        : null,
       e('div', { className: 'sidebar-section' }, 'Primary'),
       e('nav', null, items.map(function(it){ return renderItem(it, false); })),
       hasSecondary ? e('div', { className: 'sidebar-section' }, 'More') : null,
@@ -19875,7 +19982,8 @@
         items: sidebarItems,
         secondary: sidebarSecondary,
         onSelect: selectSidebar,
-        name: headerActorName
+        name: headerActorName,
+        viewModeToggleNode: e(ViewModeToggle, { ctx: ctx, variant: 'light' })
       }),
       e('div', { className: 'main' },
         e(TopBar, {
