@@ -3161,10 +3161,15 @@
       /* Lead expansions (unscoped this cycle) */
       canEditAnyAttendance: true,
       canEditAnySession: true,
-      canEditClassStructure: false,
-      canManageClosures: false,
-      canViewAuditHistory: false,
-      canRestoreDeleted: false,
+      /* Patch V: team-level oversight + operational scheduling for lead.
+         Class structure edits (symmetric to canAddClass), closures
+         (operational scheduling), audit history (read-only oversight),
+         restore deleted (recovery is operational, not destructive).
+         canHardDelete stays admin-only. */
+      canEditClassStructure: true,
+      canManageClosures: true,
+      canViewAuditHistory: true,
+      canRestoreDeleted: true,
       canHardDelete: false,
       canRequestTimeOff: true,
       addTimeOff: true,
@@ -8046,7 +8051,10 @@
       view = e(Login, { ctx: ctx });
     } else if (session.role === 'kiosk_wro') {
       view = e(KioskWROView, { ctx: ctx });
-    } else if (session.role === 'admin') {
+    } else if (session.role === 'admin' || session.role === 'lead') {
+      /* Patch V: lead routes to AdminDashboard alongside admin.
+         Admin-only surfaces inside it are gated per-perm; lead sees
+         what their permission table allows. */
       view = e(AdminDashboard, { ctx: ctx });
     } else {
       view = e(TrainerView, { ctx: ctx });
@@ -14792,7 +14800,7 @@
         editOpen && e(NewClassModal, {
           ctx: ctx,
           cls: c,
-          lockInstructor: ctx.session && ctx.session.role === 'trainer' ? ctx.session.name : null,
+          lockInstructor: !ctx.can('canEditClassStructure') ? ctx.session.name : null,
           onClose: function(){ setEditOpen(false); },
           onCreate: function(updated){
             ctx.auditedUpsertClass(updated, 'update');
@@ -19642,7 +19650,11 @@
     } else if (tab === 'admin_time') {
       tabView = e(AdminTimeView, {
         ctx: ctx,
-        isAdmin: true,
+        /* Patch V: AdminTimeView's isAdmin prop drives the "see all
+           items + edit anyone's item" path. Lead with canViewAllTimeCards
+           reaches the surface as team-level oversight; resolves to the
+           same true value for admin. */
+        isAdmin: ctx.can('canViewAllTimeCards'),
         onNavigate: navigateTab  /* Cleanup-A: surfaces a fold link to Fill Rate */
       });
     } else if (tab === 'payroll') {
@@ -19796,15 +19808,21 @@
     if (ctx.can('canViewAllTimeCards')) {
       sidebarSecondary.push({ id: 'payroll', icon: 'payroll', label: 'Payroll' });
     }
-    sidebarSecondary.push(
-      { id: 'audit',     icon: 'audit',   label: 'Audit log' },
-      { id: 'team',      icon: 'team',    label: 'Team' },
-      { id: 'settings',  icon: 'settings', label: 'Settings' }
-    );
+    sidebarSecondary.push({ id: 'audit', icon: 'audit', label: 'Audit log' });
+    /* Patch V: Team roster management is admin-only (canEditTrainer).
+       Hide the sidebar entry for lead - AdminManageInstructors also
+       guards itself defensively below. */
+    if (ctx.can('canEditTrainer')) {
+      sidebarSecondary.push({ id: 'team', icon: 'team', label: 'Team' });
+    }
+    sidebarSecondary.push({ id: 'settings', icon: 'settings', label: 'Settings' });
 
     return e('div', { style: { display: 'flex', minHeight: '100vh' } },
       e(Sidebar, {
-        role: 'admin',
+        /* Patch V: surface the actual tier in the sidebar role chip.
+           Was hardcoded 'admin' because the dispatcher only ever sent
+           admin here; now lead lands on the same dashboard. */
+        role: (ctx.session && (ctx.session.role_tier || ctx.session.role)) || 'admin',
         active: sidebarActive,
         items: sidebarItems,
         secondary: sidebarSecondary,
@@ -22637,6 +22655,19 @@
      stay in the UI long-term. */
   function AdminMaintenance(props){
     var ctx = props.ctx;
+    /* Patch V: hard gate - destructive device-local data wipe is admin-only
+       per design (no system-level config for lead). Defensive in case lead
+       deep-links here past the Settings card. */
+    if (!ctx.can('canHardDelete')) {
+      return e('div', null,
+        e('div', { className: 'section-head' },
+          e('div', null,
+            e('h2', null, 'Maintenance'),
+            e('div', { className: 'meta' }, 'Admin only.')
+          )
+        )
+      );
+    }
     var KNOWN_KEYS = [
       'cmrc_trainers_v4',
       'cmrc_clients_v3',
@@ -22717,6 +22748,15 @@
   /* ============ ADMIN: Manage Team ============ */
   function AdminManageInstructors(props){
     var ctx = props.ctx;
+    /* Patch V: hard gate - trainer roster + PIN ops are admin-only
+       (canEditTrainer + canSetPINs both stay F for lead). The sidebar
+       'Team' item is hidden for lead; this guard handles direct nav. */
+    if (!ctx.can('canEditTrainer')) {
+      return e('div', null,
+        e('h2', { style: { fontSize: '26px', marginBottom: '14px' } }, 'Manage Team'),
+        e('div', { style: { color: 'var(--slate)' } }, 'Admin only.')
+      );
+    }
     var nameTuple = useState('');
     var name = nameTuple[0];
     var setName = nameTuple[1];
