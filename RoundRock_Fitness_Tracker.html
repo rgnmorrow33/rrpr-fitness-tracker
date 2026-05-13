@@ -3120,14 +3120,17 @@
       canAddPackage: false,
       canEditClient: false,
       canEditPackage: false,
-      canDeletePackage: false,
+      /* Patch W: canArchivePackage gates soft-delete of a package row
+         (recoverable via canRestoreDeleted). Renamed from canDeletePackage
+         so the semantic is unambiguous. canHardDelete is the separate
+         destructive gate. */
+      canArchivePackage: false,
       canEditTrainer: false,
       canSetPINs: false,
       canBulkImport: false,
       canViewAllTimeCards: false,
       canViewAnyTrainerSchedule: false,
       canDeleteSession: false,
-      canEditAnyAttendance: false,
       canEditAnySession: false,
       canEditClassStructure: false,
       canManageClosures: false,
@@ -3148,7 +3151,7 @@
       canAddPackage: true,
       canEditClient: true,
       canEditPackage: true,
-      canDeletePackage: true,
+      canArchivePackage: true,
       canEditTrainer: false,
       canSetPINs: false,
       canBulkImport: false,
@@ -3159,7 +3162,6 @@
       canViewAnyTrainerSchedule: true,
       canDeleteSession: true,
       /* Lead expansions (unscoped this cycle) */
-      canEditAnyAttendance: true,
       canEditAnySession: true,
       /* Patch V: team-level oversight + operational scheduling for lead.
          Class structure edits (symmetric to canAddClass), closures
@@ -3185,14 +3187,13 @@
       canAddPackage: true,
       canEditClient: true,
       canEditPackage: true,
-      canDeletePackage: true,
+      canArchivePackage: true,
       canEditTrainer: true,
       canSetPINs: true,
       canBulkImport: true,
       canViewAllTimeCards: true,
       canViewAnyTrainerSchedule: true,
       canDeleteSession: true,
-      canEditAnyAttendance: true,
       canEditAnySession: true,
       canEditClassStructure: true,
       canManageClosures: true,
@@ -11643,11 +11644,10 @@
     var showDeletedPkgs = showDeletedPkgsTuple[0];
     var setShowDeletedPkgs = showDeletedPkgsTuple[1];
 
-    var isAdmin = ctx.session && ctx.session.role === 'admin';
     var canAddPackage = ctx.can('canAddPackage');
     var canEditClient = ctx.can('canEditClient');
     var canEditPackage = ctx.can('canEditPackage');
-    var canDeletePackage = ctx.can('canDeletePackage');
+    var canArchivePackage = ctx.can('canArchivePackage');
     var canDeleteSession = ctx.can('canDeleteSession');
     var canViewAuditHistory = ctx.can('canViewAuditHistory');
     var canRestoreDeleted = ctx.can('canRestoreDeleted');
@@ -11852,7 +11852,7 @@
                         setEditPkgTarget(target);
                       }
                     }, '\u270e'),
-                    !isDeleted && canDeletePackage && e('button', {
+                    !isDeleted && canArchivePackage && e('button', {
                       className: 'btn btn-ghost',
                       style: { padding: '4px 8px', fontSize: '13px', color: 'var(--red)' },
                       title: 'Soft-delete package (keeps record, hides from active list)',
@@ -13711,7 +13711,6 @@
     var stColor = SESSION_STATUS_COLOR[status] || 'var(--slate)';
     var stLabel = sessionStatusLabel(s, client).toUpperCase();
     var bothSigned = !!(s.trainerSig && s.clientSig);
-    var isAdmin = ctx.session && ctx.session.role === 'admin';
     var canEditAnySession = ctx.can('canEditAnySession');
     var canDeleteSession = ctx.can('canDeleteSession');
     var canDelete = canDeleteSession && !bothSigned;
@@ -14557,7 +14556,6 @@
     var upcomingSubs = subs.filter(function(s){ return s.date >= todayYMD; });
     var pastSubs = subs.filter(function(s){ return s.date < todayYMD; });
 
-    var isAdmin = ctx.session && ctx.session.role === 'admin';
     var canEditClassStructure = ctx.can('canEditClassStructure');
 
     /* Service-recovery target for one of this class's cancellations. */
