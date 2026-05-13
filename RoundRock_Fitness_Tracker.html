@@ -2075,6 +2075,19 @@
   }
   var useCallback = React.useCallback;
 
+  /* Patch X: trailing-edge debounce. Coalesces a burst of calls into
+     one trailing invocation `ms` after the last call. Used by the
+     app-changes realtime channel per-entity reload to absorb bulk
+     inserts and rapid sequential updates without re-render thrash. */
+  function debounce(fn, ms){
+    var t = null;
+    return function(){
+      var args = arguments;
+      if (t) clearTimeout(t);
+      t = setTimeout(function(){ t = null; fn.apply(null, args); }, ms);
+    };
+  }
+
   /* ============ STORAGE MODE + ADAPTER ============
      Session 2a: Supabase plumbing wired in. STORAGE_MODE remains
      'localStorage' so behavior is unchanged; flipping the flag locally
@@ -2104,10 +2117,17 @@
 
   /* Current sign-in name accessor. Used by translators that need to
      populate a created_by column when no local equivalent exists.
-     Updated by App via a useEffect on session change. */
-  var _appSessionName = null;
-  function getAppSessionName(){ return _appSessionName || 'system'; }
-  function setAppSessionName(name){ _appSessionName = name || null; }
+     Updated by App via a useEffect on session change.
+     Patch X: state encapsulated inside the accessor closure so the
+     mutable holder isn't reachable as a module-private bare var.
+     Plumbing ctx through translator signatures is a separate refactor
+     (option #1, deferred). */
+  var getAppSessionName, setAppSessionName;
+  (function(){
+    var current = null;
+    getAppSessionName = function(){ return current || 'system'; };
+    setAppSessionName = function(name){ current = name || null; };
+  })();
 
   /* ============ REALTIME CHANNEL AUTO-RECONNECT (Patch C) ============
      iPad sleep/wake, wifi roams, and brief offline blips can drop the
@@ -5824,15 +5844,19 @@
         var channel = client.channel('app-changes');
         subs.forEach(function(sub){
           var table = sub[0]; var setter = sub[1]; var entity = sub[2];
+          /* Patch X: 100ms trailing-edge debounce per entity. A burst
+             of inserts on one table coalesces into one reload; other
+             entities' updates are unaffected (separate closures). */
+          var reload = debounce(function(){
+            storage[entity].load().then(function(fresh){
+              if (fresh != null) setter(fresh);
+            }).catch(function(err){
+              console.error('Subscription reload failed for ' + table + ':', err);
+            });
+          }, 100);
           channel.on('postgres_changes',
             { event: '*', schema: 'public', table: table },
-            function(){
-              storage[entity].load().then(function(fresh){
-                if (fresh != null) setter(fresh);
-              }).catch(function(err){
-                console.error('Subscription reload failed for ' + table + ':', err);
-              });
-            });
+            function(){ reload(); });
         });
         return channel;
       }
@@ -12197,6 +12221,7 @@
   /* ============ ADD PACKAGE (RE-UP) MODAL ============ */
   function AddPackageModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var c = props.client;
     var existingPkgs = getPackages(c);
 
@@ -12309,6 +12334,7 @@
      from client.sessions[] is the only source of truth. */
   function EditPackageModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var client = props.client;
     var original = props.pkg;
 
@@ -12585,6 +12611,7 @@
   /* ============ NEW / EDIT CLIENT MODAL ============ */
   function NewClientModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var existing = props.client;
     var isEdit = !!existing;
     /* Patch: 'consultation' mode strips the modal down to intake
@@ -13894,6 +13921,7 @@
 
   function LogSessionModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var now = new Date();
     var hh = String(now.getHours()).padStart(2,'0');
     var mm = String(now.getMinutes()).padStart(2,'0');
@@ -14826,6 +14854,7 @@
   /* ============ NEW / EDIT CLASS MODAL ============ */
   function NewClassModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var existing = props.cls;
     var isEdit = !!existing;
 
@@ -15079,6 +15108,7 @@
   /* ============ LOG ATTENDANCE MODAL ============ */
   function LogAttendanceModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var now = new Date();
     var hh = String(now.getHours()).padStart(2,'0');
     var mm = String(now.getMinutes()).padStart(2,'0');
@@ -15437,6 +15467,7 @@
   /* ============ LOG ADMIN TIME MODAL ============ */
   function LogAdminTimeModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var existing = props.item || null;
     var defaultAssignee = props.defaultAssignee || (ctx.session && ctx.session.name) || '';
 
@@ -15688,6 +15719,7 @@
      for memorable interactions but the form does not require it. */
   function LogContactModal(props){
     var ctx = props.ctx;
+    useBodyScrollLock();
     var trainerName = (ctx.session && ctx.session.name) || '';
 
     var typeTuple = useState(null); var type = typeTuple[0]; var setType = typeTuple[1];
@@ -22911,6 +22943,7 @@
        The full informed-consent / liability waiver is signed in person AT
        the orientation by the lead fitness specialist. */
     var ctx = props.ctx;
+    useBodyScrollLock();
     var existing = props.existing; // resuming a draft pre-form
     var stepTuple = useState(1);
     var step = stepTuple[0];
