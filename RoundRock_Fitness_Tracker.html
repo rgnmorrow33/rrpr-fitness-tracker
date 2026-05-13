@@ -3698,22 +3698,43 @@
   function totalConsumedBeforeImport(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.consumedBeforeImport || 0); }, 0);
   }
+  /* Patch P: session deduction is duration-weighted. 30 min = 0.5, 60 min
+     = 1.0. Legacy rows without durationHours default to 1.0. No-shows and
+     late cancels deduct at the slot's own ratio (time-based "full loss"). */
+  function durationRatio(durationHours){
+    if (durationHours === 0.5) return 0.5;
+    if (durationHours == null || durationHours === 1) return 1;
+    if (typeof console !== 'undefined') console.warn('Unexpected session durationHours:', durationHours, '- defaulting ratio to 1.0');
+    return 1;
+  }
+  function sessionConsumption(s){
+    if (!s || s.status === 'excused') return 0;
+    return durationRatio(s.durationHours);
+  }
+  /* Patch P: shared fractional formatter for balance displays. Strips
+     trailing .0 so we render "3" not "3.0", "3.5" not "3.50". */
+  function fmtSessions(n){
+    var r = Math.round((n || 0) * 10) / 10;
+    return (r % 1 === 0) ? String(Math.round(r)) : r.toFixed(1);
+  }
+  function sessionsConsumedFromArray(sessions){
+    return (sessions || []).reduce(function(sum, s){ return sum + sessionConsumption(s); }, 0);
+  }
   function sessionsRemaining(client){
     if (!client) return 0;
     var purchased = totalSessionsPurchased(client);
-    /* Excused absences do not consume a session per policy.
-       Attended sessions, late cancels, and no-shows do (the latter two
-       are billed at 50% but still count against the package). */
-    var consumed = (client.sessions || []).filter(function(s){
-      return s.status !== 'excused';
-    }).length + totalConsumedBeforeImport(client);
+    /* Excused absences do not consume. Attended counts the chosen
+       duration ratio; late cancel / no-show count the slot's own ratio
+       (per policy: "full session loss" = the slot's full duration).
+       Patch Y bulk-import legacy consumption is added on top. */
+    var consumed = sessionsConsumedFromArray(client.sessions) + totalConsumedBeforeImport(client);
     return Math.max(0, purchased - consumed);
   }
   function progressPct(client){
     if (!client) return 0;
     var purchased = totalSessionsPurchased(client);
     if (purchased === 0) return 0;
-    var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(client);
+    var consumed = sessionsConsumedFromArray(client.sessions) + totalConsumedBeforeImport(client);
     return Math.min(100, Math.round((consumed / purchased) * 100));
   }
   function packagesSummaryText(client){
@@ -3768,7 +3789,12 @@
       target_id: opts.target_id || null,
       before: opts.before == null ? null : opts.before,
       after: opts.after == null ? null : opts.after,
-      changes: changes
+      changes: changes,
+      /* Patch P: amount carries the duration-weighted package delta for
+         session_create / session_delete / recurring_* entries so the
+         audit view can render "deducted 0.5" / "returned 1.0". Direction
+         is implied by the action. */
+      amount: (opts.amount != null) ? opts.amount : null
     };
     var log = (record.audit_log || []).concat([entry]);
     if (log.length > 100) log = log.slice(log.length - 100);
@@ -3823,7 +3849,7 @@
   }
   function remainingColor(client){
     var r = sessionsRemaining(client);
-    if (r === 0) return 'red';
+    if (r <= 0) return 'red';
     if (r <= 2) return 'amber';
     return 'green';
   }
@@ -4153,9 +4179,9 @@
     if (!c) return out;
     var remaining = sessionsRemaining(c);
     if (remaining <= 0) return out;
-    /* Last session: only flag when exactly 1 remaining (consistent with
-       existing 1-remaining banner). */
-    if (remaining === 1) out.lastSessionFlag = true;
+    /* Last session: flag whenever 1 hour or less remains, since a
+       single 30-min booking would now zero them out. */
+    if (remaining <= 1) out.lastSessionFlag = true;
     /* Stale: derive reference date from most recent session, falling back
        to package purchase / creation. */
     var sessions = c.sessions || [];
@@ -4958,11 +4984,12 @@
          absences don't consume; everything else does. Client-wide check (no
          per-package linkage on client.sessions[] yet - flagged deferred).
          Patch Y: also count consumedBeforeImport across active packages so
-         bulk-imported clients are evaluated against their true remaining. */
+         bulk-imported clients are evaluated against their true remaining.
+         Patch P: consumption is duration-weighted via sessionConsumption. */
       var purchased = activePackages.reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
-      var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(client);
+      var consumed = sessionsConsumedFromArray(client.sessions) + totalConsumedBeforeImport(client);
       var remaining = Math.max(0, purchased - consumed);
-      if (remaining === 0) return;
+      if (remaining <= 0) return;
 
       activePackages.forEach(function(pkg){
         if (!pkg.id) return;
@@ -6451,42 +6478,48 @@
       setClients(function(list){ return list.filter(function(x){ return x.id !== id; }); });
     }
     function addSession(clientId, sess){
-      var matchedClient = null;
-      setClients(function(list){
-        return list.map(function(c){
-          if (c.id !== clientId) return c;
-          matchedClient = c;
-          /* Dedup with an existing scheduled placeholder for the same
-             slot. If the trainer logs a non-scheduled outcome at a
-             date+time that already has a scheduled session on file,
-             treat the log as a sign-off of that slot and update in
-             place instead of inserting a duplicate row. Preserves the
-             scheduled session's id; new fields win on the merge. */
-          var newStatus = sess && sess.status;
-          if (newStatus && newStatus !== 'scheduled' && sess.date) {
-            var sessTime = sess.time || '';
-            var match = (c.sessions || []).find(function(x){
-              return x.status === 'scheduled' && x.date === sess.date && (x.time || '') === sessTime;
-            });
-            if (match) {
-              var copy = Object.assign({}, c);
-              copy.sessions = (c.sessions || []).map(function(x){
-                return x.id === match.id ? Object.assign({}, x, sess, { id: match.id }) : x;
-              });
-              return copy;
-            }
-          }
-          var copy = Object.assign({}, c);
-          copy.sessions = (c.sessions || []).concat([sess]);
-          return copy;
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return;
+      /* Patch P: dedup branch and audit amount.
+         - If a scheduled placeholder at the same slot exists and the new
+           write is a non-scheduled outcome, treat as sign-off: merge in
+           place, action 'session_signoff', amount = new - old consumption
+           (signed: positive = additional deduction, negative = credit
+           returned, e.g. excused or shortened-duration sign-off).
+         - Otherwise append a fresh row: action 'session_create', amount =
+           the new row's consumption. */
+      var newStatus = sess && sess.status;
+      var sessTime = sess.time || '';
+      var signoffMatch = null;
+      if (newStatus && newStatus !== 'scheduled' && sess.date) {
+        signoffMatch = (before.sessions || []).find(function(x){
+          return x.status === 'scheduled' && x.date === sess.date && (x.time || '') === sessTime;
         });
-      });
+      }
+      var after, action, amount;
+      if (signoffMatch) {
+        var merged = Object.assign({}, signoffMatch, sess, { id: signoffMatch.id });
+        after = Object.assign({}, before, {
+          sessions: (before.sessions || []).map(function(x){
+            return x.id === signoffMatch.id ? merged : x;
+          })
+        });
+        action = 'session_signoff';
+        amount = sessionConsumption(merged) - sessionConsumption(signoffMatch);
+      } else {
+        after = Object.assign({}, before, {
+          sessions: (before.sessions || []).concat([sess])
+        });
+        action = 'session_create';
+        amount = sessionConsumption(sess);
+      }
+      auditedUpsertClient(after, action, { before: before, after: after, amount: amount });
       /* v2: if this client originated from the consult queue, flip the
          queue entry to 'converted' on first session log. */
-      if (matchedClient && matchedClient.fromQueueId) {
+      if (before.fromQueueId) {
         setQueue(function(qList){
           return qList.map(function(q){
-            if (q.id !== matchedClient.fromQueueId) return q;
+            if (q.id !== before.fromQueueId) return q;
             if (q.status === 'converted') return q;
             return Object.assign({}, q, {
               status: 'converted',
@@ -6522,7 +6555,11 @@
       var after = Object.assign({}, before, {
         sessions: (before.sessions || []).filter(function(s){ return s.id !== sessId; })
       });
-      auditedUpsertClient(after, 'session_delete', { before: before, after: after });
+      /* Patch P: amount = the deleted row's consumption, which is what
+         returns to the package. */
+      auditedUpsertClient(after, 'session_delete', {
+        before: before, after: after, amount: sessionConsumption(sess)
+      });
     }
 
     /* Sprint M: bulk-create a recurring session series. Generates one
@@ -6559,8 +6596,11 @@
       var seriesId = uid();
       var nowIso = new Date().toISOString();
       var scheduledBy = (session && session.name) || null;
+      /* Patch P: every row carries durationHours so deduction is uniform
+         across the series and matches the cap-math that gated count. */
+      var rowDurationHours = durationMin ? durationMin / 60 : 1;
       var newSessions = dates.map(function(ymd){
-        var row = {
+        return {
           id: uid(),
           date: ymd,
           time: time,
@@ -6569,15 +6609,17 @@
           trainerName: trainerName,
           scheduledBy: scheduledBy,
           scheduledAt: nowIso,
-          series_id: seriesId
+          series_id: seriesId,
+          durationHours: rowDurationHours
         };
-        if (durationMin) row.durationHours = durationMin / 60;
-        return row;
       });
       var after = Object.assign({}, before, {
         sessions: (before.sessions || []).concat(newSessions)
       });
-      auditedUpsertClient(after, 'recurring_create', { before: before, after: after });
+      var totalAmount = newSessions.reduce(function(sum, s){ return sum + sessionConsumption(s); }, 0);
+      auditedUpsertClient(after, 'recurring_create', {
+        before: before, after: after, amount: totalAmount
+      });
       return seriesId;
     }
 
@@ -6639,7 +6681,14 @@
         return row;
       });
       var after = Object.assign({}, before, { sessions: kept.concat(newSessions) });
-      auditedUpsertClient(after, 'recurring_reschedule', { before: before, after: after });
+      /* Patch P: net package delta from the swap. Should net to 0 for
+         simple date moves; non-zero only if the anchor had a fractional
+         duration and the rebuild crosses status boundaries. */
+      var removedAmount = toDelete.reduce(function(sum, s){ return sum + sessionConsumption(s); }, 0);
+      var addedAmount = newSessions.reduce(function(sum, s){ return sum + sessionConsumption(s); }, 0);
+      auditedUpsertClient(after, 'recurring_reschedule', {
+        before: before, after: after, amount: addedAmount - removedAmount
+      });
       return true;
     }
 
@@ -6666,7 +6715,11 @@
         return !(s.series_id === seriesId && s.date >= anchorDate);
       });
       var after = Object.assign({}, before, { sessions: kept });
-      auditedUpsertClient(after, 'recurring_cancel_all', { before: before, after: after });
+      /* Patch P: total amount returned to the package. */
+      var returnedAmount = toDelete.reduce(function(sum, s){ return sum + sessionConsumption(s); }, 0);
+      auditedUpsertClient(after, 'recurring_cancel_all', {
+        before: before, after: after, amount: returnedAmount
+      });
       return toDelete.length;
     }
 
@@ -7773,7 +7826,10 @@
         target_id: opts.target_id || c.id,
         before: opts.before !== undefined ? opts.before : before,
         after: opts.after !== undefined ? opts.after : c
-      }, opts.changes !== undefined ? { changes: opts.changes } : {}));
+      },
+        opts.changes !== undefined ? { changes: opts.changes } : {},
+        opts.amount !== undefined ? { amount: opts.amount } : {}
+      ));
       upsertClient(stamped);
     }
     function softDeleteClient(id){
@@ -11658,11 +11714,11 @@
                   e('span', {
                     style: {
                       fontSize: '11px', padding: '4px 10px', borderRadius: '999px',
-                      background: remaining === 0 ? 'var(--brick)' : (remaining <= 2 ? 'var(--ochre)' : 'var(--teal-bg)'),
+                      background: remaining <= 0 ? 'var(--brick)' : (remaining <= 2 ? 'var(--ochre)' : 'var(--teal-bg)'),
                       color: remaining <= 2 ? '#fff' : 'var(--teal)',
                       fontWeight: 700, whiteSpace: 'nowrap'
                     }
-                  }, remaining + ' left')
+                  }, fmtSessions(remaining) + ' left')
                 ),
                 e('div', { className: 't-session-meta' },
                   pillText && e('span', {
@@ -11686,7 +11742,7 @@
           e('div', { className: 'meta' },
             (initialFilter
               ? (visibleClients.length + ' of ' + myClients.length + ' shown · filter: ' + (initialFilter === 'last_session' ? 'on last session' : 'stale'))
-              : (myClients.length + ' active · ' + myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0) + ' sessions remaining')
+              : (myClients.length + ' active · ' + fmtSessions(myClients.reduce(function(s,c){ return s + sessionsRemaining(c); }, 0)) + ' sessions remaining')
             )
           )
         ),
@@ -11764,8 +11820,8 @@
         e('div', { className: 'progress-bar', style: { width: pct + '%', background: barColor } })
       ),
       e('div', { className: 'progress-footer' },
-        e('span', null, ((c.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(c)) + ' of ' + totalSessionsPurchased(c) + ' used'),
-        e('span', { className: 'remaining', style: { color: barColor } }, remaining + ' left')
+        e('span', null, fmtSessions(sessionsConsumedFromArray(c.sessions) + totalConsumedBeforeImport(c)) + ' of ' + totalSessionsPurchased(c) + ' used'),
+        e('span', { className: 'remaining', style: { color: barColor } }, fmtSessions(remaining) + ' left')
       )
     );
   }
@@ -11898,12 +11954,12 @@
         ', ' + strikes.noShows + ' no-show' + (strikes.noShows !== 1 ? 's' : '') +
         ' on file. One more late cancel or no-show may trigger discharge consideration.'
       );
-    } else if (remaining === 0) {
+    } else if (remaining <= 0) {
       banner = e('div', { className: 'banner red' }, '🚫 All sessions used - offer new package purchase.');
-    } else if (remaining === 1) {
+    } else if (remaining <= 1) {
       banner = e('div', { className: 'banner amber' }, '⚠ Last session - consider discussing renewal today.');
-    } else if (remaining === 2) {
-      banner = e('div', { className: 'banner amber' }, '2 sessions remaining - renewal conversation soon.');
+    } else if (remaining <= 2) {
+      banner = e('div', { className: 'banner amber' }, fmtSessions(remaining) + ' sessions remaining - renewal conversation soon.');
     }
     var openReferralBanner = openReferrals.length > 0
       ? e('div', { className: 'banner teal' },
@@ -11946,9 +12002,9 @@
               packagesSummaryText(c)
             )
           ),
-          e('div', { className: 'stat-card' + (remaining === 0 ? ' warn' : '') },
+          e('div', { className: 'stat-card' + (remaining <= 0 ? ' warn' : '') },
             e('div', { className: 'label' }, 'Remaining'),
-            e('div', { className: 'value' }, remaining)
+            e('div', { className: 'value' }, fmtSessions(remaining))
           ),
           e('div', { className: 'stat-card' + (strikeStatus === 'discharge' ? ' warn' : '') },
             e('div', { className: 'label' }, 'Strikes'),
@@ -11964,12 +12020,12 @@
         e('div', { className: 'fab-row' },
           e('button', {
             className: 'btn btn-primary',
-            disabled: remaining === 0,
+            disabled: remaining <= 0,
             onClick: function(){ setLogOpen(true); }
           }, '+ Log Today\'s Session'),
           e('button', {
             className: 'btn btn-teal',
-            disabled: remaining === 0,
+            disabled: remaining <= 0,
             onClick: function(){ setScheduleOpen(true); }
           }, '📅 Schedule Session'),
           /* Add Package is admin-only. Trainers see only Log Session,
@@ -13298,17 +13354,28 @@
     var time = timeTuple[0]; var setTime = timeTuple[1];
     var noteTuple = useState('');
     var note = noteTuple[0]; var setNote = noteTuple[1];
+    /* Patch P: session length picker at booking time. 1 hour or 30 min.
+       Drives both the cap-check and the durationHours stamped on the
+       scheduled row, so the package deduction matches the reservation
+       (1.0 for an hour, 0.5 for half-hour). Trainer can still adjust at
+       log time; balance recomputes from the row. */
+    var durationTuple = useState(1);
+    var duration = durationTuple[0]; var setDuration = durationTuple[1];
+    var ratio = durationRatio(duration);
     /* Sprint M (Spec 1 rewrite): recurring booking state. weekdays is
        the set of selected days-of-week (0=Sun ... 6=Sat). When recurring
        toggles on, seed with the start-date's weekday so the user gets
        a sensible starting point; they can add/remove from there. count
-       is the remaining package balance (no auto-extend), read-only. */
+       is the remaining package balance (no auto-extend), read-only.
+       Patch P: maxSeries = floor(remaining / ratio) so a 30-min uniform
+       series can pack twice as many bookings into the same package. */
     var recurringTuple = useState(false);
     var recurring = recurringTuple[0]; var setRecurring = recurringTuple[1];
     var weekdaysTuple = useState([]);
     var weekdays = weekdaysTuple[0]; var setWeekdays = weekdaysTuple[1];
     var confirmConflictsTuple = useState(false);
     var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
+    var maxSeries = Math.floor(remaining / ratio);
 
     /* Resolve trainerId from name for time-off scan. trainerProfiles
        is the source of truth; client.trainerName is the regular trainer
@@ -13334,8 +13401,8 @@
 
     var dates = useMemo(function(){
       if (!recurring) return [];
-      return generateSeriesDates({ startDate: date, weekdays: weekdays, count: remaining });
-    }, [recurring, date, weekdays, remaining]);
+      return generateSeriesDates({ startDate: date, weekdays: weekdays, count: maxSeries });
+    }, [recurring, date, weekdays, maxSeries]);
 
     var seriesCount = recurring ? dates.length : 1;
     var lastDate = (recurring && dates.length > 0) ? dates[dates.length - 1] : date;
@@ -13366,7 +13433,15 @@
     function save(){
       if (!date) { ctx.toast('Date is required', 'error'); return; }
       if (!time) { ctx.toast('Time is required', 'error'); return; }
-      if (remaining <= 0) { ctx.toast('No sessions remaining in package', 'error'); return; }
+      /* Patch P: cap-check compares remaining vs the chosen duration's
+         ratio. A 30-min booking unlocks at remaining >= 0.5; a 60-min
+         booking still requires >= 1.0. */
+      if (remaining < ratio) {
+        ctx.toast(duration === 0.5
+          ? 'Not enough remaining for a 30-min session (need 0.5)'
+          : 'Not enough remaining for a 1-hour session (need 1.0)', 'error');
+        return;
+      }
 
       if (recurring) {
         if (weekdays.length === 0) { ctx.toast('Pick at least one weekday', 'error'); return; }
@@ -13385,6 +13460,7 @@
           time: time,
           weekdays: weekdays,
           count: seriesCount,
+          durationMin: duration === 0.5 ? 30 : 60,
           note: note || null
         });
         return;
@@ -13411,12 +13487,13 @@
         note: note || null,
         trainerName: client.trainerName,
         scheduledBy: (ctx.session && ctx.session.name) || null,
-        scheduledAt: new Date().toISOString()
+        scheduledAt: new Date().toISOString(),
+        durationHours: duration
       };
       props.onSchedule(sess);
     }
 
-    var recurringDisabled = remaining <= 0;
+    var recurringDisabled = maxSeries <= 0;
 
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
@@ -13428,7 +13505,7 @@
           e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
             'Pre-booking ', recurring ? 'a series' : 'a session', ' for ', e('b', null, client.name), '.'
           ),
-          remaining === 1 && !recurring && e('div', { className: 'banner amber' },
+          !recurring && remaining > 0 && remaining <= 1 && e('div', { className: 'banner amber' },
             '⚠ This is the LAST session in their package. Discuss renewal at sign-off.'
           ),
           /* Recurring toggle. Disabled with tooltip when package balance is 0. */
@@ -13455,6 +13532,33 @@
             e('div', { className: 'field' },
               e('label', null, 'Time'),
               e(TimePicker, { value: time, onChange: setTime })
+            )
+          ),
+          /* Patch P: session-length picker. Drives cap-check and the
+             durationHours stamped on the row(s). For a series, uniform
+             duration across all bookings. */
+          e('div', { className: 'field' },
+            e('label', null, 'Session length'),
+            e('div', { style: { display: 'flex', gap: '8px' } },
+              [{ val: 1, lbl: '1 hour' }, { val: 0.5, lbl: '30 minutes' }].map(function(opt){
+                var picked = duration === opt.val;
+                return e('button', {
+                  key: opt.val,
+                  type: 'button',
+                  onClick: function(){ setDuration(opt.val); },
+                  style: {
+                    flex: 1,
+                    padding: '12px',
+                    borderRadius: '10px',
+                    border: '2px solid ' + (picked ? 'var(--teal)' : 'var(--border)'),
+                    background: picked ? 'var(--teal-bg)' : '#fff',
+                    color: picked ? 'var(--teal)' : 'var(--navy)',
+                    fontWeight: picked ? 700 : 500,
+                    fontSize: '14px',
+                    cursor: 'pointer'
+                  }
+                }, opt.lbl);
+              })
             )
           ),
           recurring && e('div', { className: 'field' },
@@ -13489,7 +13593,7 @@
           recurring && weekdays.length > 0 && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '8px' } },
             'Total sessions: ', e('b', null, seriesCount),
             '  ·  Last session: ', e('b', null, formatShort(parseYMD(lastDate))),
-            '  ·  Uses the remaining ', seriesCount, ' session', seriesCount === 1 ? '' : 's', ' on this package.'
+            '  ·  Uses ', e('b', null, fmtSessions(seriesCount * ratio)), ' of ', fmtSessions(remaining), ' remaining on this package.'
           ),
           e('div', { className: 'field' },
             e('label', null, 'Note (optional)'),
@@ -13531,7 +13635,7 @@
             )
           ),
           !recurring && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
-            remaining + ' session' + (remaining === 1 ? '' : 's') + ' remaining after this is consumed.'
+            fmtSessions(Math.max(0, remaining - ratio)) + ' remaining after this is consumed.'
           )
         ),
         e('div', { className: 'modal-footer' },
@@ -13539,8 +13643,8 @@
           e('button', {
             className: 'btn btn-primary',
             onClick: save,
-            disabled: !date || !time || remaining <= 0 ||
-              (recurring && (weekdays.length === 0 || (conflicts.length > 0 && !confirmConflicts)))
+            disabled: !date || !time || remaining < ratio ||
+              (recurring && (weekdays.length === 0 || seriesCount === 0 || (conflicts.length > 0 && !confirmConflicts)))
           }, recurring ? ('Schedule ' + seriesCount + ' sessions') : 'Schedule')
         )
       )
@@ -13789,6 +13893,15 @@
           return x.series_id === s.series_id && x.date >= s.date;
         }).length
       : 1;
+    /* Patch P: surface the actual fractional credit return so copy matches
+       what hits the package. One = the anchor's own ratio; future = sum
+       across every row that will be hard-removed. */
+    var oneRatio = sessionConsumption(s);
+    var seriesRatioSum = inSeries
+      ? (client.sessions || []).reduce(function(sum, x){
+          return (x.series_id === s.series_id && x.date >= s.date) ? sum + sessionConsumption(x) : sum;
+        }, 0)
+      : oneRatio;
 
     function confirm(){
       if (scope === 'one') {
@@ -13813,18 +13926,18 @@
           e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '12px' } },
             inSeries
               ? 'This session is part of a recurring series. Pick a scope below.'
-              : 'Cancel this session for ' + client.name + '? The session credit returns to the package.'
+              : ('Cancel this session for ' + client.name + '? ' + fmtSessions(oneRatio) + ' returns to the package.')
           ),
           inSeries && e('div', { className: 'field' },
             e('label', null, 'Scope'),
             e('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
               e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
                 e('input', { type: 'radio', checked: scope === 'one', onChange: function(){ setScope('one'); } }),
-                e('span', null, 'Cancel this session only (1 credit returns)')
+                e('span', null, 'Cancel this session only (' + fmtSessions(oneRatio) + ' returns)')
               ),
               e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 400 } },
                 e('input', { type: 'radio', checked: scope === 'future', onChange: function(){ setScope('future'); } }),
-                e('span', null, 'Cancel this and all future sessions in the series (' + seriesCount + ' credits return)')
+                e('span', null, 'Cancel this and all future sessions in the series (' + fmtSessions(seriesRatioSum) + ' returns)')
               )
             )
           )
@@ -20624,7 +20737,7 @@
         var activePkg = pkgs[0] || null;
         var purchased = totalSessionsPurchased(c);
         var sessions = c.sessions || [];
-        var used = sessions.filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(c);
+        var used = sessionsConsumedFromArray(sessions) + totalConsumedBeforeImport(c);
         var remaining = sessionsRemaining(c);
         var utilization = purchased > 0 ? Math.round((used / purchased) * 100) : '';
         var lastDate = null;
@@ -20640,8 +20753,8 @@
           csvEscape(c.email),
           csvEscape(activePkg ? (activePkg.type || (activePkg.sessions + '-session')) : ''),
           csvEscape(purchased),
-          csvEscape(used),
-          csvEscape(remaining),
+          csvEscape(fmtSessions(used)),
+          csvEscape(fmtSessions(remaining)),
           csvEscape(utilization === '' ? '' : utilization),
           csvEscape(lastDate || ''),
           csvEscape(daysSince === '' ? '' : daysSince),
@@ -21718,7 +21831,7 @@
                     ),
                     classified.kind === 'reup' && classified.matchInfo && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px', fontStyle: 'italic' } },
                       'Matched on ' + classified.matchInfo.reason +
-                      ' \u00b7 currently ' + sessionsRemaining(classified.match) + ' sessions remaining'
+                      ' \u00b7 currently ' + fmtSessions(sessionsRemaining(classified.match)) + ' sessions remaining'
                     )
                   )
                 : e('div', { style: { flex: 1, color: 'var(--red)', fontSize: '13px' } }, 'Could not parse row (no name found)')
@@ -22196,9 +22309,36 @@
         timeoff_edited: 'Edited time off',
         timeoff_deleted: 'Deleted time off',
         attendance_logged: 'Logged class attendance',
-        attendance_deleted: 'Deleted attendance record'
+        attendance_deleted: 'Deleted attendance record',
+        /* Patch P: session lifecycle audit actions. */
+        session_create: 'Logged session',
+        session_signoff: 'Signed off scheduled session',
+        session_delete: 'Cancelled session',
+        recurring_create: 'Scheduled recurring series',
+        recurring_reschedule: 'Rescheduled recurring series',
+        recurring_cancel_all: 'Cancelled recurring series'
       };
       return map[action] || action;
+    }
+    /* Patch P: render the package delta carried on session_* and
+       recurring_* entries. Positive on create/signoff = deducted; on
+       delete/cancel = returned to the package. Signoff is signed
+       (negative means credit returned). */
+    function amountText(en){
+      if (en.amount == null) return null;
+      var abs = Math.abs(en.amount);
+      var formatted = (Math.round(abs * 10) / 10);
+      var lbl = (formatted % 1 === 0) ? String(Math.round(formatted)) : formatted.toFixed(1);
+      var action = en.action;
+      if (action === 'session_delete' || action === 'recurring_cancel_all') {
+        return lbl + ' returned to package';
+      }
+      if (action === 'session_signoff' || action === 'recurring_reschedule') {
+        if (en.amount === 0) return 'no package change';
+        return (en.amount > 0 ? lbl + ' additional deducted' : lbl + ' returned to package');
+      }
+      /* session_create, recurring_create */
+      return lbl + ' deducted from package';
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -22233,6 +22373,9 @@
                   ),
                   e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } },
                     actionLabel(en.action)
+                  ),
+                  amountText(en) && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
+                    amountText(en)
                   ),
                   en.changes && Object.keys(en.changes).length > 0 && e('ul', {
                     style: { fontSize: '12px', color: 'var(--slate)', margin: '6px 0 0 0', paddingLeft: '18px' }
@@ -24535,7 +24678,7 @@
                   (c.phone ? ' · ' + c.phone : '')
                 )
               ),
-              e('span', { className: 'pill pill-' + color }, rem + ' left')
+              e('span', { className: 'pill pill-' + color }, fmtSessions(rem) + ' left')
             );
           })
         ),
@@ -24635,7 +24778,7 @@
                 (c.sessions && c.sessions.length ? formatDate(c.sessions[c.sessions.length-1].date) : '-')
               )
             ),
-            e('span', { className: 'pill pill-' + color }, rem === 0 ? 'EXPIRED' : rem + ' left')
+            e('span', { className: 'pill pill-' + color }, rem <= 0 ? 'EXPIRED' : fmtSessions(rem) + ' left')
           );
         })
       ),
@@ -24738,7 +24881,7 @@
               e('div', { style: { fontWeight: 700 } }, c.name),
               e('div', { style: { fontSize: '12px', color: 'var(--slate)' } },
                 displayTrainerName(c) + ' · ' + c.location +
-                ' · ' + sessionsRemaining(c) + ' sessions remaining' +
+                ' · ' + fmtSessions(sessionsRemaining(c)) + ' sessions remaining' +
                 (c.phone ? ' · ' + c.phone : '')
               )
             ),
