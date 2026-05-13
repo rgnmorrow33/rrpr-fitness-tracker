@@ -5028,6 +5028,25 @@
     return gxClassHours(cls);
   }
 
+  /* v4.5 Patch O: backdated class attendance uses the class's actual
+     occurrence date for rollups, not whatever the trainer typed when they
+     finally logged it. Given the user-picked date and the class entity,
+     walk back to the nearest prior date matching cls.dayOfWeek. If the
+     picked date already lands on the class weekday, return as-is. If the
+     class has no usable dayOfWeek (data integrity edge), trust the user's
+     input. Pure - no side effects, used at write time only. */
+  function snapAttendanceClassDate(cls, ymd){
+    var d = parseYMD(ymd);
+    if (!d) return ymd;
+    var target = normalizeDow(cls && cls.dayOfWeek);
+    if (!target) return ymd;
+    var targetIdx = DOW_TO_IDX[target];
+    if (targetIdx == null) return ymd;
+    var diff = (d.getDay() - targetIdx + 7) % 7;
+    if (diff === 0) return ymd;
+    return toYMD(addDays(d, -diff));
+  }
+
   /* Single source of truth for trainer hours per pay period.
      Returns the full breakdown documented in the v2 handoff:
        forwardFacing: { ptSessions, ptHours, gxClasses, gxHours,
@@ -6670,8 +6689,35 @@
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
+          /* v4.5 Patch O: snap att.date to the class's actual occurrence
+             date so timecards and reporting credit the right day even
+             when the trainer backdates a log. logged_at captures the
+             input timestamp for the audit trail. */
+          var userPickedDate = att.date;
+          var classDate = snapAttendanceClassDate(c, userPickedDate);
+          var loggedAtIso = new Date().toISOString();
+          var stamped = Object.assign({}, att, {
+            date: classDate,
+            class_date: classDate,
+            logged_at: loggedAtIso
+          });
           var copy = Object.assign({}, c);
-          copy.attendance = (c.attendance || []).concat([att]);
+          copy.attendance = (c.attendance || []).concat([stamped]);
+          /* Append a per-class audit_log entry so AuditHistoryModal shows
+             "Carlos logged Monday's class on Wednesday at 2pm". The audit
+             ts is the input timestamp; the row's date field is the snapped
+             class date. */
+          copy = appendAuditEntry(copy, session, 'attendance_logged', {
+            entity_type: 'class',
+            target_id: c.id,
+            after: {
+              attendance_id: stamped.id,
+              class_date: classDate,
+              user_picked_date: userPickedDate,
+              instructor: stamped.instructor || stamped.actualInstructor || null,
+              headcount: typeof stamped.headcount === 'number' ? stamped.headcount : null
+            }
+          });
           return copy;
         });
       });
@@ -6680,8 +6726,21 @@
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
+          var removed = (c.attendance || []).find(function(a){ return a.id === attId; }) || null;
           var copy = Object.assign({}, c);
           copy.attendance = (c.attendance || []).filter(function(a){ return a.id !== attId; });
+          if (removed) {
+            copy = appendAuditEntry(copy, session, 'attendance_deleted', {
+              entity_type: 'class',
+              target_id: c.id,
+              before: {
+                attendance_id: removed.id,
+                class_date: removed.class_date || removed.date || null,
+                instructor: removed.instructor || removed.actualInstructor || null,
+                headcount: typeof removed.headcount === 'number' ? removed.headcount : null
+              }
+            });
+          }
           return copy;
         });
       });
@@ -15234,7 +15293,12 @@
     var hh = String(now.getHours()).padStart(2,'0');
     var mm = String(now.getMinutes()).padStart(2,'0');
 
-    var initialDate = props.initialDate || todayStr();
+    /* v4.5 Patch O: when no occurrence date is supplied by the caller,
+       default to the most recent occurrence of this class on or before
+       today (Monday class opened on Wednesday defaults to Monday) instead
+       of today. Snap-on-write in addAttendance is the safety net if the
+       trainer overrides the default; this just reduces the bug source. */
+    var initialDate = props.initialDate || snapAttendanceClassDate(props.cls, todayStr());
     var dateTuple = useState(initialDate);
     var date = dateTuple[0];
     var setDate = dateTuple[1];
@@ -22130,7 +22194,9 @@
         closure_deleted: 'Removed closure',
         timeoff_added: 'Added time off',
         timeoff_edited: 'Edited time off',
-        timeoff_deleted: 'Deleted time off'
+        timeoff_deleted: 'Deleted time off',
+        attendance_logged: 'Logged class attendance',
+        attendance_deleted: 'Deleted attendance record'
       };
       return map[action] || action;
     }
