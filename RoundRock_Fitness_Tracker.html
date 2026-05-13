@@ -588,7 +588,6 @@
     background: #fff;
     border-radius: 12px;
     border: 1px solid var(--border);
-    overflow: hidden;
     margin-top: 12px;
   }
   .log-row {
@@ -600,7 +599,10 @@
     gap: 8px;
     font-size: 14px;
   }
-  .log-row:last-child { border-bottom: none; }
+  .log-row:last-child {
+    border-bottom: none;
+    border-radius: 0 0 12px 12px;
+  }
   .log-row.header {
     background: var(--cream-2);
     font-weight: 700;
@@ -608,9 +610,13 @@
     text-transform: uppercase;
     color: var(--slate);
     letter-spacing: 0.05em;
+    border-radius: 12px 12px 0 0;
     /* Stick below the navigation bar. .header / .trainer-bar are
        z-index 40; this is lower so partial-scroll states never let a
-       column-header label peek above the nav. */
+       column-header label peek above the nav. Patch Q: .log-table
+       lost overflow:hidden so it no longer becomes the sticky
+       containing block on short tables. Corner clipping is preserved
+       by border-radius on the header and :last-child rows. */
     position: sticky;
     top: var(--nav-height);
     z-index: 30;
