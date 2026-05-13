@@ -3691,6 +3691,13 @@
   function totalPaid(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.amountPaid != null ? p.amountPaid : (p.price || 0)); }, 0);
   }
+  /* Patch Y: bulk-imported packages store the count of sessions consumed
+     before the app existed (meta.sessions - csv.sessions_remaining). Sums
+     to a single "ghost consumption" total per client. Native creates leave
+     the field absent and contribute 0. */
+  function totalConsumedBeforeImport(client){
+    return getPackages(client).reduce(function(sum, p){ return sum + (p.consumedBeforeImport || 0); }, 0);
+  }
   function sessionsRemaining(client){
     if (!client) return 0;
     var purchased = totalSessionsPurchased(client);
@@ -3699,14 +3706,14 @@
        are billed at 50% but still count against the package). */
     var consumed = (client.sessions || []).filter(function(s){
       return s.status !== 'excused';
-    }).length;
+    }).length + totalConsumedBeforeImport(client);
     return Math.max(0, purchased - consumed);
   }
   function progressPct(client){
     if (!client) return 0;
     var purchased = totalSessionsPurchased(client);
     if (purchased === 0) return 0;
-    var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length;
+    var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(client);
     return Math.min(100, Math.round((consumed / purchased) * 100));
   }
   function packagesSummaryText(client){
@@ -4949,9 +4956,11 @@
 
       /* Live remaining count - mirrors the sessionsRemaining helper. Excused
          absences don't consume; everything else does. Client-wide check (no
-         per-package linkage on client.sessions[] yet - flagged deferred). */
+         per-package linkage on client.sessions[] yet - flagged deferred).
+         Patch Y: also count consumedBeforeImport across active packages so
+         bulk-imported clients are evaluated against their true remaining. */
       var purchased = activePackages.reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
-      var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length;
+      var consumed = (client.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(client);
       var remaining = Math.max(0, purchased - consumed);
       if (remaining === 0) return;
 
@@ -11593,7 +11602,7 @@
         e('div', { className: 'progress-bar', style: { width: pct + '%', background: barColor } })
       ),
       e('div', { className: 'progress-footer' },
-        e('span', null, (c.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + ' of ' + totalSessionsPurchased(c) + ' used'),
+        e('span', null, ((c.sessions || []).filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(c)) + ' of ' + totalSessionsPurchased(c) + ' used'),
         e('span', { className: 'remaining', style: { color: barColor } }, remaining + ' left')
       )
     );
@@ -11782,7 +11791,7 @@
           e('div', { className: 'stat-card' + (strikeStatus === 'discharge' ? ' warn' : '') },
             e('div', { className: 'label' }, 'Strikes'),
             e('div', { className: 'value', style: { fontSize: '20px', fontFamily: 'DM Sans', fontWeight: 700, paddingTop: '4px' } },
-              strikes.lateCancels + 'LC · ' + strikes.noShows + 'NS'
+              strikes.lateCancels + ' LC · ' + strikes.noShows + ' NS'
             )
           ),
           e('div', { className: 'stat-card' },
@@ -11817,11 +11826,13 @@
         ),
         /* Package History - shown when more than one package exists, or
            when the user can manage packages (so per-row edit/delete is
-           reachable even on single-package clients). */
+           reachable even on single-package clients).
+           Patch Y: always render when there's any package - active rows
+           were previously hidden from non-admin viewers on single-package
+           clients, leaving the section silently empty post-import. */
         (function(){
           var visiblePackages = getPackages(c, { includeDeleted: showDeletedPkgs });
           var deletedCount = ((c.packages || []).filter(function(p){ return !!p.deleted_at; })).length;
-          if (!(visiblePackages.length > 1 || canEditPackage)) return null;
           if (visiblePackages.length === 0 && deletedCount === 0) return null;
           return e('div', { style: { marginTop: '16px' } },
             e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' } },
@@ -11842,7 +11853,14 @@
                 e('div', null, 'Source'),
                 canEditPackage && e('div', null, '')
               ),
-              visiblePackages.slice().sort(function(a,b){ return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1; }).map(function(p, i){
+              visiblePackages.slice().sort(function(a,b){
+                /* Patch Y: active (non-deleted) rows first, then deleted.
+                   Within each group, purchaseDate desc. */
+                var aDel = a.deleted_at ? 1 : 0;
+                var bDel = b.deleted_at ? 1 : 0;
+                if (aDel !== bDel) return aDel - bDel;
+                return (a.purchaseDate || '') < (b.purchaseDate || '') ? 1 : -1;
+              }).map(function(p, i){
                 var isDeleted = !!p.deleted_at;
                 var rowStyle = isDeleted ? { opacity: 0.55, fontStyle: 'italic' } : null;
                 return e('div', { key: p.id || i, className: 'log-row', style: rowStyle },
@@ -20434,7 +20452,7 @@
         var activePkg = pkgs[0] || null;
         var purchased = totalSessionsPurchased(c);
         var sessions = c.sessions || [];
-        var used = sessions.filter(function(s){ return s.status !== 'excused'; }).length;
+        var used = sessions.filter(function(s){ return s.status !== 'excused'; }).length + totalConsumedBeforeImport(c);
         var remaining = sessionsRemaining(c);
         var utilization = purchased > 0 ? Math.round((used / purchased) * 100) : '';
         var lastDate = null;
@@ -20686,6 +20704,13 @@
         sessionsNum = parseInt(sessionsStr, 10);
         if (isNaN(sessionsNum) || sessionsNum < 0 || String(sessionsNum) !== sessionsStr.replace(/^0+(?=\d)/, '')) {
           errs.push('sessions_remaining must be a non-negative integer');
+        } else {
+          /* Patch Y: cap sessions_remaining at the package's original size.
+             Catches typos like 15-remaining on a CMRC-PT-10. */
+          var pkgMeta = getPackageMeta(packageType);
+          if (pkgMeta && sessionsNum > pkgMeta.sessions) {
+            errs.push('sessions_remaining (' + sessionsNum + ') exceeds package size for ' + packageType + ' (' + pkgMeta.sessions + ')');
+          }
         }
       }
       if (purchaseDate && !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate)) {
@@ -20823,11 +20848,21 @@
       var packageRecords = group.packages.map(function(p){
         var meta = getPackageMeta(p.type);
         var price = meta ? meta.price : 0;
+        /* Patch Y: import encodes the consumed-before-import gap explicitly.
+           package.sessions holds the original package size from meta, and
+           consumedBeforeImport captures (original - csv.remaining) so the
+           display contract (10-sess shown, 7 remaining, 3 consumed-before)
+           works without faking session log history. If meta is missing
+           (validation should have rejected upstream, but belt-and-suspenders)
+           fall back to the raw CSV count with no ghost consumption. */
+        var originalSize = meta ? meta.sessions : p.sessionsRemaining;
+        var consumedBeforeImport = meta ? Math.max(0, meta.sessions - p.sessionsRemaining) : 0;
         return {
           id: uid(),
           type: p.type,
           template_id: meta ? meta.id : null,
-          sessions: p.sessionsRemaining,
+          sessions: originalSize,
+          consumedBeforeImport: consumedBeforeImport,
           price: price,
           amountPaid: price,
           paymentType: 'Card',
