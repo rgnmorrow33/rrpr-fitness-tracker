@@ -207,10 +207,6 @@ Git's .git folder.
 Tracked across all sessions. Address in a dedicated cleanup commit
 when convenient.
 
-- _appSessionName module-level mutable global. Used in
-  translate.scheduleVersions to stamp created_by when no local
-  equivalent. Refactor would touch the translator signature; not a
-  quick win.
 - Trainers replace-all on save: every save sends the full profile
   array. Diff-based save would only send changed rows. Add only if
   Supabase rate limits surface.
@@ -219,8 +215,6 @@ when convenient.
   no-op, but a true originator id would be cleaner.
 - Channel auto-reconnect on subscription drop. If subs actually
   drop in production it's a P1 to investigate, not cleanup.
-- Subscription debounce. Fires on every change. Consider 200ms
-  debounce only if rendering pain shows up.
 - Lead expanded perms (canEditAnyAttendance, canEditAnySession)
   are unscoped. Future work: scope to a reporting tree once we
   have one.
