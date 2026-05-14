@@ -232,6 +232,9 @@ when convenient.
   (the one Patch P just fixed for leads). G2 should sweep them
   with the requestTimeOff / createQueueEntry persist-then-toast
   shape.
+- fmtRange duplicated in two places: TimeOffManagerModal local
+  (line ~25661) and TimeCardView local from Sprint O Phase 2
+  (line ~16889). Lift to module scope on a future cleanup pass.
 
 ## Deferred features
 
