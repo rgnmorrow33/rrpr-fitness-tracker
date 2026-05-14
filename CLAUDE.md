@@ -235,6 +235,15 @@ when convenient.
 - fmtRange duplicated in two places: TimeOffManagerModal local
   (line ~25661) and TimeCardView local from Sprint O Phase 2
   (line ~16889). Lift to module scope on a future cleanup pass.
+- .pill-btn CSS rule (lines 701-714) is selector-scoped to
+  .audit-controls; usage at AuditView 26354/26733 and any future
+  site outside .audit-controls renders with browser defaults +
+  inline overrides. Sprint P Tier C1 deferred the
+  ConsultQueueView filter-pill normalization here. Resolution
+  options: (a) unscope the .pill-btn selector - touches shared
+  CSS, Section D risk, or (b) wrap all .pill-btn usages in
+  .audit-controls consistently. Defer until a Phase 2-style
+  sprint can opt into shared-CSS work.
 
 ## Deferred features
 

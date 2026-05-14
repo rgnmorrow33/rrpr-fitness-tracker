@@ -8647,7 +8647,7 @@
           position: 'absolute',
           top: '6px', right: '6px',
           width: '8px', height: '8px',
-          background: 'var(--red)',
+          background: 'var(--brick)',
           borderRadius: '50%',
           boxShadow: '0 0 0 2px var(--navy)'
         }
@@ -8710,7 +8710,7 @@
                     width: '8px', height: '8px', flexShrink: 0,
                     marginTop: '6px',
                     borderRadius: '50%',
-                    background: isUnread ? 'var(--red)' : 'transparent'
+                    background: isUnread ? 'var(--brick)' : 'transparent'
                   }
                 }),
                 e('div', { style: { minWidth: 0, flex: 1 } },
@@ -10895,7 +10895,7 @@
                   style: {
                     width: trainerColW + 'px', flexShrink: 0,
                     padding: '10px', fontSize: '13px', fontWeight: 600,
-                    color: 'var(--navy)', background: 'var(--cream-2)',
+                    color: 'var(--navy)', background: 'var(--paper-2)',
                     borderRight: '1px solid var(--border)',
                     display: 'flex', alignItems: 'center'
                   }
@@ -11046,7 +11046,7 @@
                 style: {
                   width: '110px', flexShrink: 0,
                   padding: '10px', fontSize: '13px', fontWeight: 600,
-                  color: 'var(--navy)', background: 'var(--cream-2)',
+                  color: 'var(--navy)', background: 'var(--paper-2)',
                   borderRight: '1px solid var(--border)',
                   display: 'flex', alignItems: 'center'
                 }
@@ -15894,9 +15894,9 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop' },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
-        e('div', { className: 'modal-head' },
+        e('div', { className: 'modal-header' },
           e('h3', null, existing ? 'Edit Admin Time' : 'Log Admin Time'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '\u00d7')
         ),
@@ -16212,9 +16212,9 @@
       });
     }
 
-    return e('div', { className: 'modal-backdrop' },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
-        e('div', { className: 'modal-head' },
+        e('div', { className: 'modal-header' },
           e('h3', null, 'Add to Consult Queue'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '\u00d7')
         ),
@@ -16226,7 +16226,7 @@
               onChange: function(ev){ setName(ev.target.value); },
               style: errors.name ? { borderColor: 'var(--red)' } : null
             }),
-            errors.name && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, errors.name)
+            errors.name && e('div', { style: { fontSize: '12px', color: 'var(--brick)', marginTop: '4px' } }, errors.name)
           ),
           e('div', { className: 'row2' },
             e('div', { className: 'field' },
@@ -16314,9 +16314,9 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop' },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
-        e('div', { className: 'modal-head' },
+        e('div', { className: 'modal-header' },
           e('h3', null, titleMap[newStatus] || 'Update Lead'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '\u00d7')
         ),
@@ -16385,7 +16385,7 @@
       if (s === 'lost') return 'btn-amber';
       if (s === 'converted') return 'btn-teal';
       if (s === 'waiting') return 'btn-outline';
-      return 'btn-navy';
+      return 'btn-primary';
     }
 
     function handleAction(s){
@@ -16423,9 +16423,9 @@
 
     var history = (lead.statusHistory || []).slice().reverse();
 
-    return e('div', { className: 'modal-backdrop' },
-      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '560px' } },
-        e('div', { className: 'modal-head' },
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
           e('h3', null, lead.name),
           e('button', { className: 'modal-close', onClick: props.onClose }, '\u00d7')
         ),
@@ -16443,7 +16443,7 @@
             lead.source && e('span', {
               style: {
                 padding: '5px 10px', borderRadius: '999px',
-                background: 'var(--cream-2)', border: '1px solid var(--border)',
+                background: 'var(--paper-2)', border: '1px solid var(--rule)',
                 color: 'var(--slate)', fontSize: '12px', fontWeight: 600
               }
             }, QUEUE_SOURCE_LABEL[lead.source] || lead.source),
@@ -16465,10 +16465,10 @@
           lead.assignedTo && e('div', { style: { fontSize: '13px', color: 'var(--navy)', marginBottom: '8px' } },
             e('b', null, 'Assigned to: '), lead.assignedTo
           ),
-          lead.followUpBy && e('div', { style: { fontSize: '13px', color: aged ? 'var(--red)' : 'var(--slate)', marginBottom: '8px' } },
+          lead.followUpBy && e('div', { style: { fontSize: '13px', color: aged ? 'var(--brick)' : 'var(--slate)', marginBottom: '8px' } },
             e('b', null, 'Follow up by: '), formatShort(parseYMD(lead.followUpBy))
           ),
-          lead.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '4px', marginBottom: '12px', fontStyle: 'italic', padding: '10px 12px', background: 'var(--cream-2)', borderRadius: '8px' } }, '\u201c' + lead.note + '\u201d'),
+          lead.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '4px', marginBottom: '12px', fontStyle: 'italic', padding: '10px 12px', background: 'var(--paper-2)', borderRadius: '8px' } }, '\u201c' + lead.note + '\u201d'),
           lead.sourceTag && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '12px' } },
             e('b', null, 'Event: '), lead.sourceTag
           ),
@@ -16489,7 +16489,7 @@
           ),
 
           /* Reassign / initial-assign UI */
-          reassignOpen && e('div', { style: { padding: '10px 12px', background: 'var(--cream-2)', borderRadius: '8px', marginBottom: '14px' } },
+          reassignOpen && e('div', { style: { padding: '10px 12px', background: 'var(--paper-2)', borderRadius: '8px', marginBottom: '14px' } },
             e('div', { style: { fontSize: '12px', fontWeight: 700, color: 'var(--navy)', marginBottom: '6px' } }, lead.assignedTo ? 'Reassign to:' : 'Assign to:'),
             e('div', { style: { display: 'flex', gap: '6px' } },
               e('select', { value: reassignTo, onChange: function(ev){ setReassignTo(ev.target.value); }, style: { flex: 1 } },
@@ -16514,7 +16514,7 @@
                   style: {
                     padding: '8px 10px', marginBottom: '4px',
                     borderLeft: '3px solid ' + (QUEUE_STATUS_COLOR[h.to] || 'var(--slate)'),
-                    background: 'var(--cream-2)', borderRadius: '4px'
+                    background: 'var(--paper-2)', borderRadius: '4px'
                   }
                 },
                   e('div', { style: { fontSize: '12px', color: 'var(--navy)', fontWeight: 600 } },
@@ -16539,7 +16539,7 @@
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Close'),
           isAdmin && lead.status !== 'converted' && e('button', {
             className: 'btn btn-outline',
-            style: { color: 'var(--red)', borderColor: 'var(--red)' },
+            style: { color: 'var(--brick)', borderColor: 'var(--brick)' },
             onClick: function(){
               if (window.confirm('Delete this lead permanently? Cannot be undone.')) {
                 ctx.deleteQueueEntry(lead.id);
@@ -16586,9 +16586,9 @@
       props.onClose();
     }
 
-    return e('div', { className: 'modal-backdrop' },
+    return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
-        e('div', { className: 'modal-head' },
+        e('div', { className: 'modal-header' },
           e('h3', null, action === 'approve' ? 'Approve Sub' : 'Deny Sub'),
           e('button', { className: 'modal-close', onClick: props.onClose }, '\u00d7')
         ),
@@ -16617,9 +16617,9 @@
                 onClick: function(){ setAction('deny'); },
                 style: {
                   flex: 1, padding: '10px', borderRadius: '8px',
-                  border: '1.5px solid ' + (action === 'deny' ? 'var(--red)' : 'var(--border)'),
+                  border: '1.5px solid ' + (action === 'deny' ? 'var(--brick)' : 'var(--border)'),
                   background: action === 'deny' ? 'var(--red-bg)' : '#fff',
-                  color: action === 'deny' ? 'var(--red)' : 'var(--slate)',
+                  color: action === 'deny' ? 'var(--brick)' : 'var(--slate)',
                   fontWeight: 600
                 }
               }, '\u2715 Deny')
@@ -16638,7 +16638,7 @@
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
           e('button', {
-            className: action === 'approve' ? 'btn btn-green' : 'btn btn-red',
+            className: action === 'approve' ? 'btn btn-green' : 'btn btn-danger',
             onClick: submit
           }, action === 'approve' ? 'Approve Sub' : 'Deny Sub')
         )
@@ -18829,7 +18829,7 @@
     var foldLinks = props.onNavigate ? e('div', {
       style: {
         display: 'flex', gap: '8px', alignItems: 'center',
-        fontSize: '12px', color: 'var(--slate)',
+        fontSize: '13px', color: 'var(--slate)',
         marginBottom: '10px'
       }
     },
@@ -18910,7 +18910,7 @@
                 background: '#fff',
                 border: '1.5px solid var(--rule)',
                 borderLeft: '4px solid ' + leftBorder,
-                borderRadius: '8px',
+                borderRadius: '12px',
                 padding: '12px 14px',
                 marginBottom: '8px',
                 cursor: 'pointer'
@@ -18963,7 +18963,7 @@
                 background: '#fff',
                 border: '1.5px solid var(--rule)',
                 borderLeft: '4px solid var(--ochre)',
-                borderRadius: '8px',
+                borderRadius: '12px',
                 padding: '12px 14px',
                 marginBottom: '8px',
                 display: 'flex', flexDirection: 'column', gap: '10px'
@@ -19015,12 +19015,8 @@
                   })
                 ),
                 e('button', {
-                  onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); },
-                  style: {
-                    padding: '8px 10px', borderRadius: '6px',
-                    border: '1px solid var(--rule)', background: '#fff',
-                    color: 'var(--slate)', fontSize: '12px', cursor: 'pointer', whiteSpace: 'nowrap'
-                  }
+                  className: 'btn btn-outline btn-sm',
+                  onClick: function(){ if (props.onOpenClient) props.onOpenClient(c.id); }
                 }, 'Details \u2192')
               )
             );
@@ -19047,7 +19043,7 @@
             style: {
               padding: '8px 14px',
               borderRadius: '999px',
-              border: '1.5px solid ' + (active ? 'var(--gold)' : 'var(--border)'),
+              border: '1.5px solid ' + (active ? 'var(--gold)' : 'var(--rule)'),
               background: active ? 'var(--gold)' : '#fff',
               color: active ? '#fff' : 'var(--slate)',
               fontWeight: 600,
@@ -19069,9 +19065,9 @@
               onClick: function(){ setLeadDetail(q); },
               style: {
                 background: '#fff',
-                border: '1.5px solid ' + (aged ? 'var(--red)' : 'var(--border)'),
+                border: '1.5px solid ' + (aged ? 'var(--red)' : 'var(--rule)'),
                 borderRadius: '12px',
-                padding: '14px 16px',
+                padding: '12px 14px',
                 marginBottom: '10px',
                 cursor: 'pointer'
               }
@@ -19079,7 +19075,7 @@
               e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' } },
                 e('div', { style: { flex: 1, minWidth: '200px' } },
                   e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-                    e('div', { style: { fontWeight: 600, fontSize: '15px', color: 'var(--navy)' } }, q.name),
+                    e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, q.name),
                     e('span', {
                       style: {
                         fontSize: '10px', padding: '3px 9px', borderRadius: '999px',
@@ -25937,7 +25933,7 @@
                       title: 'View audit history',
                       onClick: function(){ setAuditTarget(cl); }
                     }, '📜'),
-                    e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--red)' }, onClick: function(){ remove(cl); } }, '✕')
+                    e('button', { className: 'btn btn-ghost btn-sm', style: { color: 'var(--brick)' }, onClick: function(){ remove(cl); } }, '✕')
                   )
                 );
               })
@@ -26351,7 +26347,7 @@
       e('div', { className: 'audit-section' },
         e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px', marginBottom: '4px' } },
           e('h3', null, 'Hours per Instructor'),
-          e('div', { style: { display: 'flex', gap: '4px', background: 'var(--cream-2)', padding: '3px', borderRadius: '999px' } },
+          e('div', { style: { display: 'flex', gap: '4px', background: 'var(--paper-2)', padding: '3px', borderRadius: '999px' } },
             e('button', {
               className: 'pill-btn' + (hoursMode === 'scheduled' ? ' active' : ''),
               style: { fontSize: '12px', padding: '6px 12px' },
