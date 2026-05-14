@@ -16828,6 +16828,9 @@
        their direct-write path via TimeOffManagerModal in TrainerView. */
     var requestOpenTuple = useState(false);
     var requestOpen = requestOpenTuple[0]; var setRequestOpen = requestOpenTuple[1];
+    /* Phase 2: expand state for the My time-off requests history list. */
+    var historyShowAllTuple = useState(false);
+    var historyShowAll = historyShowAllTuple[0]; var setHistoryShowAll = historyShowAllTuple[1];
 
     return e('div', null,
       /* Phase 3b-A2: read-only banner when viewing another trainer's card
@@ -16862,6 +16865,105 @@
         ctx: ctx,
         onClose: function(){ setRequestOpen(false); }
       }),
+
+      /* Phase 2: trainer-side time-off request history. Resolves the
+         signed-in trainer's profile via trainerProfiles (mirrors the
+         TrainerToday pattern at the myTimeOffToday computation). Empty
+         state covers both "no requests" and "profile unresolved". Hidden
+         in read-only drill-down since the section is about the signed-in
+         user, not the trainer being viewed.
+         Deferred: fmtRange below duplicates the TimeOffManagerModal local;
+         lift to module scope on a future cleanup pass. */
+      !isReadOnly && (function(){
+        var profile = (ctx.trainerProfiles || []).find(function(p){
+          return p && p.id && trainerNameMatches(trainerName, p.name);
+        });
+        var myRequests = profile
+          ? (ctx.timeOff || [])
+              .filter(function(t){ return !t.deleted_at && t.trainerId === profile.id; })
+              .slice()
+              .sort(function(a, b){ return (a.startAt || '') < (b.startAt || '') ? 1 : -1; })
+          : [];
+        var DISPLAY_CAP = 20;
+        var displayed = historyShowAll ? myRequests : myRequests.slice(0, DISPLAY_CAP);
+        function fmtRange(t){
+          var s = new Date(t.startAt);
+          var eD = new Date(t.endAt);
+          if (isNaN(s.getTime()) || isNaN(eD.getTime())) return '';
+          var fmtD = function(d){ return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+          var fmtT = function(d){
+            var h = d.getHours(); var m = d.getMinutes();
+            var ampm = h >= 12 ? 'PM' : 'AM';
+            var h12 = h % 12; if (h12 === 0) h12 = 12;
+            var mm = String(m); if (mm.length < 2) mm = '0' + mm;
+            return h12 + ':' + mm + ' ' + ampm;
+          };
+          var sameDay = s.toDateString() === eD.toDateString();
+          if (t.allDay) {
+            return sameDay ? fmtD(s) : (fmtD(s) + ' – ' + fmtD(eD));
+          }
+          return sameDay
+            ? (fmtD(s) + ' ' + fmtT(s) + ' – ' + fmtT(eD))
+            : (fmtD(s) + ' ' + fmtT(s) + ' – ' + fmtD(eD) + ' ' + fmtT(eD));
+        }
+        function statusMeta(status){
+          if (status === 'pending') return { bg: 'var(--ochre)', label: 'Pending' };
+          if (status === 'denied')  return { bg: 'var(--brick)', label: 'Denied' };
+          return { bg: 'var(--moss)', label: 'Approved' };
+        }
+        return e('div', { style: { marginBottom: '18px' } },
+          e('h3', {
+            style: {
+              fontSize: '13px', textTransform: 'uppercase',
+              letterSpacing: '0.05em', fontWeight: 700,
+              color: 'var(--slate)', marginBottom: '8px'
+            }
+          }, 'My time-off requests'),
+          myRequests.length === 0
+            ? e('div', { style: { fontSize: '13px', color: 'var(--slate-soft)', fontStyle: 'italic' } },
+                'No time-off requests yet.')
+            : e('div', null,
+                displayed.map(function(t){
+                  var kindLabel = t.kind ? (t.kind.charAt(0).toUpperCase() + t.kind.slice(1)) : '?';
+                  var meta = statusMeta(t.status || 'approved');
+                  return e('div', {
+                    key: t.id,
+                    style: {
+                      padding: '8px 10px',
+                      marginBottom: '6px',
+                      background: 'var(--paper-2)',
+                      border: '1px solid var(--rule)',
+                      borderRadius: '6px'
+                    }
+                  },
+                    e('div', { style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap' } },
+                      e('span', {
+                        style: {
+                          display: 'inline-block', padding: '2px 8px', borderRadius: '999px',
+                          background: meta.bg, color: '#fff',
+                          fontSize: '10px', fontWeight: 700,
+                          textTransform: 'uppercase', letterSpacing: '0.04em',
+                          marginRight: '8px'
+                        }
+                      }, meta.label),
+                      e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, kindLabel),
+                      e('span', { style: { color: 'var(--slate)', margin: '0 6px' } }, '·'),
+                      e('span', { style: { color: 'var(--slate)' } }, fmtRange(t))
+                    ),
+                    t.reason && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } }, t.reason),
+                    (t.status === 'denied') && t.decisionNote && e('div', {
+                      style: { fontSize: '12px', color: 'var(--brick)', fontStyle: 'italic', marginTop: '4px' }
+                    }, 'Note from approver: ' + t.decisionNote)
+                  );
+                }),
+                myRequests.length > DISPLAY_CAP && !historyShowAll && e('button', {
+                  className: 'btn btn-ghost btn-sm',
+                  style: { marginTop: '6px' },
+                  onClick: function(){ setHistoryShowAll(true); }
+                }, 'Show older (' + (myRequests.length - DISPLAY_CAP) + ')')
+              )
+        );
+      })(),
 
       /* Patch F: pay-period framing widget. Tiles + Mon-Sat strip
          relocated here from TrainerToday so pay-period context lives on
@@ -25022,8 +25124,11 @@
   function TimeOffRequestModal(props){
     var ctx = props.ctx;
     var REQUEST_KINDS = [
-      { value: 'sick',     label: 'Sick' },
-      { value: 'vacation', label: 'Vacation' }
+      { value: 'sick',        label: 'Sick' },
+      { value: 'vacation',    label: 'Vacation' },
+      { value: 'personal',    label: 'Personal' },
+      { value: 'jury',        label: 'Jury duty' },
+      { value: 'bereavement', label: 'Bereavement' }
     ];
 
     var session = ctx.session || {};
