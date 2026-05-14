@@ -16478,12 +16478,12 @@
             validNext.map(function(s){
               return e('button', {
                 key: s,
-                className: 'btn btn-sm ' + actionColor(s),
+                className: 'btn ' + actionColor(s) + ' btn-sm',
                 onClick: function(){ handleAction(s); }
               }, actionLabel(s));
             }),
             (isAdmin || isLead) && lead.status !== 'converted' && lead.status !== 'lost' && lead.assignedTo && e('button', {
-              className: 'btn btn-sm btn-outline',
+              className: 'btn btn-outline btn-sm',
               onClick: function(){ setReassignOpen(true); }
             }, 'Reassign')
           ),
@@ -16498,8 +16498,8 @@
                   return e('option', { key: t, value: t, disabled: t === lead.assignedTo }, t);
                 })
               ),
-              e('button', { className: 'btn btn-sm btn-teal', onClick: doReassign }, lead.assignedTo ? 'Reassign' : 'Assign'),
-              e('button', { className: 'btn btn-sm btn-ghost', onClick: function(){ setReassignOpen(false); } }, 'Cancel')
+              e('button', { className: 'btn btn-teal btn-sm', onClick: doReassign }, lead.assignedTo ? 'Reassign' : 'Assign'),
+              e('button', { className: 'btn btn-ghost btn-sm', onClick: function(){ setReassignOpen(false); } }, 'Cancel')
             )
           ),
 
