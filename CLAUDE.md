@@ -244,6 +244,24 @@ when convenient.
   CSS, Section D risk, or (b) wrap all .pill-btn usages in
   .audit-controls consistently. Defer until a Phase 2-style
   sprint can opt into shared-CSS work.
+- Sprint P Tier C2-aligned strays surfaced during execution:
+    * Two more redundant inline maxWidth: '560px' modal
+      overrides at ~21459 and ~21476 (siblings to the one
+      removed from LeadDetailModal in Tier A). .modal CSS
+      default is already 560px.
+    * Two sibling foldLinks at ~17512 and ~20919 still use
+      fontSize: '12px'; Tier C bumped the ConsultQueueView
+      one (~18832) to 13px to match .section-head .meta.
+      Same role, identical markup, three views.
+    * NewQueueEntryModal validation errors at 16239 and 16248
+      (errors.phone, errors.email) still use var(--red); Tier
+      B only spec'd 16229 (errors.name). The borderColor
+      counterparts at 16227, 16237, 16246 are the same pattern.
+    * ConsultQueueView aged-row var(--red) at 19072 (border
+      ternary) and 19103 (AGED badge bg) still use --red; Tier
+      B spec did not include them.
+  Mechanical sweep, ~10 line edits total. Bundle in a future
+  admin-polish cleanup commit.
 
 ## Deferred features
 
