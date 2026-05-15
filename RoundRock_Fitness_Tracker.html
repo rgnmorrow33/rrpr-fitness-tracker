@@ -3729,6 +3729,40 @@
     var consumed = sessionsConsumedFromArray(client.sessions) + totalConsumedBeforeImport(client);
     return Math.max(0, purchased - consumed);
   }
+  /* Patch Z: FIFO comparator. purchaseDate -> createdAt -> array
+     position (Array.sort is stable since ES2019, so equal-keyed items
+     keep their input order). */
+  function fifoComparator(a, b){
+    var aDate = (a && (a.purchaseDate || a.createdAt)) || '';
+    var bDate = (b && (b.purchaseDate || b.createdAt)) || '';
+    if (aDate === bDate) return 0;
+    return aDate < bDate ? -1 : 1;
+  }
+  /* Patch Z: per-package remaining. Sessions with package_id === pkg.id
+     count against that package. Legacy sessions (package_id missing or
+     null) are attributed to the FIFO-earliest active package so the
+     "use what you bought first" mental model is preserved without
+     introducing an unassigned-pool concept. consumedBeforeImport is a
+     per-package field set by bulk import and stays attributed to its
+     own package. */
+  function sessionsRemainingFromPackage(client, packageId){
+    if (!client || !packageId) return 0;
+    var pkg = (client.packages || []).find(function(p){ return p && p.id === packageId; });
+    if (!pkg || pkg.deleted_at) return 0;
+    var activePkgs = getPackages(client);
+    var fifoEarliest = activePkgs.slice().sort(fifoComparator)[0] || null;
+    var legacyLandsHere = !!(fifoEarliest && fifoEarliest.id === packageId);
+    var consumed = (client.sessions || []).reduce(function(sum, s){
+      if (!s) return sum;
+      var sid = s.package_id;
+      if (sid === packageId) return sum + sessionConsumption(s);
+      if (!sid && legacyLandsHere) return sum + sessionConsumption(s);
+      return sum;
+    }, 0);
+    var purchased = pkg.sessions || 0;
+    var ghost = pkg.consumedBeforeImport || 0;
+    return Math.max(0, purchased - consumed - ghost);
+  }
   function progressPct(client){
     if (!client) return 0;
     var purchased = totalSessionsPurchased(client);
@@ -9971,7 +10005,8 @@
             note: sess.note,
             durationHours: sess.durationHours,
             trainerSig: sess.trainerSig,
-            clientSig: sess.clientSig
+            clientSig: sess.clientSig,
+            package_id: sess.package_id
           });
           setSignOff(null);
           ctx.toast('Session signed off ✓');
@@ -10420,7 +10455,8 @@
           ctx.updateSession(clientId, sessId, {
             status: sess.status, date: sess.date, time: sess.time,
             note: sess.note, durationHours: sess.durationHours,
-            trainerSig: sess.trainerSig, clientSig: sess.clientSig
+            trainerSig: sess.trainerSig, clientSig: sess.clientSig,
+            package_id: sess.package_id
           });
           setSignOff(null);
           ctx.toast('Session signed off ✓');
@@ -10850,7 +10886,8 @@
           ctx.updateSession(clientId, sessId, {
             status: sess.status, date: sess.date, time: sess.time,
             note: sess.note, durationHours: sess.durationHours,
-            trainerSig: sess.trainerSig, clientSig: sess.clientSig
+            trainerSig: sess.trainerSig, clientSig: sess.clientSig,
+            package_id: sess.package_id
           });
           setSignOff(null);
           ctx.toast('Session signed off ✓');
@@ -12400,7 +12437,8 @@
                 note: sess.note,
                 durationHours: sess.durationHours,
                 trainerSig: sess.trainerSig,
-                clientSig: sess.clientSig
+                clientSig: sess.clientSig,
+                package_id: sess.package_id
               });
               setSignOff(null);
               ctx.toast('Session signed off ✓');
@@ -14386,7 +14424,60 @@
     var clientSig = clientSigTuple[0];
     var setClientSig = clientSigTuple[1];
 
+    /* Patch Z: multi-package picker. Active packages (not soft-deleted,
+       remaining > 0) sorted FIFO. Picker renders only when 2+ active;
+       0-or-1 case is byte-equivalent to prior behavior (selectedPkgId
+       stays null and addSession writes package_id=null, which falls
+       through to legacy FIFO-earliest attribution in
+       sessionsRemainingFromPackage). */
+    var activePackages = useMemo(function(){
+      return getPackages(props.client)
+        .filter(function(p){ return p.id && sessionsRemainingFromPackage(props.client, p.id) > 0; })
+        .sort(fifoComparator);
+    }, [props.client]);
+    var pickerNeeded = activePackages.length >= 2;
+    var defaultPkgId = (existing && existing.package_id)
+      || (activePackages.length > 0 ? activePackages[0].id : null);
+
+    var selectedPkgIdTuple = useState(function(){ return defaultPkgId; });
+    var selectedPkgId = selectedPkgIdTuple[0];
+    var setSelectedPkgId = selectedPkgIdTuple[1];
+    /* Sync selection once ids resolve - the narrow backfill below can
+       assign ids on first paint, after which defaultPkgId becomes
+       non-null but useState's initial value is already locked in. */
+    useEffect(function(){
+      if (selectedPkgId == null && defaultPkgId != null) setSelectedPkgId(defaultPkgId);
+    }, [defaultPkgId]);
+
+    /* Narrow id backfill: only fires when picker is about to render with
+       2+ active packages AND any of them is missing an id. The broad
+       backfill on ClientDetail (gated by canEditPackage) doesn't run for
+       trainer-only viewers, so without this a trainer's picker would see
+       packages with no stable identifier to write into the session row.
+       Idempotent: subsequent renders skip the upsert once ids exist. */
+    useEffect(function(){
+      if (!pickerNeeded) return;
+      var pkgs = getPackages(props.client);
+      if (!pkgs.some(function(p){ return !p.id; })) return;
+      ctx.upsertClient(Object.assign({}, props.client, {
+        packages: (props.client.packages || []).map(function(p){
+          return p.id ? p : Object.assign({}, p, { id: uid() });
+        })
+      }));
+    }, [props.client.id, pickerNeeded]);
+
     function finish(skipClientSig){
+      /* Patch Z race check: re-read remaining at submit time so a
+         concurrent session log on another iPad can't push the picked
+         package below 0 between mount and submit. Only fires when a
+         picker selection exists; 0-or-1 active case is unchanged. */
+      if (selectedPkgId) {
+        var remaining = sessionsRemainingFromPackage(props.client, selectedPkgId);
+        if (remaining <= 0) {
+          ctx.toast('This package has no sessions remaining. Pick a different package.', 'error');
+          return;
+        }
+      }
       /* trainerSig is captured for both attended (full sig flow) and no_show
          (trainer-only sig). Other non-attended statuses skip sigs entirely. */
       var collectsTrainerSig = status === 'attended' || status === 'no_show';
@@ -14400,7 +14491,11 @@
            Only counts toward calcTrainerHours when status === 'attended'. */
         durationHours: duration,
         trainerSig: collectsTrainerSig ? trainerSig : null,
-        clientSig: status === 'attended' && !skipClientSig ? clientSig : null
+        clientSig: status === 'attended' && !skipClientSig ? clientSig : null,
+        /* Patch Z: which package this debits from. null when 0 or 1
+           active package (legacy attribution via FIFO-earliest in
+           sessionsRemainingFromPackage handles this case). */
+        package_id: selectedPkgId || null
       };
       props.onLog(sess);
     }
@@ -14455,6 +14550,23 @@
           )
         ),
         statusBanner,
+        /* Patch Z: multi-package picker. Only renders for clients with
+           2+ active packages so the single-package case stays
+           byte-equivalent to prior behavior. */
+        pickerNeeded && e('div', { className: 'field' },
+          e('label', null, 'Which package?'),
+          e('select', {
+            value: selectedPkgId || '',
+            onChange: function(ev){ setSelectedPkgId(ev.target.value); },
+            style: { width: '100%' }
+          },
+            activePackages.map(function(p){
+              var rem = sessionsRemainingFromPackage(props.client, p.id);
+              var label = (p.type || (p.sessions + '-sess')) + ' — ' + fmtSessions(rem) + ' sessions remaining';
+              return e('option', { key: p.id, value: p.id }, label);
+            })
+          )
+        ),
         e('div', { className: 'row2' },
           e('div', { className: 'field' },
             e('label', null, 'Date'),
