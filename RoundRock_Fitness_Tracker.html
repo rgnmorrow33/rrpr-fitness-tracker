@@ -2879,7 +2879,6 @@
         payload: payload || {}
       }).then(function(res){
         if (res.error) console.error('Notification emit failed:', res.error);
-        else console.info('[notify] emit ok type=' + type + ' target=' + targetTrainerId);
       }).catch(function(err){
         console.error('Notification emit threw:', err);
       });
@@ -2896,12 +2895,6 @@
         };
       })).then(function(res){
         if (res.error) console.error('Notification emitMany failed:', res.error);
-        else {
-          var typeCounts = {};
-          clean.forEach(function(r){ typeCounts[r.type] = (typeCounts[r.type] || 0) + 1; });
-          var summary = Object.keys(typeCounts).map(function(k){ return k + '=' + typeCounts[k]; }).join(' ');
-          console.info('[notify] emitMany ok rows=' + clean.length + ' (' + summary + ')');
-        }
       }).catch(function(err){
         console.error('Notification emitMany threw:', err);
       });
@@ -5990,13 +5983,7 @@
       if (ref.current === current) return;
       if (_eq(ref.current, current)) { ref.current = current; return; }
       ref.current = current;
-      saver(current).then(function(){
-        /* Patch G1: observability log on successful save. Mirrors the
-           Patch D notification fan-out logging strategy so future schema
-           mismatches and silent failures are visible without smoke
-           testing. */
-        console.info('[save]', label, 'ok');
-      }).catch(function(err){
+      saver(current).catch(function(err){
         console.error('Save ' + label + ' failed:', err);
         /* Surface failures via toast so silent regressions can't hide. The
            dirty-check ref was already updated above, so the next save attempt
