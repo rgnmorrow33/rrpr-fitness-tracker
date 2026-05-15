@@ -7534,6 +7534,13 @@
 
     /* ---- v2: Sub approval state machine ---- */
     function approveSub(classId, subId, approverName, note){
+      /* Snapshot prev-state before setClasses so the emit payloads
+         capture the assigned trainer + original requester (these are
+         what the bell text needs) regardless of StrictMode timing. */
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      var prevSub = prevClass && (prevClass.subAssignments || [])
+        .find(function(s){ return s.id === subId; });
+
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
@@ -7550,6 +7557,56 @@
           return copy;
         });
       });
+
+      /* Sprint Q P2: bell. Admin/lead approval is the formal sub
+         assignment. Two emits with a role differentiator so
+         notificationText can render distinct copy: assignee text for
+         the covering trainer, requester text for the original
+         absent trainer. */
+      if (prevSub && prevClass) {
+        var assignerName = approverName || 'Admin';
+        var className = prevClass.name || 'class';
+        var when = prevSub.date || null;
+        var time = prevClass.startTime || null;
+        var assigneeName = prevSub.subInstructor || prevSub.claimedBy;
+        var requesterName = prevSub.requestedBy || prevSub.originalInstructor;
+
+        var rows = [];
+        var assigneeId = trainerIdByName(assigneeName);
+        if (assigneeName && !_selfSuppress(assigneeId)) {
+          rows.push({
+            target_trainer_id: assigneeId,
+            type: 'sub_admin_assigned',
+            payload: {
+              role: 'assignee',
+              assignerName: assignerName,
+              className: className,
+              date: when,
+              time: time,
+              classId: classId,
+              subAssignmentId: subId
+            }
+          });
+        }
+        var requesterId = trainerIdByName(requesterName);
+        if (requesterName && !_selfSuppress(requesterId)) {
+          rows.push({
+            target_trainer_id: requesterId,
+            type: 'sub_admin_assigned',
+            payload: {
+              role: 'requester',
+              assignerName: assignerName,
+              trainerName: assigneeName,
+              className: className,
+              date: when,
+              time: time,
+              classId: classId,
+              subAssignmentId: subId
+            }
+          });
+        }
+        if (rows.length > 0) storage.notifications.emitMany(rows);
+      }
     }
     function denySub(classId, subId, denyReason){
       setClasses(function(list){
@@ -7869,6 +7926,43 @@
       });
       var after = Object.assign({}, before, { trainerName: name, sessions: sessions });
       auditedUpsertClient(after, 'consult_claim', { before: before, after: after });
+
+      /* Sprint Q P2: bell. consult_assigned -> new assignee on every
+         successful claim. If before.trainerName was set and differs
+         from the new name, this is a reassignment: also fan out
+         consult_unassigned with reason='reassigned' to the prior
+         trainer. Date/time pulled from the first scheduled consult
+         session if present; null otherwise (notificationText handles
+         the missing case). */
+      var consultSess = (before.sessions || []).find(function(s){
+        return s.status === 'scheduled';
+      });
+      var assignerName = ctxCurrentUserName() || 'Admin';
+      var newAssigneeId = trainerIdByName(name);
+      if (!_selfSuppress(newAssigneeId)) {
+        storage.notifications.emit(newAssigneeId, 'consult_assigned', {
+          clientName: before.name || 'a client',
+          clientId: clientId,
+          date: consultSess ? consultSess.date : null,
+          time: consultSess ? consultSess.time : null,
+          assignerName: assignerName
+        });
+      }
+      var prevName = (before.trainerName || '').trim();
+      if (prevName && !trainerNameMatches(prevName, name)) {
+        var prevId = trainerIdByName(prevName);
+        if (!_selfSuppress(prevId)) {
+          storage.notifications.emit(prevId, 'consult_unassigned', {
+            clientName: before.name || 'a client',
+            clientId: clientId,
+            date: consultSess ? consultSess.date : null,
+            time: consultSess ? consultSess.time : null,
+            actorName: assignerName,
+            newTrainerName: name,
+            reason: 'reassigned'
+          });
+        }
+      }
       return true;
     }
     /* Patch N: admin inline picker reset. Clears the client trainerName
@@ -7883,6 +7977,27 @@
       if (!before) return false;
       var after = Object.assign({}, before, { trainerName: '' });
       auditedUpsertClient(after, 'consult_unassign', { before: before, after: after });
+
+      /* Sprint Q P2: bell. consult_unassigned -> previously-assigned
+         trainer with reason='unassigned'. Reassignment case is handled
+         in claimConsult (a reassign never routes through here). */
+      var prevName = (before.trainerName || '').trim();
+      if (prevName) {
+        var consultSess = (before.sessions || []).find(function(s){
+          return s.status === 'scheduled';
+        });
+        var prevId = trainerIdByName(prevName);
+        if (!_selfSuppress(prevId)) {
+          storage.notifications.emit(prevId, 'consult_unassigned', {
+            clientName: before.name || 'a client',
+            clientId: clientId,
+            date: consultSess ? consultSess.date : null,
+            time: consultSess ? consultSess.time : null,
+            actorName: ctxCurrentUserName() || 'Admin',
+            reason: 'unassigned'
+          });
+        }
+      }
       return true;
     }
     function restoreClient(id){
@@ -8376,6 +8491,27 @@
       }
       var note = p.decisionNote ? ' · ' + p.decisionNote : '';
       return 'Your ' + dkind + dwhen + ' was ' + dec + note;
+    }
+    /* Sprint Q P2: consult + admin sub assign producers */
+    if (n.type === 'consult_assigned') {
+      var caClient = p.clientName || 'a client';
+      var caActor = p.assignerName || 'Someone';
+      var caWhen = '';
+      if (p.date) caWhen = ' on ' + p.date + (p.time ? ' at ' + p.time : '');
+      return caActor + ' assigned you a consult with ' + caClient + caWhen;
+    }
+    if (n.type === 'consult_unassigned') {
+      var cuClient = p.clientName || 'a client';
+      var cuWhen = p.date ? ' on ' + p.date : '';
+      if (p.reason === 'reassigned') return 'Your consult with ' + cuClient + cuWhen + ' was reassigned';
+      return 'Your consult with ' + cuClient + cuWhen + ' was unassigned';
+    }
+    if (n.type === 'sub_admin_assigned') {
+      var saAssigner = p.assignerName || 'Admin';
+      var saClass = p.className || 'class';
+      var saWhen = (p.date || '?') + (p.time ? ' at ' + p.time : '');
+      if (p.role === 'requester') return saAssigner + ' assigned ' + (p.trainerName || 'a trainer') + ' to cover your ' + saClass + ' on ' + saWhen;
+      return saAssigner + ' assigned you to cover ' + saClass + ' on ' + saWhen;
     }
     var snippet;
     try { snippet = JSON.stringify(p); } catch(_){ snippet = ''; }
