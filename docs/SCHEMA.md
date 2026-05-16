@@ -26,14 +26,10 @@ commit message.
 
 ## Table inventory
 
-The codebase touches **14 tables** across the `public` schema. The
-sprint status doc (external, not in repo) references **17 public
-tables**. The three-table gap is not reconcilable from code alone -
-candidates are tables that exist in Supabase but aren't wired to
-client code (legacy / orphan / pending feature), views counted in
-the "public" total, or tables touched only by server-side triggers.
-Reconciliation is deferred to a future regeneration script against
-`information_schema.tables`.
+The `public` schema contains **17 tables**: 14 active tables wired
+to the codebase (listed below), plus 3 orphan tables (empty, no code
+refs, no FK constraints) documented in the "Orphan tables" section
+following the per-table detail.
 
 | Table | Purpose | RLS | Realtime |
 |---|---|---|---|
@@ -401,6 +397,27 @@ migrations.
 
 Used via the `makeSettingsRow` factory (line 2693). Not in any
 realtime publication - settings are read on demand.
+
+---
+
+## Orphan tables
+
+The `public` schema contains three tables that exist in Supabase
+but are not wired to the codebase. All three are empty (0 rows),
+have no FK constraints, and have zero references in
+`RoundRock_Fitness_Tracker.html` (no `.from()`, no `storage.X`, no
+`translate.X`). They are slated for cleanup as part of the Phase 2C
+migration work.
+
+Column-level detail is intentionally omitted; if anyone needs the
+live shape, run `\d <table_name>` against the Supabase DB - that is
+the runtime source of truth for tables not driven by the app.
+
+| Table | Notes |
+|---|---|
+| `package_participants` | Empty, no code refs, no FK constraints. Pre-dates ADR-0002 planning for `client_package_participants`. Slated for cleanup (rename or drop) as part of Phase 2C execution. See ADR-0002 Notes addendum. |
+| `packages` | Empty, no code refs. The active packages data model lives as `clients.packages` JSONB (see "JSONB shapes" below). Slated for cleanup. |
+| `queue` | Empty, no code refs. The "queue" UI mode in code is a tab/view-state string, not a backing table; lead/consult queue data lives in the `leads` table. Slated for cleanup. |
 
 ---
 

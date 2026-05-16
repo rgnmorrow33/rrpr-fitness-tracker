@@ -180,6 +180,23 @@ Will partially supersede ADR-0006 (proposed) on the JSONB-on-clients
 rationale, specifically the `sessions` JSONB portion. `packages` and
 `audit_log` JSONB remain in place pending separate review.
 
+**Addendum (2026-05-15): pre-existing `package_participants` orphan
+table.** Schema reconciliation against the live Supabase DB surfaced
+a pre-existing `package_participants` table that was not known when
+this ADR was drafted. The table is empty (0 rows), has no FK
+constraints, and is not referenced anywhere in the codebase. It
+pre-dates this ADR's planning for the `client_package_participants`
+junction table.
+
+Phase 2C execution can either (a) rename the existing
+`package_participants` to `client_package_participants` in a
+migration step, or (b) drop the orphan and create
+`client_package_participants` fresh under the planned name. The
+choice is deferred to the Phase 2C migration spec; either option is
+clean since the orphan carries no data and no soft FK relationships.
+
+Cross-reference: SCHEMA.md "Orphan tables" section.
+
 ---
 
 ## ADR-0003: Phase 2 sequencing for pairs implementation
@@ -240,7 +257,9 @@ Phase 2C.
 weeks.
 
 - New `sessions` table with the shared-session-N-participants model.
-- New `client_package_participants` junction table.
+- New `client_package_participants` junction table. (See ADR-0002
+  Notes addendum for the `package_participants` orphan finding that
+  affects this phase.)
 - Migration script porting `clients.sessions` JSONB into the
   normalized table. Audit-logged at the row level.
 - All read paths ported. Old JSONB column kept temporarily for
