@@ -3090,6 +3090,305 @@
     return /(^|-)Pairs-\d+$/i.test(type);
   }
 
+  /* ============ Phase 2A follow-up: Pairs to Confirm =============
+     Scoring + queue helpers backing the Pairs to Confirm section in
+     ConsultQueueView. Reads pkg.participant_ids / pkg.package_size /
+     pkg.primary_holder_id stamped by Phase 2A's lazy migration. No
+     client-side pair field - pair relationships compute from package
+     metadata on read (ADR-0002 / ADR-0004 honest). */
+  function _pairsFormatMD(ymd){
+    if (!ymd) return '';
+    var parts = String(ymd).split('-');
+    if (parts.length !== 3) return ymd;
+    return parseInt(parts[1], 10) + '/' + parseInt(parts[2], 10);
+  }
+  function _pairsFormatHM(t){
+    if (!t) return '';
+    var parts = String(t).split(':');
+    var h = parseInt(parts[0], 10);
+    var m = parseInt(parts[1] || '0', 10);
+    if (isNaN(h)) return t;
+    var ampm = h >= 12 ? 'pm' : 'am';
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return m === 0 ? (h12 + ampm) : (h12 + ':' + (m < 10 ? '0' + m : m) + ampm);
+  }
+  function _pairsSessionMinutes(s){
+    if (!s || !s.time) return null;
+    var parts = String(s.time).split(':');
+    var h = parseInt(parts[0], 10);
+    var m = parseInt(parts[1] || '0', 10);
+    if (isNaN(h) || isNaN(m)) return null;
+    return h * 60 + m;
+  }
+  function _pairsNormPhone(p){
+    return String(p || '').replace(/\D/g, '');
+  }
+  function _pairsLastName(name){
+    if (!name) return '';
+    var parts = String(name).trim().split(/\s+/);
+    if (parts.length < 2) return '';
+    return parts[parts.length - 1].toLowerCase();
+  }
+  function _pairsSameWeek(d1, d2){
+    if (!d1 || !d2) return false;
+    var a = new Date(d1); var b = new Date(d2);
+    if (isNaN(a.getTime()) || isNaN(b.getTime())) return false;
+    function weekStart(d){
+      var s = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      s.setDate(s.getDate() - s.getDay());
+      return s.getTime();
+    }
+    return weekStart(a) === weekStart(b);
+  }
+
+  /* Score a candidate client against a Pairs package owned by
+     pkg.primary_holder_id. Returns { score, signals }. Floor for
+     surfacing is 40; cap is 100. Signals are short human-readable
+     strings (e.g. "Same session 4/29 at 10am", "Same address").
+
+     Tier 1 evidence requires both clients to have at least one session
+     stamped with package_id === pkg.id (Patch Z stamping). 95 when a
+     same-day pair is within 15 minutes; 85 otherwise.
+
+     Tier 2 base 70 = identical package shape (type + location +
+     purchaseDate) and candidate is active. Tier 2 boost +20 for shared
+     address, +15 for shared phone or emergency contact. (Address and
+     emergency contact fields are not on the client schema today; the
+     boosts are inert until those fields land.)
+
+     Tier 3 score 45 = same primary trainer + enrollment within the
+     same calendar week + both have pairs-eligible packages open.
+
+     Tier 4 +20 last name match only stacks on a qualifying tier so the
+     same surname alone never surfaces a stranger. */
+  function scorePairCandidate(pkg, candidate, ctx){
+    if (!pkg || !candidate || !ctx) return { score: 0, signals: [] };
+    var clients = ctx.clients || [];
+    var holder = clients.find(function(c){ return c && c.id === pkg.primary_holder_id; });
+    if (!holder) return { score: 0, signals: [] };
+
+    var score = 0;
+    var signals = [];
+
+    /* Tier 1: same-package_id session evidence. */
+    var hSessions = (holder.sessions || []).filter(function(s){ return s && s.package_id === pkg.id; });
+    var cSessions = (candidate.sessions || []).filter(function(s){ return s && s.package_id === pkg.id; });
+    if (hSessions.length > 0 && cSessions.length > 0) {
+      var matched = null;
+      for (var i = 0; i < hSessions.length && !matched; i++) {
+        for (var j = 0; j < cSessions.length && !matched; j++) {
+          var hs = hSessions[i]; var cs = cSessions[j];
+          if (hs.date && cs.date && hs.date === cs.date) {
+            var ht = _pairsSessionMinutes(hs);
+            var ct = _pairsSessionMinutes(cs);
+            if (ht != null && ct != null && Math.abs(ht - ct) <= 15) matched = hs;
+          }
+        }
+      }
+      if (matched) {
+        score = 95;
+        signals.push('Same session ' + _pairsFormatMD(matched.date) +
+          (matched.time ? ' at ' + _pairsFormatHM(matched.time) : ''));
+      } else {
+        score = 85;
+        var anySess = hSessions[0];
+        signals.push('Sessions on same package' +
+          (anySess.date ? ' (' + _pairsFormatMD(anySess.date) + ')' : ''));
+      }
+    }
+
+    /* Tier 2 base: identical package shape, candidate active. */
+    if (score < 70) {
+      var candPkgs = getPackages(candidate);
+      var match = candPkgs.find(function(p){
+        return p && p.type === pkg.type &&
+          (candidate.location || '') === (holder.location || '') &&
+          p.purchaseDate === pkg.purchaseDate &&
+          (pkg.participant_ids || []).indexOf(candidate.id) === -1;
+      });
+      if (match && candidate.is_active !== false) {
+        score = 70;
+        signals.push('Same package' + (pkg.purchaseDate ? ' · purchased ' + _pairsFormatMD(pkg.purchaseDate) : ''));
+      }
+    }
+
+    /* Tier 2 boosts (apply to any qualifying score so they reinforce
+       Tier 1/3 evidence too): same address +20, shared phone or
+       emergency contact +15. */
+    if (score >= 40) {
+      var hAddr = String(holder.address || '').trim().toLowerCase();
+      var cAddr = String(candidate.address || '').trim().toLowerCase();
+      if (hAddr && cAddr && hAddr === cAddr) {
+        score += 20;
+        signals.push('Same address');
+      }
+      var hPhone = _pairsNormPhone(holder.phone);
+      var cPhone = _pairsNormPhone(candidate.phone);
+      var hEC = _pairsNormPhone(holder.emergencyContactPhone);
+      var cEC = _pairsNormPhone(candidate.emergencyContactPhone);
+      if (hPhone && cPhone && hPhone === cPhone) {
+        score += 15;
+        signals.push('Shared phone');
+      } else if (hEC && cEC && hEC === cEC) {
+        score += 15;
+        signals.push('Same emergency contact');
+      }
+    }
+
+    /* Tier 3: same trainer + same enrollment week + both have
+       pairs-eligible open packages. */
+    if (score < 45) {
+      var ht1 = String(holder.trainerName || '').trim().toLowerCase();
+      var ct1 = String(candidate.trainerName || '').trim().toLowerCase();
+      if (ht1 && ht1 === ct1) {
+        var hEnrolled = holder.createdAt || pkg.purchaseDate;
+        var cEnrolled = candidate.createdAt;
+        if (hEnrolled && cEnrolled && _pairsSameWeek(hEnrolled, cEnrolled)) {
+          var candHasOpenPairs = getPackages(candidate).some(function(p){
+            if (!p || !isPairsPackageType(p.type)) return false;
+            var sz = p.package_size || 2;
+            return (p.participant_ids || []).length < sz;
+          });
+          if (candHasOpenPairs) {
+            score = 45;
+            signals.push('Same trainer · enrolled same week');
+          }
+        }
+      }
+    }
+
+    /* Tier 4: surname match only stacks. */
+    if (score >= 40) {
+      var hLast = _pairsLastName(holder.name);
+      var cLast = _pairsLastName(candidate.name);
+      if (hLast && cLast && hLast === cLast) {
+        score += 20;
+        signals.push('Last name match');
+      }
+    }
+
+    if (score > 100) score = 100;
+    if (score < 40) return { score: 0, signals: [] };
+    return { score: score, signals: signals };
+  }
+
+  /* localStorage-only per-user deferral. Per-user, client-side only -
+     deferral is a UX nicety for the admin viewing the queue, not
+     shared state. Key includes trainer_id (canonical id, not display
+     name) so two admins with the same first name don't collide. */
+  function _pairsDeferKey(userId){ return 'pairs_queue_deferred_' + (userId || 'anon'); }
+  function readPairsDeferred(userId){
+    try {
+      var raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(_pairsDeferKey(userId)) : null;
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+  function writePairsDeferred(userId, list){
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(_pairsDeferKey(userId), JSON.stringify(list || []));
+    } catch (e) { /* private browsing / quota - silent */ }
+  }
+  function deferPairRow(userId, packageId){
+    var list = readPairsDeferred(userId).filter(function(d){ return d && d.package_id !== packageId; });
+    list.push({ package_id: packageId, until_ts: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+    writePairsDeferred(userId, list);
+  }
+  function undeferPairRow(userId, packageId){
+    var list = readPairsDeferred(userId).filter(function(d){ return d && d.package_id !== packageId; });
+    writePairsDeferred(userId, list);
+  }
+
+  /* Pairs to Confirm queue. Flattens every pairs-eligible package
+     across active clients where participant_ids.length < package_size
+     and either remaining > 0 or a future scheduled session exists.
+     For each, scores all active non-dismissed candidates, keeps top 3
+     >= 40. Active deferrals for currentUserId are excluded.
+
+     Sort: top candidate score desc, then oldest purchaseDate first as
+     a secondary urgency hint (older = more time has passed without
+     the holder's partner being added).
+
+     Returns: [{ package, primary_holder, candidates, slots_remaining,
+       deferred_until }]. deferred_until is null on the main list; the
+       deferred-footer caller reads readPairsDeferred() directly to
+       reconstruct deferred rows with the until_ts. */
+  function getPairsConfirmQueue(ctx, currentUserId){
+    if (!ctx) return [];
+    var clients = ctx.clients || [];
+    var todayY = (function(){
+      var d = new Date();
+      var m = String(d.getMonth() + 1).padStart(2, '0');
+      var day = String(d.getDate()).padStart(2, '0');
+      return d.getFullYear() + '-' + m + '-' + day;
+    })();
+
+    var deferred = readPairsDeferred(currentUserId);
+    var nowTs = Date.now();
+    var deferredSet = {};
+    deferred.forEach(function(d){
+      if (d && d.package_id && d.until_ts && d.until_ts > nowTs) {
+        deferredSet[d.package_id] = true;
+      }
+    });
+
+    var rows = [];
+    clients.forEach(function(holder){
+      if (!holder || holder.deleted_at) return;
+      (holder.packages || []).forEach(function(pkg){
+        if (!pkg || pkg.deleted_at) return;
+        if (!(pkg.package_size > 1)) return;
+        var participants = pkg.participant_ids || [];
+        if (participants.length >= pkg.package_size) return;
+        if (deferredSet[pkg.id]) return;
+        var remaining = sessionsRemainingFromPackage(holder, pkg.id);
+        var hasFuture = (holder.sessions || []).some(function(s){
+          return s && s.package_id === pkg.id && s.status === 'scheduled' &&
+            s.date && s.date >= todayY;
+        });
+        if (!(remaining > 0 || hasFuture)) return;
+
+        var dismissed = pkg.dismissed_participant_candidates || [];
+        var candidates = clients
+          .filter(function(c){
+            if (!c || c.deleted_at) return false;
+            if (c.is_active === false) return false;
+            if (c.id === holder.id) return false;
+            if (participants.indexOf(c.id) !== -1) return false;
+            if (dismissed.indexOf(c.id) !== -1) return false;
+            return true;
+          })
+          .map(function(c){
+            var s = scorePairCandidate(pkg, c, ctx);
+            return { client: c, score: s.score, signals: s.signals };
+          })
+          .filter(function(s){ return s.score >= 40; })
+          .sort(function(a, b){ return b.score - a.score; })
+          .slice(0, 3);
+
+        rows.push({
+          package: pkg,
+          primary_holder: holder,
+          candidates: candidates,
+          slots_remaining: pkg.package_size - participants.length,
+          deferred_until: null
+        });
+      });
+    });
+
+    rows.sort(function(a, b){
+      var aTop = a.candidates.length > 0 ? a.candidates[0].score : 0;
+      var bTop = b.candidates.length > 0 ? b.candidates[0].score : 0;
+      if (aTop !== bTop) return bTop - aTop;
+      var aPd = a.package.purchaseDate || '';
+      var bPd = b.package.purchaseDate || '';
+      return aPd < bPd ? -1 : aPd > bPd ? 1 : 0;
+    });
+    return rows;
+  }
+
   /* Returns { list, fallback } where fallback is true when the requested
      location was missing or unrecognized and we fell back to CMRC. UI
      uses fallback to show a "set client location" hint. */
@@ -3171,7 +3470,10 @@
       canHardDelete: false,
       canRequestTimeOff: true,
       addTimeOff: false,
-      canManageBanners: false
+      canManageBanners: false,
+      /* Phase 2A follow-up: Pairs to Confirm queue is admin + lead only.
+         Trainers don't see the section. */
+      canConfirmPairs: false
     },
     lead: {
       canEditOwnAttendance: true,
@@ -3207,7 +3509,8 @@
       canHardDelete: false,
       canRequestTimeOff: true,
       addTimeOff: true,
-      canManageBanners: true
+      canManageBanners: true,
+      canConfirmPairs: true
     },
     admin: {
       canEditOwnAttendance: true,
@@ -3234,7 +3537,8 @@
       canHardDelete: true,
       canRequestTimeOff: true,
       addTimeOff: true,
-      canManageBanners: true
+      canManageBanners: true,
+      canConfirmPairs: true
     }
   };
 
@@ -8213,6 +8517,87 @@
       upsertClient(stamped);
     }
 
+    /* Phase 2A follow-up: append a participant to a pairs package.
+       Snapshot-revert-on-failure optimistic UI - the row updates
+       immediately and rolls back if the persist fails. Realtime
+       convergence comes free via the existing app-changes channel
+       reload on the clients table. opts.score / opts.signals / opts.via
+       are captured in the audit payload so manual entries and
+       low-confidence confirms are inspectable later. */
+    function confirmPairParticipant(packageId, clientId, opts){
+      opts = opts || {};
+      var holder = clients.find(function(c){
+        return c && (c.packages || []).some(function(p){ return p && p.id === packageId; });
+      });
+      if (!holder) return Promise.reject(new Error('Package not found'));
+      var pkgBefore = (holder.packages || []).find(function(p){ return p && p.id === packageId; });
+      if (!pkgBefore) return Promise.reject(new Error('Package not found'));
+      var participants = (pkgBefore.participant_ids || []).slice();
+      if (participants.indexOf(clientId) !== -1) return Promise.resolve(holder);
+      participants.push(clientId);
+      var pkgAfter = Object.assign({}, pkgBefore, { participant_ids: participants });
+      var holderAfter = Object.assign({}, holder, {
+        packages: (holder.packages || []).map(function(p){ return p && p.id === packageId ? pkgAfter : p; })
+      });
+      var stamped = appendAuditEntry(holderAfter, session, 'pair_participant_confirmed', {
+        entity_type: 'client',
+        target_id: packageId,
+        before: { participant_ids: pkgBefore.participant_ids || [] },
+        after: {
+          participant_ids: participants,
+          added_client_id: clientId,
+          score: opts.score != null ? opts.score : null,
+          signals: opts.signals || null,
+          via: opts.via || 'queue'
+        }
+      });
+      var snapshot = clients;
+      var nextList = clients.map(function(c){ return c.id === holder.id ? stamped : c; });
+      setClients(nextList);
+      clientsRef.current = nextList;
+      return persistClientRow(stamped).catch(function(err){
+        setClients(snapshot);
+        clientsRef.current = snapshot;
+        throw err;
+      });
+    }
+
+    /* Phase 2A follow-up: persist a dismissal so the candidate stops
+       resurfacing on future renders. dismissed_participant_candidates
+       is a new JSONB field added lazily on first dismiss per package -
+       no DDL since clients.packages is JSONB. No realtime push needed
+       beyond the table-level subscription. */
+    function dismissPairCandidate(packageId, clientId){
+      var holder = clients.find(function(c){
+        return c && (c.packages || []).some(function(p){ return p && p.id === packageId; });
+      });
+      if (!holder) return Promise.reject(new Error('Package not found'));
+      var pkgBefore = (holder.packages || []).find(function(p){ return p && p.id === packageId; });
+      if (!pkgBefore) return Promise.reject(new Error('Package not found'));
+      var dismissed = (pkgBefore.dismissed_participant_candidates || []).slice();
+      if (dismissed.indexOf(clientId) !== -1) return Promise.resolve(holder);
+      dismissed.push(clientId);
+      var pkgAfter = Object.assign({}, pkgBefore, { dismissed_participant_candidates: dismissed });
+      var holderAfter = Object.assign({}, holder, {
+        packages: (holder.packages || []).map(function(p){ return p && p.id === packageId ? pkgAfter : p; })
+      });
+      var stamped = appendAuditEntry(holderAfter, session, 'pair_candidate_dismissed', {
+        entity_type: 'client',
+        target_id: packageId,
+        before: { dismissed_participant_candidates: pkgBefore.dismissed_participant_candidates || [] },
+        after: { dismissed_participant_candidates: dismissed, dismissed_client_id: clientId }
+      });
+      var snapshot = clients;
+      var nextList = clients.map(function(c){ return c.id === holder.id ? stamped : c; });
+      setClients(nextList);
+      clientsRef.current = nextList;
+      return persistClientRow(stamped).catch(function(err){
+        setClients(snapshot);
+        clientsRef.current = snapshot;
+        throw err;
+      });
+    }
+
     function auditedUpsertClass(cl, action, opts){
       opts = opts || {};
       var before = classes.find(function(x){ return x.id === cl.id; }) || null;
@@ -8373,6 +8758,9 @@
       softDeletePackage: softDeletePackage,
       restorePackage: restorePackage,
       hardDeletePackage: hardDeletePackage,
+      /* Phase 2A follow-up: Pairs to Confirm queue mutators. */
+      confirmPairParticipant: confirmPairParticipant,
+      dismissPairCandidate: dismissPairCandidate,
       logServiceRecovery: logServiceRecovery,
       deleteClient: deleteClient,
       addSession: addSession,
@@ -19097,6 +19485,18 @@
     var statusFilter = statusFilterTuple[0]; var setStatusFilter = statusFilterTuple[1];
     var leadDetailTuple = useState(null);
     var leadDetail = leadDetailTuple[0]; var setLeadDetail = leadDetailTuple[1];
+    /* Phase 2A follow-up: Pairs to Confirm state.
+       - pairsDeferTick bumps when defer/bring-back writes to localStorage,
+         forcing a re-render so getPairsConfirmQueue re-reads the deferral set.
+       - pairsDeferredOpen toggles the deferred footer.
+       - pairsSearch is a per-row Map keyed by package id; values are the
+         current search input string for that row's manual-fallback input. */
+    var pairsDeferTickTuple = useState(0);
+    var pairsDeferTick = pairsDeferTickTuple[0]; var setPairsDeferTick = pairsDeferTickTuple[1];
+    var pairsDeferredOpenTuple = useState(false);
+    var pairsDeferredOpen = pairsDeferredOpenTuple[0]; var setPairsDeferredOpen = pairsDeferredOpenTuple[1];
+    var pairsSearchTuple = useState({});
+    var pairsSearch = pairsSearchTuple[0]; var setPairsSearch = pairsSearchTuple[1];
     /* Patch N: inline picker writes through ctx.claimConsult /
        ctx.unassignConsult on change. No local draft state - the
        <select> reads its value off the client's current trainerName
@@ -19223,6 +19623,279 @@
           marginBottom: '12px'
         }
       }, msg);
+    }
+
+    /* Phase 2A follow-up: Pairs to Confirm. Read pkg.participant_ids /
+       package_size off Phase 2A's lazy migration. Realtime convergence
+       comes free via the app-changes channel (clients table). */
+    var canConfirmPairs = ctx.can('canConfirmPairs');
+    var currentTrainerId = (ctx.session && ctx.session.trainer_id) || null;
+    var currentUserName = (ctx.currentUserName && ctx.currentUserName()) || 'admin';
+    var pairsRows = canConfirmPairs ? getPairsConfirmQueue(ctx, currentTrainerId) : [];
+    /* Reconstruct deferred rows from localStorage + current package state.
+       Filters out deferrals whose package no longer exists, has filled all
+       slots, or has expired naturally. */
+    var pairsDeferredRows = (function(){
+      if (!canConfirmPairs) return [];
+      var deferred = readPairsDeferred(currentTrainerId);
+      var nowTs = Date.now();
+      var out = [];
+      deferred.forEach(function(d){
+        if (!d || !d.package_id || !d.until_ts || d.until_ts <= nowTs) return;
+        var holder = null; var pkg = null;
+        (ctx.clients || []).some(function(c){
+          if (!c || c.deleted_at) return false;
+          var hit = (c.packages || []).find(function(p){ return p && p.id === d.package_id; });
+          if (hit) { holder = c; pkg = hit; return true; }
+          return false;
+        });
+        if (!holder || !pkg) return;
+        if (pkg.deleted_at) return;
+        if ((pkg.participant_ids || []).length >= (pkg.package_size || 0)) return;
+        out.push({ package: pkg, primary_holder: holder, until_ts: d.until_ts });
+      });
+      out.sort(function(a, b){ return a.until_ts - b.until_ts; });
+      return out;
+    })();
+    /* Track tick for the linter even though state is read directly. */
+    void pairsDeferTick;
+
+    function pairsScoreColor(score){
+      if (score >= 70) return 'var(--moss)';
+      if (score >= 40) return 'var(--ochre)';
+      return 'var(--slate)';
+    }
+    function pairsPkgHeaderLine(pkg){
+      var purchased = pkg.purchaseDate
+        ? (parseYMD(pkg.purchaseDate) ? formatShort(parseYMD(pkg.purchaseDate)) : pkg.purchaseDate)
+        : '—';
+      return (pkg.type || 'Package') + ' · Purchased ' + purchased;
+    }
+    function pairsSessionsContext(holder, pkg){
+      var logged = (holder.sessions || []).filter(function(s){
+        return s && s.package_id === pkg.id && s.status && s.status !== 'scheduled';
+      }).length;
+      var remaining = sessionsRemainingFromPackage(holder, pkg.id);
+      return logged + ' session' + (logged === 1 ? '' : 's') +
+        ' logged · ' + fmtSessions(remaining) + ' remaining';
+    }
+    function pairsHasTier1(signals){
+      if (!signals || !signals.length) return false;
+      return signals.some(function(s){
+        return /Same session|Sessions on same package/i.test(String(s));
+      });
+    }
+
+    function pairsHandleConfirm(packageId, candidate, opts){
+      ctx.confirmPairParticipant(packageId, candidate.id, opts || {}).then(function(){
+        ctx.toast && ctx.toast('Added ' + (candidate.name || 'participant') + ' to package', 'success');
+      }).catch(function(err){
+        ctx.toast && ctx.toast('Could not add participant: ' + (err && err.message || 'error'), 'error');
+      });
+    }
+    function pairsHandleDismiss(packageId, candidate){
+      ctx.dismissPairCandidate(packageId, candidate.id).then(function(){
+        ctx.toast && ctx.toast('Dismissed ' + (candidate.name || 'candidate'), 'info');
+      }).catch(function(err){
+        ctx.toast && ctx.toast('Could not dismiss: ' + (err && err.message || 'error'), 'error');
+      });
+    }
+    function pairsHandleDefer(packageId){
+      deferPairRow(currentTrainerId, packageId);
+      setPairsDeferTick(pairsDeferTick + 1);
+      ctx.toast && ctx.toast('Hidden for 7 days', 'info');
+    }
+    function pairsHandleBringBack(packageId){
+      undeferPairRow(currentTrainerId, packageId);
+      setPairsDeferTick(pairsDeferTick + 1);
+      ctx.toast && ctx.toast('Back in queue', 'success');
+    }
+    function pairsManualSearchResults(pkg, term){
+      var t = String(term || '').trim().toLowerCase();
+      if (t.length < 2) return [];
+      var participants = pkg.participant_ids || [];
+      var dismissed = pkg.dismissed_participant_candidates || [];
+      var pid = pkg.primary_holder_id;
+      return (ctx.clients || [])
+        .filter(function(c){
+          if (!c || c.deleted_at) return false;
+          if (c.is_active === false) return false;
+          if (c.id === pid) return false;
+          if (participants.indexOf(c.id) !== -1) return false;
+          if (dismissed.indexOf(c.id) !== -1) return false;
+          return (c.name || '').toLowerCase().indexOf(t) !== -1;
+        })
+        .slice(0, 6);
+    }
+
+    function pairsCandidateBlock(pkg, cand){
+      var color = pairsScoreColor(cand.score);
+      var tier1 = pairsHasTier1(cand.signals);
+      var oneClick = cand.score >= 85;
+      return e('div', {
+        key: 'cand-' + pkg.id + '-' + cand.client.id,
+        style: {
+          padding: '10px 12px',
+          background: 'var(--paper-2)',
+          border: '1px solid var(--rule)',
+          borderRadius: '8px',
+          marginTop: '8px',
+          display: 'flex', flexDirection: 'column', gap: '6px'
+        }
+      },
+        e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          e('div', {
+            style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' },
+            onClick: function(){ if (props.onOpenClient) props.onOpenClient(cand.client.id); }
+          }, cand.client.name),
+          e('span', {
+            style: {
+              fontSize: '11px', padding: '2px 9px', borderRadius: '999px',
+              background: color, color: '#fff', fontWeight: 700,
+              letterSpacing: '0.04em'
+            }
+          }, String(cand.score)),
+          tier1 && e('span', {
+            style: {
+              fontSize: '10px', padding: '2px 8px', borderRadius: '999px',
+              background: 'var(--teal-bg)', color: 'var(--teal)',
+              border: '1.5px solid var(--teal)', fontWeight: 700,
+              letterSpacing: '0.04em'
+            }
+          }, '✓ Session match')
+        ),
+        (cand.signals && cand.signals.length > 0) && e('div', {
+          style: { fontSize: '12px', color: 'var(--slate)', lineHeight: 1.4 }
+        }, cand.signals.join(' · ')),
+        e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+          e('button', {
+            className: 'btn btn-sm',
+            style: oneClick
+              ? { background: 'var(--brick)', color: '#fff', border: '1.5px solid var(--brick)', fontWeight: 600 }
+              : { background: '#fff', color: 'var(--brick)', border: '1.5px solid var(--brick)', fontWeight: 600 },
+            onClick: function(){ pairsHandleConfirm(pkg.id, cand.client, { score: cand.score, signals: cand.signals, via: 'queue' }); }
+          }, 'Confirm'),
+          e('button', {
+            className: 'btn btn-ghost btn-sm',
+            onClick: function(){ pairsHandleDismiss(pkg.id, cand.client); }
+          }, 'Dismiss')
+        )
+      );
+    }
+
+    function pairsPkgRow(row){
+      var pkg = row.package;
+      var holder = row.primary_holder;
+      var filled = (pkg.participant_ids || []).length;
+      var size = pkg.package_size || 2;
+      var slotsRemaining = row.slots_remaining;
+      var searchTerm = pairsSearch[pkg.id] || '';
+      var results = pairsManualSearchResults(pkg, searchTerm);
+      return e('div', {
+        key: 'pair-' + pkg.id,
+        style: {
+          background: '#fff',
+          border: '1.5px solid var(--rule)',
+          borderLeft: '4px solid var(--ochre)',
+          borderRadius: '12px',
+          padding: '14px 16px',
+          marginBottom: '12px'
+        }
+      },
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap' } },
+          e('div', { style: { flex: 1, minWidth: '220px' } },
+            e('div', { style: { fontWeight: 700, fontSize: '14px', color: 'var(--navy)' } }, pairsPkgHeaderLine(pkg)),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '4px' } },
+              e('span', null, 'Filled: ' + filled + '/' + size + ' · '),
+              e('span', {
+                style: { color: 'var(--ochre)', fontWeight: 600 }
+              }, slotsRemaining + ' slot' + (slotsRemaining === 1 ? '' : 's') + ' open')
+            ),
+            e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginTop: '6px' } },
+              'Primary: ',
+              e('span', {
+                style: { color: 'var(--navy)', fontWeight: 600, cursor: 'pointer' },
+                onClick: function(){ if (props.onOpenClient) props.onOpenClient(holder.id); }
+              }, holder.name)
+            ),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '2px' } },
+              pairsSessionsContext(holder, pkg)
+            )
+          ),
+          e('button', {
+            className: 'btn btn-ghost btn-sm',
+            onClick: function(){ pairsHandleDefer(pkg.id); },
+            title: 'Hide this row for 7 days'
+          }, 'Resolve later')
+        ),
+        row.candidates.length === 0
+          ? e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '10px' } },
+              'No candidates surfaced. Use search below.'
+            )
+          : e('div', null,
+              e('div', {
+                style: {
+                  fontSize: '11px', color: 'var(--slate)',
+                  textTransform: 'uppercase', letterSpacing: '0.05em',
+                  fontWeight: 700, marginTop: '12px'
+                }
+              }, 'Suggested candidates'),
+              row.candidates.map(function(cand){ return pairsCandidateBlock(pkg, cand); })
+            ),
+        /* Manual search fallback */
+        e('div', {
+          style: {
+            marginTop: '12px', paddingTop: '12px',
+            borderTop: '1px dashed var(--rule)'
+          }
+        },
+          e('input', {
+            type: 'text',
+            value: searchTerm,
+            placeholder: 'Search clients by name',
+            onChange: function(ev){
+              var next = Object.assign({}, pairsSearch);
+              next[pkg.id] = ev.target.value;
+              setPairsSearch(next);
+            },
+            style: {
+              width: '100%', padding: '8px 12px',
+              fontSize: '13px', borderRadius: '6px',
+              border: '1.5px solid var(--rule)', background: '#fff'
+            }
+          }),
+          results.length > 0 && e('div', {
+            style: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' }
+          },
+            results.map(function(c){
+              return e('button', {
+                key: 'manual-' + pkg.id + '-' + c.id,
+                onClick: function(){
+                  pairsHandleConfirm(pkg.id, c, {
+                    score: null,
+                    signals: ['Manual entry by ' + currentUserName],
+                    via: 'manual'
+                  });
+                  var next = Object.assign({}, pairsSearch);
+                  next[pkg.id] = '';
+                  setPairsSearch(next);
+                },
+                style: {
+                  textAlign: 'left', padding: '8px 12px',
+                  background: 'var(--paper-2)', border: '1px solid var(--rule)',
+                  borderRadius: '6px', cursor: 'pointer', fontSize: '13px',
+                  color: 'var(--navy)'
+                }
+              },
+                e('div', { style: { fontWeight: 600 } }, c.name),
+                e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                  (c.phone || 'No phone') + (c.location ? ' · ' + c.location : '')
+                )
+              );
+            })
+          )
+        )
+      );
     }
 
     return e('div', null,
@@ -19474,6 +20147,56 @@
               )
             );
           }),
+
+      /* Phase 2A follow-up: Pairs to Confirm. Below the consult queue
+         and WRO queue sections per spec placement. Gated on
+         canConfirmPairs (lead + admin); trainers do not see this. */
+      canConfirmPairs && e('div', null,
+        sectionHeader('Pairs to Confirm', pairsRows.length),
+        pairsRows.length === 0
+          ? sectionEmpty('No pairs to confirm. New Pairs purchases will surface here once their partner needs to be added.')
+          : pairsRows.map(function(row){ return pairsPkgRow(row); }),
+        pairsDeferredRows.length > 0 && e('div', { style: { marginTop: '8px' } },
+          e('button', {
+            onClick: function(){ setPairsDeferredOpen(!pairsDeferredOpen); },
+            style: {
+              background: 'transparent', border: 'none', padding: '6px 0',
+              cursor: 'pointer', fontSize: '12px', color: 'var(--slate)',
+              fontWeight: 600, letterSpacing: '0.03em'
+            }
+          }, (pairsDeferredOpen ? '▾' : '▸') + ' Deferred (' + pairsDeferredRows.length + ')'),
+          pairsDeferredOpen && e('div', { style: { marginTop: '6px' } },
+            pairsDeferredRows.map(function(d){
+              var pkg = d.package; var holder = d.primary_holder;
+              var daysLeft = Math.max(0, Math.ceil((d.until_ts - Date.now()) / (24 * 60 * 60 * 1000)));
+              return e('div', {
+                key: 'deferred-' + pkg.id,
+                style: {
+                  background: 'var(--paper)',
+                  border: '1px solid var(--rule)',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  marginBottom: '6px',
+                  display: 'flex', justifyContent: 'space-between',
+                  alignItems: 'center', gap: '10px', flexWrap: 'wrap'
+                }
+              },
+                e('div', { style: { flex: 1, minWidth: '180px' } },
+                  e('div', { style: { fontSize: '13px', fontWeight: 600, color: 'var(--navy)' } }, pairsPkgHeaderLine(pkg)),
+                  e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginTop: '2px' } },
+                    'Primary: ' + holder.name + ' · returns in ' + daysLeft + ' day' + (daysLeft === 1 ? '' : 's')
+                  )
+                ),
+                e('button', {
+                  className: 'btn btn-outline btn-sm',
+                  onClick: function(){ pairsHandleBringBack(pkg.id); }
+                }, 'Bring back')
+              );
+            })
+          )
+        )
+      ),
+
       newOpen && e(NewQueueEntryModal, {
         ctx: ctx,
         onClose: function(){ setNewOpen(false); }
