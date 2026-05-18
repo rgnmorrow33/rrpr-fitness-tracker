@@ -3090,6 +3090,47 @@
     return /(^|-)Pairs-\d+$/i.test(type);
   }
 
+  /* Participant count for a package type. Today's templates encode session
+     count in the type name (Pairs-4 = 4 sessions for 2 people), so
+     package_size derives from is_pairs ? 2 : 1. Forward-flexible: if a
+     future template adds an explicit package_size field on PT_PACKAGES_
+     BY_FACILITY (or a row carries pkg.package_size), the explicit value
+     wins. Accepts a type string, a meta object, or a pkg row. */
+  function getPackageParticipantCount(input){
+    if (input && typeof input === 'object') {
+      if (input.package_size && input.package_size > 0) return input.package_size;
+      if (input.is_pairs) return 2;
+      if (input.type) return isPairsPackageType(input.type) ? 2 : 1;
+      return 1;
+    }
+    var meta = getPackageMeta(input);
+    if (meta && meta.package_size && meta.package_size > 0) return meta.package_size;
+    return isPairsPackageType(input) ? 2 : 1;
+  }
+
+  /* Shared client-candidate search powering both the v4.20 Pairs to
+     Confirm row search and the v4.21 partner slot pickers. 2+ char
+     floor, substring match on name, max 6 results. opts.excludeIds is
+     an array of client ids to exclude (primary holder, already-selected
+     slots, dismissed candidates - caller decides). opts.requireActive
+     defaults to true (skip is_active === false). */
+  function searchClientCandidates(clients, opts){
+    var t = String((opts && opts.term) || '').trim().toLowerCase();
+    if (t.length < 2) return [];
+    var excludeIds = (opts && opts.excludeIds) || [];
+    var requireActive = !opts || opts.requireActive !== false;
+    var excludeSet = {};
+    excludeIds.forEach(function(id){ if (id) excludeSet[id] = true; });
+    return (clients || [])
+      .filter(function(c){
+        if (!c || c.deleted_at) return false;
+        if (requireActive && c.is_active === false) return false;
+        if (excludeSet[c.id]) return false;
+        return (c.name || '').toLowerCase().indexOf(t) !== -1;
+      })
+      .slice(0, 6);
+  }
+
   /* ============ Phase 2A follow-up: Pairs to Confirm =============
      Scoring + queue helpers backing the Pairs to Confirm section in
      ConsultQueueView. Reads pkg.participant_ids / pkg.package_size /
@@ -4196,13 +4237,18 @@
     var pkgs = (client.packages || []).slice();
     /* Phase 2A: stamp participant metadata so every native add carries the
        consumer-set declaration from row creation. Defaults route here;
-       callers that pre-stamp (e.g. a future paired add path) override via
-       the newPkg values winning in the Object.assign. */
+       callers that pre-stamp (e.g. v4.21 paired add path with partner
+       slot ids) override via the newPkg values winning in the Object.assign. */
     var enriched = Object.assign({
       participant_ids: [client.id],
-      package_size: isPairsPackageType(newPkg && newPkg.type) ? 2 : 1,
+      package_size: getPackageParticipantCount(newPkg && newPkg.type),
       primary_holder_id: client.id
     }, newPkg);
+    /* v4.21: forward-only audit field. Snapshot of participant count at
+       creation so future analytics can distinguish "filled at creation"
+       from "filled later via the Pairs to Confirm queue." Stamped post-
+       merge so it reflects the caller's actual participant_ids. */
+    enriched.participants_at_creation = (enriched.participant_ids || []).length;
     pkgs.push(enriched);
     var updated = Object.assign({}, client, {
       packages: pkgs,
@@ -13151,15 +13197,70 @@
     var purchaseDate = purchaseDateTuple[0];
     var setPurchaseDate = purchaseDateTuple[1];
 
+    /* v4.21: partner slots for pairs packages. partnerIds is an array
+       of length = packageSize - 1; each entry is either '' (empty slot)
+       or a client id (filled slot). partnerSearch is keyed by slot
+       index, holding the search-input string while the slot is empty. */
+    var selectedPkg = packagesAvailable.find(function(p){ return p.id === pkgId; }) || packagesAvailable[0];
+    var packageSize = getPackageParticipantCount(selectedPkg);
+    var partnerSlotCount = Math.max(0, packageSize - 1);
+    var partnerIdsTuple = useState(function(){ return []; });
+    var partnerIds = partnerIdsTuple[0];
+    var setPartnerIds = partnerIdsTuple[1];
+    var partnerSearchTuple = useState({});
+    var partnerSearch = partnerSearchTuple[0];
+    var setPartnerSearch = partnerSearchTuple[1];
+
+    /* Resize the partnerIds array when package selection changes so the
+       slot count matches the new template. Preserves filled slots when
+       size grows; truncates when size shrinks. */
+    useEffect(function(){
+      if (partnerSlotCount === partnerIds.length) return;
+      var next = partnerIds.slice(0, partnerSlotCount);
+      while (next.length < partnerSlotCount) next.push('');
+      setPartnerIds(next);
+      setPartnerSearch({});
+    }, [partnerSlotCount]);
+
     function onPkgChange(newId){
       setPkgId(newId);
       var p = packagesAvailable.find(function(pp){ return pp.id === newId; });
       if (p) setAmount(String(p.price));
     }
+    function setSlot(idx, clientId){
+      setPartnerIds(function(arr){
+        var next = arr.slice();
+        next[idx] = clientId || '';
+        return next;
+      });
+      setPartnerSearch(function(s){
+        var next = Object.assign({}, s);
+        delete next[idx];
+        return next;
+      });
+    }
+    function clearSlot(idx){ setSlot(idx, ''); }
+    function setSlotSearch(idx, term){
+      setPartnerSearch(function(s){
+        var next = Object.assign({}, s);
+        next[idx] = term;
+        return next;
+      });
+    }
 
     function submit(){
-      var pkg = packagesAvailable.find(function(p){ return p.id === pkgId; });
+      var pkg = selectedPkg;
       if (!pkg) { ctx.toast('Pick a package', 'error'); return; }
+      var filledPartners = (partnerIds || []).filter(Boolean);
+      /* Defense-in-depth: UI prevents duplicates, but a fast double-tap
+         on two slots could race the state update. Catch it here too. */
+      var seen = {};
+      for (var i = 0; i < filledPartners.length; i++) {
+        var pid = filledPartners[i];
+        if (pid === c.id) { ctx.toast('Primary holder cannot be a partner', 'error'); return; }
+        if (seen[pid]) { ctx.toast('Duplicate partner selection', 'error'); return; }
+        seen[pid] = true;
+      }
       var newPkg = {
         sessions: pkg.sessions,
         price: pkg.price,
@@ -13168,10 +13269,91 @@
         amountPaid: parseFloat(amount) || pkg.price,
         purchaseDate: purchaseDate,
         paymentType: paymentType,
-        source: 'manual_reup'
+        source: 'manual_reup',
+        /* Phase 2A: pre-stamp participant metadata so addPackageToClient
+           defaults yield to the explicit values. Filled partner slots
+           append to the holder; empty slots are skipped, leaving the
+           Pairs to Confirm queue as backstop for the remaining slot(s). */
+        participant_ids: [c.id].concat(filledPartners),
+        package_size: packageSize,
+        primary_holder_id: c.id
       };
       var updated = addPackageToClient(c, newPkg);
       props.onSave(updated);
+    }
+
+    var isPairsSelected = !!(selectedPkg && (selectedPkg.is_pairs || isPairsPackageType(selectedPkg.type)));
+
+    function renderPartnerSlot(idx){
+      var slotId = partnerIds[idx] || '';
+      var selectedClient = slotId ? (ctx.allClients || ctx.clients || []).find(function(x){ return x.id === slotId; }) : null;
+      var exclude = [c.id].concat(partnerIds.filter(function(id, i){ return id && i !== idx; }));
+      var term = partnerSearch[idx] || '';
+      var results = searchClientCandidates(ctx.clients, { term: term, excludeIds: exclude });
+      return e('div', {
+        key: 'partner-slot-' + idx,
+        className: 'field',
+        style: { marginTop: idx === 0 ? '0' : '10px' }
+      },
+        e('label', null, 'Partner' + (partnerSlotCount > 1 ? ' ' + (idx + 2) : '')),
+        selectedClient
+          ? e('div', {
+              style: {
+                display: 'flex', alignItems: 'center', gap: '10px',
+                padding: '10px 12px', background: 'var(--paper-2)',
+                border: '1.5px solid var(--moss)', borderRadius: '8px'
+              }
+            },
+              e('div', { style: { flex: 1 } },
+                e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, selectedClient.name),
+                e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                  (selectedClient.phone || 'No phone') + (selectedClient.location ? ' \u00b7 ' + selectedClient.location : '')
+                )
+              ),
+              e('button', {
+                className: 'btn btn-ghost btn-sm',
+                onClick: function(){ clearSlot(idx); },
+                title: 'Remove this partner selection'
+              }, 'Remove')
+            )
+          : e('div', null,
+              e('input', {
+                type: 'text',
+                value: term,
+                placeholder: 'Search clients by name',
+                onChange: function(ev){ setSlotSearch(idx, ev.target.value); },
+                style: {
+                  width: '100%', padding: '10px 12px',
+                  fontSize: '13px', borderRadius: '6px',
+                  border: '1.5px solid var(--rule)', background: '#fff'
+                }
+              }),
+              results.length > 0 && e('div', {
+                style: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' }
+              },
+                results.map(function(r){
+                  return e('button', {
+                    key: 'res-' + idx + '-' + r.id,
+                    onClick: function(){ setSlot(idx, r.id); },
+                    style: {
+                      textAlign: 'left', padding: '8px 12px',
+                      background: 'var(--paper-2)', border: '1px solid var(--rule)',
+                      borderRadius: '6px', cursor: 'pointer', fontSize: '13px',
+                      color: 'var(--navy)'
+                    }
+                  },
+                    e('div', { style: { fontWeight: 600 } }, r.name),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                      (r.phone || 'No phone') + (r.location ? ' \u00b7 ' + r.location : '')
+                    )
+                  );
+                })
+              ),
+              term.trim().length >= 2 && results.length === 0 && e('div', {
+                style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' }
+              }, 'No matching clients.')
+            )
+      );
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -13221,6 +13403,27 @@
           e('div', { className: 'field' },
             e('label', null, 'Purchase Date'),
             e('input', { type: 'date', value: purchaseDate, onChange: function(ev){ setPurchaseDate(ev.target.value); } })
+          ),
+          /* v4.21: partner slots only render when the selected package is
+             a pairs template. Empty slots are allowed; the Pairs to Confirm
+             queue picks up the unfilled remainder. */
+          isPairsSelected && partnerSlotCount > 0 && e('div', {
+            style: {
+              marginTop: '4px', paddingTop: '14px',
+              borderTop: '1px solid var(--rule)'
+            }
+          },
+            e('div', {
+              style: {
+                fontSize: '11px', fontWeight: 700,
+                textTransform: 'uppercase', letterSpacing: '0.05em',
+                color: 'var(--slate)', marginBottom: '8px'
+              }
+            }, 'Partner' + (partnerSlotCount > 1 ? 's' : '')),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '10px', lineHeight: 1.4 } },
+              'Pick the partner now or leave blank and confirm later from the Pairs to Confirm queue.'
+            ),
+            Array.from({ length: partnerSlotCount }, function(_, i){ return i; }).map(renderPartnerSlot)
           )
         ),
         e('div', { className: 'modal-footer' },
@@ -13598,6 +13801,18 @@
     var errorsTuple = useState({});
     var errors = errorsTuple[0]; var setErrors = errorsTuple[1];
 
+    /* v4.21: partner slots for new pairs packages. Only renders in the
+       create branch (!isEdit) since the edit-mode pkgRecord rebuild has
+       a known latent bug that strips participant_ids; fixing that is a
+       separate spec. partnerIds is an array of length = packageSize - 1
+       where each entry is '' (empty) or a client id (filled). */
+    var partnerIdsTuple = useState(function(){ return []; });
+    var partnerIds = partnerIdsTuple[0];
+    var setPartnerIds = partnerIdsTuple[1];
+    var partnerSearchTuple = useState({});
+    var partnerSearch = partnerSearchTuple[0];
+    var setPartnerSearch = partnerSearchTuple[1];
+
     /* v2: PAR-Q+ (Physical Activity Readiness Questionnaire) state.
        Answers stored separately from the flat form to keep things clean.
        Standard 7-question version. Any 'yes' surfaces a flag banner; doesn't
@@ -13644,6 +13859,43 @@
     var locationFallback = pkgList.fallback;
     var selectedPkg = packagesAvailable.find(function(p){ return p.id === form.pkgId; }) || packagesAvailable[0];
 
+    /* v4.21: derive slot count from the selected template. The edit
+       branch never renders slots (deferred bug), so the count drives
+       only the create-branch UI. */
+    var packageSize = getPackageParticipantCount(selectedPkg);
+    var partnerSlotCount = (!isEdit && selectedPkg && (selectedPkg.is_pairs || isPairsPackageType(selectedPkg.type)))
+      ? Math.max(0, packageSize - 1)
+      : 0;
+
+    useEffect(function(){
+      if (partnerSlotCount === partnerIds.length) return;
+      var next = partnerIds.slice(0, partnerSlotCount);
+      while (next.length < partnerSlotCount) next.push('');
+      setPartnerIds(next);
+      setPartnerSearch({});
+    }, [partnerSlotCount]);
+
+    function setSlot(idx, clientId){
+      setPartnerIds(function(arr){
+        var next = arr.slice();
+        next[idx] = clientId || '';
+        return next;
+      });
+      setPartnerSearch(function(s){
+        var next = Object.assign({}, s);
+        delete next[idx];
+        return next;
+      });
+    }
+    function clearSlot(idx){ setSlot(idx, ''); }
+    function setSlotSearch(idx, term){
+      setPartnerSearch(function(s){
+        var next = Object.assign({}, s);
+        next[idx] = term;
+        return next;
+      });
+    }
+
     function submit(){
       var errs = intakeFieldErrors(form);
       setErrors(errs);
@@ -13653,6 +13905,20 @@
          first option. AdminScheduleView's Unassigned consultations
          panel surfaces these for later assignment. */
       var pkg = selectedPkg;
+      /* v4.21: generate the new client id up front so the package's
+         participant_ids / primary_holder_id can reference it. Edit
+         mode keeps the existing client id. */
+      var newClientId = isEdit ? existing.id : uid();
+      var filledPartners = (partnerIds || []).filter(Boolean);
+      /* Defense-in-depth: UI prevents duplicates, but a fast double-tap
+         on two slots could race the state update. */
+      var seen = {};
+      for (var iSlot = 0; iSlot < filledPartners.length; iSlot++) {
+        var pid = filledPartners[iSlot];
+        if (pid === newClientId) { ctx.toast('Primary holder cannot be a partner', 'error'); return; }
+        if (seen[pid]) { ctx.toast('Duplicate partner selection', 'error'); return; }
+        seen[pid] = true;
+      }
       var pkgRecord = {
         sessions: pkg.sessions,
         price: pkg.price,
@@ -13663,6 +13929,18 @@
         paymentType: form.paymentType,
         source: isConsult ? 'consultation' : 'manual'
       };
+      /* v4.21: stamp participant metadata only on the create branch.
+         Edit-mode pkgRecord intentionally omits these fields - the
+         current rebuild replaces packages[0] entirely, and stamping
+         a fresh participant_ids array here would erase any partners
+         confirmed via the Pairs to Confirm queue (this is the deferred
+         edit-mode bug; do not widen its blast radius). */
+      if (!isEdit) {
+        pkgRecord.participant_ids = [newClientId].concat(filledPartners);
+        pkgRecord.package_size = packageSize;
+        pkgRecord.primary_holder_id = newClientId;
+        pkgRecord.participants_at_creation = pkgRecord.participant_ids.length;
+      }
       /* Patch: in consult mode, the booking modal's preferredDate +
          preferredTime become a scheduled session record. trainerName is
          intentionally empty - admin or Carlos assigns a trainer post-
@@ -13719,7 +13997,7 @@
         delete out.purchaseDate;
       } else {
         out = {
-          id: uid(),
+          id: newClientId,
           name: form.name.trim(),
           phone: form.phone,
           email: form.email,
@@ -13738,6 +14016,78 @@
         };
       }
       props.onCreate(out);
+    }
+
+    function renderPartnerSlot(idx){
+      var slotId = partnerIds[idx] || '';
+      var selectedClient = slotId ? (ctx.allClients || ctx.clients || []).find(function(x){ return x.id === slotId; }) : null;
+      var exclude = partnerIds.filter(function(id, i){ return id && i !== idx; });
+      var term = partnerSearch[idx] || '';
+      var results = searchClientCandidates(ctx.clients, { term: term, excludeIds: exclude });
+      return e('div', {
+        key: 'newcli-partner-' + idx,
+        className: 'field',
+        style: { marginTop: idx === 0 ? '0' : '10px' }
+      },
+        e('label', null, 'Partner' + (partnerSlotCount > 1 ? ' ' + (idx + 2) : '')),
+        selectedClient
+          ? e('div', {
+              style: {
+                display: 'flex', alignItems: 'center', gap: '10px',
+                padding: '10px 12px', background: 'var(--paper-2)',
+                border: '1.5px solid var(--moss)', borderRadius: '8px'
+              }
+            },
+              e('div', { style: { flex: 1 } },
+                e('div', { style: { fontWeight: 600, fontSize: '14px', color: 'var(--navy)' } }, selectedClient.name),
+                e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                  (selectedClient.phone || 'No phone') + (selectedClient.location ? ' · ' + selectedClient.location : '')
+                )
+              ),
+              e('button', {
+                className: 'btn btn-ghost btn-sm',
+                onClick: function(){ clearSlot(idx); },
+                title: 'Remove this partner selection'
+              }, 'Remove')
+            )
+          : e('div', null,
+              e('input', {
+                type: 'text',
+                value: term,
+                placeholder: 'Search clients by name',
+                onChange: function(ev){ setSlotSearch(idx, ev.target.value); },
+                style: {
+                  width: '100%', padding: '10px 12px',
+                  fontSize: '13px', borderRadius: '6px',
+                  border: '1.5px solid var(--rule)', background: '#fff'
+                }
+              }),
+              results.length > 0 && e('div', {
+                style: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px' }
+              },
+                results.map(function(r){
+                  return e('button', {
+                    key: 'newcli-res-' + idx + '-' + r.id,
+                    onClick: function(){ setSlot(idx, r.id); },
+                    style: {
+                      textAlign: 'left', padding: '8px 12px',
+                      background: 'var(--paper-2)', border: '1px solid var(--rule)',
+                      borderRadius: '6px', cursor: 'pointer', fontSize: '13px',
+                      color: 'var(--navy)'
+                    }
+                  },
+                    e('div', { style: { fontWeight: 600 } }, r.name),
+                    e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                      (r.phone || 'No phone') + (r.location ? ' · ' + r.location : '')
+                    )
+                  );
+                })
+              ),
+              term.trim().length >= 2 && results.length === 0 && e('div', {
+                style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' }
+              }, 'No matching clients.')
+            )
+      );
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -13826,6 +14176,21 @@
             locationFallback && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginTop: '4px' } },
               'Set client location to filter packages.'
             )
+          ),
+          /* v4.21: partner slots for a pairs template at intake. Only
+             renders in the create branch (edit branch deferred bug). The
+             new client's record doesn't exist yet, so the only exclusion
+             rule is "already picked in another slot." Empty slots are
+             allowed; the Pairs to Confirm queue picks up the rest. */
+          partnerSlotCount > 0 && e('div', {
+            className: 'field',
+            style: { paddingTop: '10px', borderTop: '1px solid var(--rule)' }
+          },
+            e('label', null, partnerSlotCount > 1 ? 'Partners' : 'Partner'),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '10px', lineHeight: 1.4 } },
+              'Pick the partner now or leave blank and confirm later from the Pairs to Confirm queue.'
+            ),
+            Array.from({ length: partnerSlotCount }, function(_, i){ return i; }).map(renderPartnerSlot)
           ),
           /* Trainer assignment hidden in consult mode - admin or Carlos
              assigns post-consult via ClientDetail edit. Patch H: first
@@ -19711,21 +20076,10 @@
       ctx.toast && ctx.toast('Back in queue', 'success');
     }
     function pairsManualSearchResults(pkg, term){
-      var t = String(term || '').trim().toLowerCase();
-      if (t.length < 2) return [];
-      var participants = pkg.participant_ids || [];
-      var dismissed = pkg.dismissed_participant_candidates || [];
-      var pid = pkg.primary_holder_id;
-      return (ctx.clients || [])
-        .filter(function(c){
-          if (!c || c.deleted_at) return false;
-          if (c.is_active === false) return false;
-          if (c.id === pid) return false;
-          if (participants.indexOf(c.id) !== -1) return false;
-          if (dismissed.indexOf(c.id) !== -1) return false;
-          return (c.name || '').toLowerCase().indexOf(t) !== -1;
-        })
-        .slice(0, 6);
+      var exclude = [pkg.primary_holder_id]
+        .concat(pkg.participant_ids || [])
+        .concat(pkg.dismissed_participant_candidates || []);
+      return searchClientCandidates(ctx.clients, { term: term, excludeIds: exclude });
     }
 
     function pairsCandidateBlock(pkg, cand){
