@@ -449,6 +449,10 @@ package CRUD flow.
   is_consult: boolean,
   is_intro: boolean,
   validDays: integer,          // expiration window; drives package_expiring sweep
+  // Phase 2A participant metadata (ADR-0003 Phase 2A intent annotation):
+  participant_ids: uuid[],     // consumer set; solo defaults to [client_id]
+  package_size: integer,       // 1 = solo, 2 = pair, N = group
+  primary_holder_id: uuid,     // billing/admin owner; same as the only participant for solo
   // Lifecycle fields, present when applicable:
   deletedAt: timestamptz,
   deletedBy: text,
@@ -466,6 +470,16 @@ package CRUD flow.
   excluded from the `package_expiring` sweep.
 - Per-template metadata (`is_pairs`, `is_consult`, `is_intro`)
   drives downstream rendering and aggregation.
+- Phase 2A participant fields (`participant_ids`, `package_size`,
+  `primary_holder_id`) declare the *intended* consumer set at the
+  package level. Phase 2A does not change session-level math:
+  sign-off still writes to one client's `sessions[]` and remaining
+  counts still derive from that array. Phase 2C lifts per-session
+  attribution onto the normalized `sessions` row (ADR-0002 Q1, Q3).
+  The `migrate_package_participants` backfill stamps solo defaults on
+  every existing package; pair templates get `package_size: 2` but
+  `participant_ids` stays `[client_id]` until the admin "designate as
+  shared" flow links the partner.
 
 ### `clients.sessions[]`
 

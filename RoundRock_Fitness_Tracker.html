@@ -3077,6 +3077,19 @@
     return meta.price;
   }
 
+  /* Pair-pattern detection across canonical and legacy bare forms. Canonical
+     is "<facility>-Pairs-N" (Phase 2 taxonomy); legacy is bare "Pairs-N"
+     which the migrate_package_type_prefix migration rewrites on first load.
+     The Phase 2A participant-metadata code paths (constructors, seed,
+     import, backfill) all need to recognize both shapes so package_size
+     resolves correctly during the same tick the prefix migration runs. */
+  function isPairsPackageType(type){
+    if (!type) return false;
+    var meta = PACKAGE_META_BY_TYPE[type];
+    if (meta) return !!meta.is_pairs;
+    return /(^|-)Pairs-\d+$/i.test(type);
+  }
+
   /* Returns { list, fallback } where fallback is true when the requested
      location was missing or unrecognized and we fell back to CMRC. UI
      uses fallback to show a "set client location" hint. */
@@ -3527,8 +3540,14 @@
       var sessions = r[4];
       var date = r[5];
       var price = r[6];
+      /* Phase 2A: id precomputed so the participant metadata on the seed
+         package can reference this client by id. Bare-type seed rows like
+         'Pairs-8' get prefixed to 'Baca-Pairs-8' by the
+         migrate_package_type_prefix migration on first load;
+         isPairsPackageType recognizes both shapes. */
+      var clientId = uid();
       return {
-        id: uid(),
+        id: clientId,
         name: name,
         phone: '',
         email: '',
@@ -3541,7 +3560,10 @@
           amountPaid: price,
           purchaseDate: date,
           paymentType: 'Card',
-          source: 'seed'
+          source: 'seed',
+          participant_ids: [clientId],
+          package_size: isPairsPackageType(type) ? 2 : 1,
+          primary_holder_id: clientId
         }],
         paymentType: 'Card',
         teamMember: '',
@@ -3868,7 +3890,16 @@
        out soft-deleted entries and reassigning the result would silently
        drop them from the client record. */
     var pkgs = (client.packages || []).slice();
-    pkgs.push(newPkg);
+    /* Phase 2A: stamp participant metadata so every native add carries the
+       consumer-set declaration from row creation. Defaults route here;
+       callers that pre-stamp (e.g. a future paired add path) override via
+       the newPkg values winning in the Object.assign. */
+    var enriched = Object.assign({
+      participant_ids: [client.id],
+      package_size: isPairsPackageType(newPkg && newPkg.type) ? 2 : 1,
+      primary_holder_id: client.id
+    }, newPkg);
+    pkgs.push(enriched);
     var updated = Object.assign({}, client, {
       packages: pkgs,
       lastPackageAddedAt: new Date().toISOString()
@@ -6309,6 +6340,89 @@
             target_id: c.id,
             before: ch.before,
             after: ch.newPackages.map(function(p){ return p && p.id ? p.id : null; })
+          });
+        });
+      });
+    }, [loading]);
+
+    /* Phase 2A participant-metadata backfill. ADR-0003 Phase 2A intent
+       annotation: declare the consumer set at the package level so Phase
+       2C's normalized sessions table has an explicit seam to lift up
+       per-participant attribution. Solo defaults to [client_id];
+       pair-template packages get package_size: 2 but participant_ids stays
+       solo - the partner is admin-linked separately via the upcoming
+       paired_with_client_id flow. Iterates active + soft-deleted packages.
+
+       Composes with the prefix and strip-writeonly migrations above by
+       doing per-package transformation INSIDE the setClients functional
+       updater rather than precomputing a newPackages array against the
+       snapshot. Reads the latest state at apply time and additively stamps
+       the three fields. Idempotent: any package already carrying all three
+       fields passes through untouched. */
+    var packageParticipantsMigrationRanRef = useRef(false);
+    useEffect(function(){
+      if (loading) return;
+      if (packageParticipantsMigrationRanRef.current) return;
+      var snapshot = clientsTuple[0] || [];
+      if (snapshot.length === 0) return;
+      packageParticipantsMigrationRanRef.current = true;
+
+      var clientsNeedingStamp = {};
+      var packageCount = 0;
+      snapshot.forEach(function(c){
+        if (!c || !c.packages || c.packages.length === 0) return;
+        var dirtyCount = 0;
+        c.packages.forEach(function(p){
+          if (!p) return;
+          if (p.participant_ids == null || p.package_size == null || p.primary_holder_id == null) {
+            dirtyCount++;
+          }
+        });
+        if (dirtyCount > 0) {
+          clientsNeedingStamp[c.id] = true;
+          packageCount += dirtyCount;
+        }
+      });
+
+      var clientCount = Object.keys(clientsNeedingStamp).length;
+      if (clientCount === 0) {
+        console.info('migrate_package_participants: all packages already carry participant metadata');
+        return;
+      }
+
+      console.info(
+        'migrate_package_participants: stamping participant metadata on ' +
+        packageCount + ' package(s) across ' + clientCount + ' client(s)'
+      );
+
+      function snapshotParticipantFields(p){
+        return {
+          id: p && p.id || null,
+          participant_ids: p && p.participant_ids ? p.participant_ids : null,
+          package_size: p && p.package_size != null ? p.package_size : null,
+          primary_holder_id: p && p.primary_holder_id || null
+        };
+      }
+
+      setClients(function(list){
+        return list.map(function(c){
+          if (!clientsNeedingStamp[c.id]) return c;
+          var before = (c.packages || []).map(snapshotParticipantFields);
+          var newPackages = (c.packages || []).map(function(p){
+            if (!p) return p;
+            return Object.assign({}, p, {
+              participant_ids: p.participant_ids || [c.id],
+              package_size: p.package_size != null ? p.package_size : (isPairsPackageType(p.type) ? 2 : 1),
+              primary_holder_id: p.primary_holder_id || c.id
+            });
+          });
+          var after = newPackages.map(snapshotParticipantFields);
+          var updated = Object.assign({}, c, { packages: newPackages });
+          return appendAuditEntry(updated, session, 'migrate_package_participants', {
+            entity_type: 'client',
+            target_id: c.id,
+            before: before,
+            after: after
           });
         });
       });
@@ -21469,6 +21583,11 @@
         return p.purchaseDate < min ? p.purchaseDate : min;
       }, null);
       var nowIso = new Date().toISOString();
+      /* Phase 2A: client id precomputed so the participant metadata on each
+         imported package can reference it. Solo defaults to [clientId];
+         pair templates get package_size: 2 but participant_ids stays solo
+         until the admin "designate as shared" flow runs. */
+      var clientId = uid();
       var packageRecords = group.packages.map(function(p){
         var meta = getPackageMeta(p.type);
         var price = meta ? meta.price : 0;
@@ -21491,11 +21610,14 @@
           amountPaid: price,
           paymentType: 'Card',
           purchaseDate: p.purchaseDate || null,
-          source: 'import_alpha_v1'
+          source: 'import_alpha_v1',
+          participant_ids: [clientId],
+          package_size: isPairsPackageType(p.type) ? 2 : 1,
+          primary_holder_id: clientId
         };
       });
       return {
-        id: uid(),
+        id: clientId,
         name: group.name,
         trainerName: group.trainer,
         location: group.location,
