@@ -262,6 +262,31 @@ when convenient.
   has more refs than SCHEMA.md, plan accordingly. Going-forward
   convention is captured under "Working conventions" so the sweep
   is one-time, not recurring.
+- SCHEMA.md clients.packages[] field-shape drift. The documented
+  shape lists fields that aren't actually stamped on package rows.
+  Two classes of drift, both surfaced by the Phase 2A Phase 1
+  diagnostic:
+    * Template-only fields documented as row fields: location,
+      is_pairs, is_consult, is_intro, validDays. Actual: these
+      live on PT_PACKAGES_BY_FACILITY entries only; AddPackageModal
+      and the bulk import don't copy them onto the row.
+      getPackageMeta(p.type) is the operative read path for any
+      consumer that needs them (no runtime consumer reads is_pairs
+      today; the v4.19 migrate_package_participants migration is
+      the first reader, and it reads from the template, not the
+      row).
+    * camelCase vs snake_case soft-delete fields. Docs say
+      deletedAt / deletedBy / restoredAt / restoredBy in
+      camelCase. Actual stamping uses deleted_at / deleted_by in
+      snake_case (softDeletePackage / hardDeletePackage). restoredAt
+      and restoredBy are never stamped - restorePackage just nulls
+      the deleted_at / deleted_by pair.
+  Fix: rewrite the SCHEMA.md clients.packages[] field list to match
+  the actually-stamped shape. Move template-derived fields to a
+  separate "derived from template via getPackageMeta()" note.
+  Correct the soft-delete fields to snake_case and remove the
+  never-stamped restoredAt / restoredBy entries. Use function-name
+  anchors per the "No line-number references in docs" convention.
 - Sprint P Tier C2-aligned strays surfaced during execution:
     * Two more redundant inline maxWidth: '560px' modal
       overrides at ~21459 and ~21476 (siblings to the one
