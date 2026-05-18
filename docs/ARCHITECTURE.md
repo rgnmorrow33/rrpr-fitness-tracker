@@ -93,7 +93,8 @@ stale bundles for hours.
 `ofezaezijafglyjmisgz.supabase.co`. The anon key is committed in
 the HTML file by design: it's gating role on the Supabase API, not
 a secret. RLS is currently disabled across all tables per the
-prototype posture (see ADR-0009 proposed). Supabase provides
+prototype posture (see *anon RLS prototype posture*, proposed).
+Supabase provides
 storage, realtime, and (planned) auth.
 
 **No build step.** The HTML file is the deployable. React loads
@@ -179,7 +180,9 @@ centralized audit table exists. The trade-off: audit queries are
 per-entity (you can see the full history of one client trivially,
 but cross-entity actor-centric reports require fetching all rows and
 walking all arrays). For the prototype phase this is the right
-shape; ADR-0007 (proposed) captures the rationale.
+shape; *append-only audit log embedded per entity* (proposed)
+captures the rationale, generalizing the `clients.audit_log` slice
+covered by ADR-0004.
 
 ---
 
@@ -187,7 +190,8 @@ shape; ADR-0007 (proposed) captures the rationale.
 
 **PIN-based per-user auth.** Trainers sign in with a 4-digit PIN
 stored on their row in `trainers.pin`. PINs are plaintext today;
-ADR-0010 (proposed) commits to hashing before APC opens. The PIN
+*PIN storage as plaintext* (proposed) commits to hashing before APC
+opens. The PIN
 modal at `RoundRock_Fitness_Tracker.html:9277` collects the PIN; the
 match check happens client-side against the loaded trainer row.
 
@@ -310,10 +314,11 @@ follow-up sweep to find other surfaces that should be converted.
 This is current tribal knowledge; migration into `/docs` as a
 committed artifact is queued (see section 9).
 
-**ADR log.** Architectural decisions land in `DECISIONS.md`. Three
-foundational ADRs (ADR-0001 through ADR-0003) exist as of this
-writing; seven Tier 1 backfill candidates are queued in the
-DECISIONS.md backlog as ADR-0004 through ADR-0010.
+**ADR log.** Architectural decisions land in `DECISIONS.md`. Four
+foundational ADRs (ADR-0001 through ADR-0004) exist as of this
+writing; six Tier 1 backfill topics are queued in the DECISIONS.md
+backlog by topic name (numbers assigned at commit time, not
+pre-allocated).
 
 ---
 
@@ -568,11 +573,11 @@ who doesn't have direct access to Reagan's files.
 
 **Security hardening (deadline-bound).**
 
-- **Anon RLS posture.** Per ADR-0009 (proposed). Tighten before APC
-  opens (April 2027) or before any clinical PHI flows through the
-  system, whichever comes first.
-- **PIN hashing.** Per ADR-0010 (proposed). Plaintext today. Hash
-  before APC.
+- **Anon RLS posture.** Per *anon RLS prototype posture* (proposed).
+  Tighten before APC opens (April 2027) or before any clinical PHI
+  flows through the system, whichever comes first.
+- **PIN hashing.** Per *PIN storage as plaintext* (proposed).
+  Plaintext today. Hash before APC.
 
 **Deferred cleanup pile (from CLAUDE.md).**
 

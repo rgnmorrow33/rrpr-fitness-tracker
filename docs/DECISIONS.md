@@ -176,8 +176,8 @@ ratified contingent on ADR-0001 ratifying - if the tracker reverts to
 stopgap framing, this ADR moves to Deprecated and the duplicate-client
 workaround stands.
 
-Will partially supersede ADR-0006 (proposed) on the JSONB-on-clients
-rationale, specifically the `sessions` JSONB portion. `packages` and
+Will partially supersede ADR-0004 on the JSONB-on-clients rationale,
+specifically the `sessions` JSONB portion. `packages` and
 `audit_log` JSONB remain in place pending separate review.
 
 **Addendum (2026-05-15): pre-existing `package_participants` orphan
@@ -290,7 +290,158 @@ artifact set) and the Selisa one-pager land. The spec for Phase 2A
 is drafted but not yet executed.
 
 Phase 2B's "single-file decomposition started" item satisfies one of
-the Tier 1 backfill candidates queued below as ADR-0004 (proposed).
+the Tier 1 backfill candidates queued below (*single-file architecture
+rationale*).
+
+---
+
+## ADR-0004: JSONB-on-parent as the operative data model for client subrecords
+
+**Status.** Accepted (retroactive capture)
+**Date.** 2026-05-18
+
+### Context
+
+The tracker's primary entity (`clients`) carries three substantive
+data structures inside JSONB columns rather than as rows in
+normalized child tables:
+
+- `clients.sessions` - the full PT session history, including
+  status, sign-off state, duration, recurring-series linkage, and
+  service-recovery fields.
+- `clients.packages` - the list of purchased packages with type,
+  size, validity window, soft-delete state, and source provenance.
+- `clients.audit_log` - the per-client append-only history of
+  mutations, capped at the last 100 entries.
+
+This shape was not the result of a documented decision at the time
+the data model was built. It crystallized iteratively under
+prototype-phase pressure: schema migrations were expensive to
+coordinate during early iteration, the React-from-CDN single-file
+deployment had no migration tooling attached, and adding a JSONB
+field was free in a way that adding a table was not.
+
+The v4.18 schema reconciliation surfaced the smoking gun: a
+`packages` table exists in the live Supabase DB, is empty, has no
+FK constraints, and is not referenced anywhere in the codebase
+(see SCHEMA.md "Orphan tables"). Someone at some point stubbed out
+a normalized packages table; the app never wired it up; the JSONB
+column on `clients` became the de-facto data model. Until SCHEMA.md
+v4.17, the JSONB posture was unwritten and lived only in the code.
+
+This ADR captures the posture retroactively so that future
+architectural decisions - particularly ADR-0002 Q3, which normalizes
+`clients.sessions` out into a dedicated `sessions` table - have an
+explicit starting point to supersede.
+
+### Decision
+
+For `clients.sessions`, `clients.packages`, and `clients.audit_log`,
+the operative data model is JSONB columns on the `clients` row.
+Writes are whole-row upserts via the standard
+`from('clients').upsert(rows, { onConflict: 'id' })` path; the
+JSONB column is replaced wholesale on every save. Shape is enforced
+by code convention via canonical constructor functions, not by
+DB-level validation.
+
+- **`clients.sessions`** is constructed by `addSession`,
+  `createRecurringSessions`, and `rescheduleSeriesFromHere`.
+  Sign-off, recurring series, and service-recovery fields are
+  documented in SCHEMA.md "JSONB shapes" `clients.sessions[]`.
+- **`clients.packages`** is constructed by `addPackageToClient`
+  and `buildSeedClients`. Per Sprint K, derived fields
+  (`sessionsUsed`, `sessionsRemaining`, `is_active`) were dropped
+  from the stored shape and are computed live from
+  `clients.sessions[]`. Documented in SCHEMA.md "JSONB shapes"
+  `clients.packages[]`.
+- **`clients.audit_log`** is constructed by `appendAuditEntry`, a
+  single canonical helper that builds the 13-field entry, concats
+  onto the existing log, and trims to the last 100 entries.
+  Documented in SCHEMA.md "JSONB shapes" `clients.audit_log[]`.
+
+### Consequences
+
+- **Write atomicity is cheap.** A session sign-off that also
+  appends an audit entry and stamps a package state change is one
+  upsert against one row, with no cross-table transaction
+  coordination. The dirty-check `_saveIfDirty` useEffect on
+  `setClients` handles persistence asynchronously without the
+  caller having to think about multi-table consistency.
+- **Schema flexibility is high.** Adding a new field to a session
+  row, a package row, or an audit entry requires zero migration -
+  the JSONB column accepts whatever shape the constructor builds.
+  This was load-bearing during early iteration when Selisa's
+  feedback was driving multiple field additions per sprint.
+- **Query complexity is high.** Aggregates that span entities
+  (rename cascades, audit reporting, package-expiring sweeps) have
+  to fetch whole rows and walk the JSONB arrays in JavaScript.
+  There is no SQL path for "all sessions for trainer X in date
+  range Y" without pulling every client.
+- **Type safety is none.** Shape is enforced by the constructor
+  helpers and by code that reads the shape. A drift between
+  constructor and reader is a runtime render bug, not a schema
+  rejection. The Patch R whitelist on `leads` is the precedent for
+  what a belt-and-suspenders second filter looks like when this
+  matters; the JSONB columns have no equivalent today.
+- **Concurrency is last-write-wins on the whole row.** Two devices
+  writing to the same client at overlapping times will both upsert
+  the whole row; the later write overwrites the earlier. The
+  100-entry `audit_log` trim runs per device per write, so the log
+  can briefly leak past 100 entries when concurrent writes land
+  before the next write trims it back. Self-heals via the
+  whole-row last-write-wins; the realtime subscription reload
+  picks up the most recent state within ~100ms.
+- **The pattern extends beyond `clients`.** Other entities apply
+  the same JSONB-on-parent shape for similar reasons (see SCHEMA.md
+  "JSONB shapes" and the per-entity `audit_log` columns documented
+  there). Full enumeration is out of scope for this ADR; see "Out
+  of scope" below.
+
+### Out of scope
+
+This ADR documents the posture only for the three `clients.*`
+columns named in the Decision section. The following related cases
+are explicitly *not* covered here:
+
+- **`notifications.payload`.** JSONB, but holds opaque per-type
+  message metadata rather than a primary data structure.
+  Render-time code in `notificationText` consumes it directly.
+  Not part of this posture.
+- **Per-entity `audit_log` generalization.** The same append-only
+  100-entry head-trim pattern is applied via `appendAuditEntry` to
+  `trainers`, `leads`, `closures`, `classes`, `schedule_versions`,
+  and `trainer_time_off`. The general rationale for entity-local
+  audit logs (rather than a centralized audit table) is queued for
+  a separate forward-looking ADR: *append-only audit log embedded
+  per entity* (proposed; see Backlog).
+- **Other JSONB-on-parent instances.** `classes.sub_assignments`,
+  `classes.attendance`, `leads.status_history`,
+  `schedule_versions.data`, and `trainers.previous_names` apply the
+  same architectural posture to other parent entities. Acknowledged
+  in the Consequences section above with a SCHEMA.md
+  cross-reference; not enumerated individually here.
+
+### Notes
+
+This ADR is a retroactive capture of existing architecture, not a
+new decision. Status lands as Accepted directly per the "How to
+add a new ADR" guidance for backfill ADRs that document existing
+patterns.
+
+ADR-0002 Q3 normalizes `clients.sessions` out into a dedicated
+`sessions` table to support shared-session-N-participants for
+pairs. Phase 2C of ADR-0003 is the execution sprint for that
+normalization. Once Phase 2C completes and the JSONB `sessions`
+column is dropped, this ADR is partially superseded for the
+`sessions` portion; `clients.packages` and `clients.audit_log`
+remain JSONB pending separate review.
+
+Cross-references:
+- SCHEMA.md "JSONB shapes" section for the canonical shape of each
+  column.
+- SCHEMA.md "Orphan tables" section for the `packages` empty-table
+  finding that prompted this ADR.
+- ADR-0002 / ADR-0003 for the sessions-normalization roadmap.
 
 ---
 
@@ -298,44 +449,48 @@ the Tier 1 backfill candidates queued below as ADR-0004 (proposed).
 
 The following decisions are foundational to the system as it stands
 today but have not yet been formally captured as ADRs. Each is
-queued as a Proposed ADR; they get fleshed out in follow-up commits,
-one per commit or in small thematic batches. This section makes the
-documentation gap visible so it can be closed deliberately rather
-than discovered later.
+queued by topic; they get fleshed out in follow-up commits, one per
+commit or in small thematic batches, and are assigned a number at
+commit time (not pre-allocated). This section makes the documentation
+gap visible so it can be closed deliberately rather than discovered
+later.
 
-- **ADR-0004 (proposed).** Single-file architecture rationale.
-  Why the entire app lives in `RoundRock_Fitness_Tracker.html` with
-  React loaded from CDN and no build step. Will be partially
-  superseded by Phase 2B's decomposition work.
-- **ADR-0005 (proposed).** Translator pattern (snake_case at DB,
-  camelCase in-memory). Why translation lives at the storage adapter
-  boundary rather than at the schema layer or in components.
-- **ADR-0006 (proposed).** JSONB sessions, packages, and audit_log
-  embedded on the `clients` row. Will be partially superseded by
-  ADR-0002 Q3 for the `sessions` portion; `packages` and `audit_log`
-  remain.
-- **ADR-0007 (proposed).** Append-only audit log embedded per
-  entity, capped at 100 entries via head-trim. Why entity-local
-  rather than a centralized audit table.
-- **ADR-0008 (proposed).** Permission model: trainers EXECUTE,
-  admins set STRUCTURE. The principle and its applications across
-  the codebase.
-- **ADR-0009 (proposed).** Anon RLS prototype posture. Acceptable
-  during the prototype phase; tightening is required before APC
-  opens (April 2027 deadline) or before any clinical PHI flows
-  through the system, whichever comes first.
-- **ADR-0010 (proposed).** PIN storage as plaintext in the
-  `settings` table. Acceptable for prototype; hashing required
-  before APC opens.
+When other docs need to cross-reference a backlog topic, use the
+italicized topic name (e.g. *anon RLS prototype posture*) rather
+than a placeholder number. Once the topic commits with a real
+number, cross-references can be updated to point at it.
+
+- ***Single-file architecture rationale.*** Why the entire app lives
+  in `RoundRock_Fitness_Tracker.html` with React loaded from CDN
+  and no build step. Will be partially superseded by Phase 2B's
+  decomposition work.
+- ***Translator pattern (snake_case at DB, camelCase in-memory).***
+  Why translation lives at the storage adapter boundary rather than
+  at the schema layer or in components.
+- ***Append-only audit log embedded per entity*** (capped at 100
+  entries via head-trim). Why entity-local rather than a centralized
+  audit table. Generalizes the `clients.audit_log` slice covered by
+  ADR-0004 to the other entities that use `appendAuditEntry`.
+- ***Permission model: trainers EXECUTE, admins set STRUCTURE.***
+  The principle and its applications across the codebase.
+- ***Anon RLS prototype posture.*** Acceptable during the prototype
+  phase; tightening is required before APC opens (April 2027
+  deadline) or before any clinical PHI flows through the system,
+  whichever comes first.
+- ***PIN storage as plaintext in the `settings` table.*** Acceptable
+  for prototype; hashing required before APC opens.
 
 ---
 
 ## How to add a new ADR
 
-1. **Pick the next number.** Sequential, zero-padded. If the last
-   committed ADR is ADR-0007, the next is ADR-0008. Don't skip
-   numbers; if two ADRs are in flight simultaneously, the second to
-   commit takes the next number.
+1. **Pick the next number at commit time.** Sequential, zero-padded.
+   The next committed number follows from the last committed ADR (if
+   the last committed is ADR-0007, the next is ADR-0008). Don't skip
+   numbers in the committed sequence. Backlog items do not carry
+   pre-allocated numbers - they appear by topic and get a number
+   when they commit. If two ADRs are in flight simultaneously, the
+   second to commit takes the next number.
 2. **Write it in this file.** Append the ADR section above the
    Backlog block. The Backlog block stays at the bottom; only
    committed (non-Backlog) ADRs live in the numbered sequence above it.
@@ -356,7 +511,15 @@ than discovered later.
    one, name the old ADR in the new ADR's Context section and
    update the old ADR's Notes to point at the new one. Don't delete
    the old ADR.
-7. **Cross-reference SCHEMA.md and ARCHITECTURE.md where useful.**
+7. **Cross-references to backlog topics use the topic name, not a
+   number.** When an ADR or another doc needs to point at a topic
+   that has not yet committed, use the italicized topic name (e.g.
+   *anon RLS prototype posture*) rather than a placeholder number.
+   Backlog numbering happens at commit time only; placeholder
+   numbers in cross-references go stale the moment another topic
+   commits first. Once a topic commits, sweep cross-references to
+   point at the real number.
+8. **Cross-reference SCHEMA.md and ARCHITECTURE.md where useful.**
    Decisions that change schema shape should point at the SCHEMA.md
    section they affect. Decisions that change cross-cutting
    architecture should be reflected in the matching ARCHITECTURE.md
