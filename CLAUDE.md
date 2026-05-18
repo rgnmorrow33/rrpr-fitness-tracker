@@ -47,6 +47,13 @@ syntax errors before they reach Netlify.
 Spotted an adjacent code smell during a fix? Flag it, don't fix it
 in the same commit. Cleanups go in a dedicated commit later.
 
+### No line-number references in docs
+Docs in `/docs` (SCHEMA.md, ARCHITECTURE.md, DECISIONS.md) reference
+code in `RoundRock_Fitness_Tracker.html` by function name or section
+anchor, never by line number. The single-file app drifts; line refs
+go stale within days. Existing line refs are tracked for sweep
+under "Deferred cleanup pile."
+
 ## Writing conventions in user-facing code
 
 - No em dashes. Use space-hyphen-space ( - ), parentheses, or two
@@ -244,6 +251,17 @@ when convenient.
   CSS, Section D risk, or (b) wrap all .pill-btn usages in
   .audit-controls consistently. Defer until a Phase 2-style
   sprint can opt into shared-CSS work.
+- SCHEMA.md and ARCHITECTURE.md line-number drift. Both docs
+  reference specific line numbers in RoundRock_Fitness_Tracker.html
+  that go stale as the single-file app changes. Already drifting
+  ~22-34 lines at 3 days post-commit. Two known instances surfaced
+  in ADR-0004 Phase 1 diagnostic: SCHEMA.md says createRecurringSessions
+  line 6629 (actual 6607); SCHEMA.md says rescheduleSeriesFromHere
+  line 6695 (actual 6661). Fix: sweep both docs and convert line-number
+  references to function-name or section anchors. ARCHITECTURE.md
+  has more refs than SCHEMA.md, plan accordingly. Going-forward
+  convention is captured under "Working conventions" so the sweep
+  is one-time, not recurring.
 - Sprint P Tier C2-aligned strays surfaced during execution:
     * Two more redundant inline maxWidth: '560px' modal
       overrides at ~21459 and ~21476 (siblings to the one
