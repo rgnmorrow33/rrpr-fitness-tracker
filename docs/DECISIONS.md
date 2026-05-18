@@ -289,9 +289,9 @@ Phase 2A begins after Bucket 2 (the SCHEMA / DECISIONS / ARCHITECTURE
 artifact set) and the Selisa one-pager land. The spec for Phase 2A
 is drafted but not yet executed.
 
-Phase 2B's "single-file decomposition started" item satisfies one of
-the Tier 1 backfill candidates queued below (*single-file architecture
-rationale*).
+Phase 2B's "single-file decomposition started" item is the execution
+edge of the posture captured in ADR-0005 (single-file deployment
+posture for the prototype phase).
 
 ---
 
@@ -445,6 +445,169 @@ Cross-references:
 
 ---
 
+## ADR-0005: Single-file deployment posture for the prototype phase
+
+**Status.** Accepted (retroactive capture)
+**Date.** 2026-05-18
+
+### Context
+
+The entire tracker ships as a single file: `RoundRock_Fitness_Tracker.html`
+contains all HTML, CSS, and JavaScript (currently 25,836 lines).
+React 18 loads from `unpkg.com` as a UMD bundle. Components are
+written using `React.createElement` rather than JSX so no transpiler
+is needed. There is no build step, no module system, no bundler
+config, no `package.json`. The HTML file is the deployable.
+
+Deployment is Netlify auto-deploy from `main`: push to repo, Netlify
+rewrites `/` to `/RoundRock_Fitness_Tracker.html` per `netlify.toml`,
+iPads revalidate on every load per `_headers` cache headers, change
+reaches production iPads within ~30 seconds of merge.
+
+This shape crystallized under prototype-phase constraints: Reagan as
+sole contributor, Claude Code as the editing tool, Selisa as the QA
+partner reading only the running app (not source), no other readers.
+Adding a build pipeline would have introduced bundler config drift,
+deploy coordination, and CI cycle time without unlocking any
+capability the team needed at that horizon.
+
+ADR-0001 (the 2026-05-15 reframe) committed the tracker to multi-year
+status with APC opening April 2027. Engineering rigor obligations
+follow. The single-file shape was the right call for the prototype
+phase but is on a roadmap to change: ADR-0003 Phase 2B starts
+extracting storage adapter, translators, and at least one major view
+as separate files served via Netlify. This ADR captures the posture
+so the decomposition has an explicit starting point and so the
+criteria for when to fully unwind are documented ahead of time.
+
+### Decision
+
+Keep the single-file shape for the prototype phase. All app code
+lives in `RoundRock_Fitness_Tracker.html`. No build step, no module
+system, no test harness.
+
+Decomposition is sequenced via ADR-0003 Phase 2B (engineering
+foundation): storage adapter, translators, and at least one major
+view extracted to separate files served via Netlify. Phase 2B starts
+the unwind; full decomposition is a longer arc tracked under the
+criteria below.
+
+### Consequences
+
+**Pros (why this is the right shape for now).**
+
+- **No build pipeline.** Edit, save, commit, push - Netlify deploys
+  in ~30 seconds. No bundler config to debug, no transpile errors
+  at deploy time, no CI cycle to wait on. The deploy flow Reagan
+  can execute end-to-end is the same flow Claude Code executes.
+- **Every change is one diff.** A feature, a fix, and a refactor
+  all land as a unified diff against one file. No cross-file
+  coordination, no import-graph reasoning to verify a refactor
+  didn't break a downstream module.
+- **No bundler config drift.** Tooling that doesn't exist doesn't
+  break. No `webpack.config.js` to maintain, no `vite.config.ts` to
+  update, no Node version pinning, no `npm audit` triage cycles.
+- **Easy grep and edit.** Every symbol in the app resolves to one
+  file. Grep for a function name, find every call site, every
+  definition - one file, one result set. No "where does this live"
+  navigation cost.
+- **Onboarding is reading one file.** Claude Code can be given the
+  whole file as context. Future readers (auditors, contracted
+  developers, security reviewers) get the entire app in one place
+  without needing to assemble a mental model from module boundaries.
+
+**Cons (the costs we accept by keeping this shape).**
+
+- **Navigation slows as the file grows.** At ~26k lines, jumping
+  between related functions is several screens or a search. At 35k+
+  this compounds. The decomposition criteria below name the
+  threshold where this cost outweighs the wins.
+- **IDE perf degrades.** Syntax highlighting, autocomplete, and
+  language server features slow noticeably on a single 26k-line
+  file. Some editors refuse to parse past certain sizes. At 35k+
+  this becomes painful.
+- **No module isolation.** All functions share one scope. Helpers,
+  components, storage adapters, validators all see each other.
+  Renames cascade silently; a typo can shadow another symbol with
+  no compile-time warning.
+- **No test harness possible without restructuring.** Unit tests
+  need importable modules. Per ADR-0003 Phase 2B, the smoke test
+  harness is a blocker for Phase 2C; achieving it requires at least
+  starting decomposition.
+- **Browser DevTools and iPad Safari debugging is painful.** Stack
+  traces all resolve to `RoundRock_Fitness_Tracker.html:NNNNN` with
+  no module names. Setting breakpoints in a 26k-line file is slow;
+  bisecting a regression via stack traces compounds the navigation
+  cost above. Tolerable while Reagan + Claude Code are the only
+  readers; cost compounds if that changes.
+- **Line-number doc references drift.** SCHEMA.md, ARCHITECTURE.md,
+  and earlier ADRs cite specific line numbers in
+  `RoundRock_Fitness_Tracker.html` that go stale within days. The
+  going-forward convention (CLAUDE.md "No line-number references in
+  docs") and the existing-refs sweep (CLAUDE.md "Deferred cleanup
+  pile" entry filed in commit `8a3e26f`) close this gap once. New
+  docs use function names or section anchors only.
+
+### Decomposition criteria
+
+Decompose when any of these triggers fire. Triggers are
+non-exclusive: any one is enough.
+
+- **Concurrent contributors exceed 1.** Today Reagan + Claude Code
+  is the effective contributor set. The moment a second human is
+  writing or reviewing code in this repo, single-file becomes a
+  merge-conflict generator and a coordination cost.
+- **File exceeds 35,000 lines.** Current count is 25,836.
+  ARCHITECTURE.md already names ~25k as the inflection where the
+  shape becomes "wrong." 35k preserves ~9k of headroom (roughly
+  1-2 sprints at current pace) while staying close enough to the
+  inflection to act as a forcing function. At 35k, navigation and
+  IDE perf costs cross from tolerable to impeding.
+- **Test harness becomes a hard requirement.** ADR-0003 Phase 2B
+  names the smoke test harness as a blocker for Phase 2C (the
+  sessions normalization). When Phase 2C is the next sprint,
+  decomposition has to be far enough along to support import-based
+  testing of the persistence path. This is the gated trigger - it
+  has a known date constraint via the APC April 2027 deadline.
+- **Anyone other than Reagan or Claude Code needs to navigate or
+  read the source regularly as part of their role.** Examples: a QA
+  partner expanding into code review, a contracted developer
+  onboarding, a security or compliance auditor. "Regularly" and
+  "part of their role" rule out one-off reads (e.g., Selisa pulling
+  the file once to look at a specific function). If a
+  sustained-reader role opens, the cost of single-file becomes a
+  coordination problem rather than just an inconvenience.
+
+### Notes
+
+This ADR is a retroactive capture of existing architecture, not a
+new decision. Status lands as Accepted directly per the "How to
+add a new ADR" guidance for backfill ADRs that document existing
+patterns.
+
+ADR-0003 Phase 2B starts the unwind by extracting the storage
+adapter, translators, and at least one major view as separate files
+served via Netlify. Phase 2B does not have to finish the
+decomposition; it has to start one with a coherent pattern that
+subsequent work can follow. When Phase 2B commits, this ADR is
+partially superseded for the storage adapter, translator, and
+extracted-view portions. Full decomposition is a longer arc -
+additional views, helpers, and cross-cutting validators will land
+in follow-up sprints driven by the criteria above.
+
+Cross-references:
+- ADR-0001 for the multi-year reframe that creates the rigor
+  obligation.
+- ADR-0003 Phase 2B for the engineering foundation work that starts
+  the decomposition unwind.
+- ARCHITECTURE.md section 1 and section 9 for the deployment model
+  and the named refactor target.
+- CLAUDE.md "Deferred cleanup pile" entry (commit `8a3e26f`) for
+  the line-number drift sweep and the going-forward convention
+  against new line-number references.
+
+---
+
 ## Backlog of proposed ADRs
 
 The following decisions are foundational to the system as it stands
@@ -460,10 +623,6 @@ italicized topic name (e.g. *anon RLS prototype posture*) rather
 than a placeholder number. Once the topic commits with a real
 number, cross-references can be updated to point at it.
 
-- ***Single-file architecture rationale.*** Why the entire app lives
-  in `RoundRock_Fitness_Tracker.html` with React loaded from CDN
-  and no build step. Will be partially superseded by Phase 2B's
-  decomposition work.
 - ***Translator pattern (snake_case at DB, camelCase in-memory).***
   Why translation lives at the storage adapter boundary rather than
   at the schema layer or in components.

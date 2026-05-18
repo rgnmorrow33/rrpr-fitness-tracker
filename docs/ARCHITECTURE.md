@@ -56,7 +56,8 @@ all of the above.
 bundle; there is no build step. This was the right shape for the
 prototype phase because it removed every layer between "edit the
 file" and "see the change on production iPads." It is becoming the
-wrong shape as the codebase grows past 25k lines; Phase 2B of the
+wrong shape as the codebase grows past 25k lines; ADR-0005 captures
+the posture and the decomposition criteria, and Phase 2B of the
 pairs implementation (per ADR-0003) starts the decomposition.
 
 **The reframe.** ADR-0001 captures the 2026-05-15 reframe: this is
@@ -314,9 +315,9 @@ follow-up sweep to find other surfaces that should be converted.
 This is current tribal knowledge; migration into `/docs` as a
 committed artifact is queued (see section 9).
 
-**ADR log.** Architectural decisions land in `DECISIONS.md`. Four
-foundational ADRs (ADR-0001 through ADR-0004) exist as of this
-writing; six Tier 1 backfill topics are queued in the DECISIONS.md
+**ADR log.** Architectural decisions land in `DECISIONS.md`. Five
+foundational ADRs (ADR-0001 through ADR-0005) exist as of this
+writing; five Tier 1 backfill topics are queued in the DECISIONS.md
 backlog by topic name (numbers assigned at commit time, not
 pre-allocated).
 
@@ -550,10 +551,12 @@ don't get rediscovered in a crisis.
   via ADR-0003 Phase 2C. The largest single architectural shift
   queued. ~8 to 12 weeks of work, gated on Phase 2B foundation
   completing.
-- **Single-file decomposition.** Per ADR-0003 Phase 2B. Extract
-  storage adapter, translators, and at least one major view into
-  separate files served via Netlify. ~4 to 6 weeks. Doesn't need to
-  finish in Phase 2B, but needs to start with a coherent pattern.
+- **Single-file decomposition.** Posture and decomposition criteria
+  captured in ADR-0005; execution sequenced via ADR-0003 Phase 2B.
+  Extract storage adapter, translators, and at least one major view
+  into separate files served via Netlify. ~4 to 6 weeks. Doesn't
+  need to finish in Phase 2B, but needs to start with a coherent
+  pattern.
 - **Schema migration discipline.** Version-controlled SQL in
   `/sql/migrations/` with timestamped names. Today the only file in
   `/sql` is `wipe_pre_alpha_clients.sql`, a one-time data wipe.
