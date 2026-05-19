@@ -16179,6 +16179,19 @@
 
     var canEditClassStructure = ctx.can('canEditClassStructure');
 
+    /* Log Attendance gate. Allowed for: admin/lead (canEditClassStructure),
+       the assigned regular instructor, or an approved sub. 'claimed' (sub
+       picked it up but admin hasn't approved yet) does NOT pass — covering
+       trainers still reach the log modal via CoverClassModal, which forces
+       their name into the modal directly and bypasses ClassDetail. */
+    var _logGateUser = (ctx.currentUserName && ctx.currentUserName()) || null;
+    var canLogAttendance = canEditClassStructure
+      || trainerNameMatches(_logGateUser, c.instructor)
+      || (c.subAssignments || []).some(function(s){
+           return trainerNameMatches(_logGateUser, s.subInstructor)
+             && subStatus(s) === 'approved';
+         });
+
     /* Service-recovery target for one of this class's cancellations. */
     var classRecoveryTuple = useState(null);
     var classRecoveryTarget = classRecoveryTuple[0];
@@ -16250,7 +16263,7 @@
           )
         ),
         e('div', { className: 'fab-row' },
-          e('button', { className: 'btn btn-teal', onClick: function(){ setLogOpen(true); } }, '+ Log Attendance'),
+          canLogAttendance && e('button', { className: 'btn btn-teal', onClick: function(){ setLogOpen(true); } }, '+ Log Attendance'),
           canManageSubs && e('button', { className: 'btn btn-amber', onClick: function(){ setSubRequestOpen(true); } }, 'Request Sub'),
           /* Edit Class is admin-only: changes class structure (name, time,
              instructor, room, capacity, etc.). Trainers retain attendance,
