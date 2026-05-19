@@ -6,7 +6,7 @@ pieces fit. The system has been tribal knowledge between Reagan,
 Selisa, and Code Claude for long enough; this document is the
 attempt to make it legible.
 
-**Last updated.** 2026-05-15
+**Last updated.** 2026-05-18
 
 **Cross-references.**
 - SCHEMA.md is the source of truth for table shapes, column types,
@@ -268,7 +268,7 @@ mutation type. The current set, observed in code:
 
 | Entity | Actions |
 |---|---|
-| client | `session_create`, `session_signoff`, `session_delete`, `package_added`, `package_edited`, `package_deleted`, `package_restored`, `package_hard_deleted`, `recurring_create`, `recurring_reschedule`, `recurring_cancel_all`, `consult_claim`, `soft_delete`, `restore`, `recovery_logged`, `dedup_cleanup`, `migrate_package_type_prefix`, `strip_writeonly_pkg_fields` |
+| client | `session_create`, `session_signoff`, `session_delete`, `package_added`, `package_edited`, `package_deleted`, `package_restored`, `package_hard_deleted`, `recurring_create`, `recurring_reschedule`, `recurring_cancel_all`, `consult_claim`, `soft_delete`, `restore`, `recovery_logged`, `dedup_cleanup`, `migrate_package_type_prefix`, `strip_writeonly_pkg_fields`, `migrate_package_participants` (Phase 2A lazy migration), `pair_participant_confirmed` (v4.20), `pair_candidate_dismissed` (v4.20) |
 | closure | `closure_added`, `closure_deleted` |
 | time_off | `timeoff_requested`, `timeoff_deleted`, `update` (decision) |
 | lead | `lead_status_change`, `lead_reassigned` |

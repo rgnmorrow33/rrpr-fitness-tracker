@@ -12,7 +12,7 @@ followup. Until that lands, treat any divergence between this doc
 and the live DB as a doc bug, fix it here, and note it in the
 commit message.
 
-**Last updated.** 2026-05-15
+**Last updated.** 2026-05-18
 
 **Cross-references.**
 - ARCHITECTURE.md explains the why behind these shapes (JSONB
@@ -219,24 +219,50 @@ capped at 4 hr per period.
 ### `admin_items`
 
 Admin time entries. Includes manual admin categories (Program
-Creation, Training, Community Event, Other), service recovery rows,
-and custom categories.
+Creation, Meeting, Programming, Admin Task, Training, Community
+Event, Other), service recovery rows, and custom categories.
+
+The live table also carries four legacy columns from a pre-cutover
+shape that the current code no longer reads or writes. They are
+documented in a separate sub-table below for completeness and are
+slated for cleanup in a future migration sprint.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
-| `type` | text | One of the canonical categories or "custom". |
-| `custom_type` | text | Free-text label when `type === 'custom'`. |
-| `time_in` | timestamptz | Start. |
-| `time_out` | timestamptz | End. |
-| `assignees` | text[] | Trainer names. NOT JSONB - flat text[]. |
-| `notes` | text | Free text. |
+| `title` | text | Required at write-time. Free-text label (e.g. "Q3 program planning"). |
+| `type` | text | One of the canonical `ITEM_TYPES` or "Other". |
+| `custom_type` | text | Free-text label when `type === 'Other'`. |
+| `date` | date | The day the admin time is logged against (YYYY-MM-DD). |
+| `time_in` | text | "HH:MM" 24h start. Stored as text, not timestamptz - the value is wall-clock time without a date component (the date lives in `date`). |
+| `time_out` | text | "HH:MM" 24h end. Same text-not-timestamptz reasoning as `time_in`. |
+| `hours` | numeric | Derived from `time_in` / `time_out` at write time via `hoursFromTimes`; cached on the row so read paths don't recompute. |
+| `assignees` | text[] | Trainer names. Flat text[] with `DEFAULT ARRAY[]`. NOT JSONB. |
+| `note` | text | Free text. Singular column name (not `notes`). |
 | `source_session_id` | uuid | Set on service recovery rows; points to the session that triggered the recovery. |
 | `created_by` | text | Sign-in name of creator. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2368-2375).
+**Translator mapping** (line 2368-2375). The translator covers only
+the snake/camel field pairs; columns whose camel and snake forms
+match (e.g. `title`, `date`, `hours`, `assignees`, `note`) pass
+through unchanged.
+
+**Legacy / pre-cutover columns.** Present in the live DB but neither
+read nor written by current code. Captured here so a future cleanup
+migration has a single reference for what to drop:
+
+| Column | Type | Notes |
+|---|---|---|
+| `trainer_name` | text | Pre-cutover single-assignee field. Superseded by `assignees[]`. |
+| `description` | text | Pre-cutover free-text field. Superseded by `title` and `note`. |
+| `category` | text | Pre-cutover category field. Superseded by `type` and `custom_type`. |
+| `approved` | boolean | Pre-cutover approval-workflow flag. Not surfaced anywhere in current code. |
+
+The drop is deferred to a future migration sprint. Until that lands,
+treat these columns as inert - do not stamp them on new rows and do
+not rely on their values on existing rows.
 
 ### `referrals`
 
@@ -436,23 +462,25 @@ package CRUD flow.
 ```
 {
   id: uuid,
-  type: text,                  // canonical taxonomy, e.g. "CMRC-PT-10"
-  template_id: text,           // PT_PACKAGES_BY_FACILITY entry id
-  location: text,              // "CMRC" or "Baca"
-  sessions: integer,           // package size
+  type: text,                              // canonical taxonomy, e.g. "CMRC-PT-10"
+  template_id: text,                       // PT_PACKAGES_BY_FACILITY entry id
+  location: text,                          // "CMRC" or "Baca"
+  sessions: integer,                       // package size
   price: number,
   amountPaid: number,
-  purchaseDate: text,          // YYYY-MM-DD
-  paymentType: text,           // "Card" / etc
-  source: text,                // "seed" / "rectrac_import" / "rectrac_reup" / etc
+  purchaseDate: text,                      // YYYY-MM-DD
+  paymentType: text,                       // "Card" / etc
+  source: text,                            // "seed" / "rectrac_import" / "rectrac_reup" / etc
   is_pairs: boolean,
   is_consult: boolean,
   is_intro: boolean,
-  validDays: integer,          // expiration window; drives package_expiring sweep
+  validDays: integer,                      // expiration window; drives package_expiring sweep
   // Phase 2A participant metadata (ADR-0003 Phase 2A intent annotation):
-  participant_ids: uuid[],     // consumer set; solo defaults to [client_id]
-  package_size: integer,       // 1 = solo, 2 = pair, N = group
-  primary_holder_id: uuid,     // billing/admin owner; same as the only participant for solo
+  participant_ids: uuid[],                 // IDs of all participants on the package. Length grows as the Pairs to Confirm queue confirms slots. Solo defaults to [client_id].
+  package_size: integer,                   // Max participants. Today computed from is_pairs ? 2 : 1; a future package_size meta field on the PT_PACKAGES_BY_FACILITY template would take over.
+  primary_holder_id: uuid,                 // Canonical primary client ID (billing/admin owner). Same as the only participant for solo.
+  dismissed_participant_candidates: uuid[],// v4.20 additive. Client IDs explicitly dismissed from the Pairs to Confirm queue so they don't resurface on future renders.
+  participants_at_creation: integer,       // v4.21 forward-only. Count of participant_ids at the moment the package was created. Not retroactively stamped on pre-v4.21 rows.
   // Lifecycle fields, present when applicable:
   deletedAt: timestamptz,
   deletedBy: text,
@@ -479,7 +507,18 @@ package CRUD flow.
   The `migrate_package_participants` backfill stamps solo defaults on
   every existing package; pair templates get `package_size: 2` but
   `participant_ids` stays `[client_id]` until the admin "designate as
-  shared" flow links the partner.
+  shared" flow (Pairs to Confirm queue) links the partner.
+- `dismissed_participant_candidates` (v4.20) backs the dismiss action
+  in the Pairs to Confirm queue. Dismissals are sticky per package -
+  a dismissed client never resurfaces as a candidate even on full
+  realtime reload. Cleared only by an explicit admin un-dismiss flow,
+  which does not exist today.
+- `participants_at_creation` (v4.21) snapshots the participant count
+  at package creation time. Used by the Pairs purchase flow to
+  distinguish "designated at purchase" packages from "designated
+  later via Pairs to Confirm" packages without walking the audit log.
+  Pre-v4.21 rows do not carry this field; readers should treat its
+  absence as "unknown" rather than zero.
 
 ### `clients.sessions[]`
 
@@ -556,7 +595,18 @@ ring buffer, not a global audit table.
 `package_hard_deleted`, `recurring_create`, `recurring_reschedule`,
 `recurring_cancel_all`, `consult_claim`, `soft_delete`, `restore`,
 `recovery_logged`, `dedup_cleanup`, `migrate_package_type_prefix`,
-`strip_writeonly_pkg_fields`.
+`strip_writeonly_pkg_fields`, `migrate_package_participants` (Phase
+2A lazy migration that stamps `participant_ids` / `package_size` /
+`primary_holder_id` on existing packages), `pair_participant_confirmed`
+(v4.20, Pairs to Confirm queue confirms a candidate),
+`pair_candidate_dismissed` (v4.20, Pairs to Confirm queue dismisses
+a candidate; `after.dismissed_client_id` carries the dismissed id).
+
+**Per-action payload extensions.** Most actions store the full
+`before` / `after` package record. v4.21 extended `package_added`'s
+`after` payload to include `participants_at_creation: integer` (the
+count of `participant_ids` at the moment the package was created).
+Older `package_added` entries do not carry this field.
 
 **Action vocabulary observed in code (other entities).**
 `closure_added`, `closure_deleted`, `timeoff_requested`,
