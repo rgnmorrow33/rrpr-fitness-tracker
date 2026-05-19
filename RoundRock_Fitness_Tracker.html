@@ -10039,7 +10039,7 @@
         }
       },
         e('span', null, '\ud83d\udd14'),
-        e('span', null, 'Available pickups (' + totalCount + ')')
+        e('span', null, 'Heads up (' + totalCount + ')')
       ),
       e('div', {
         style: {
@@ -12159,7 +12159,7 @@
       e(ActiveBanner, { ctx: ctx }),
       e('div', { className: 'trainer-content' },
         /* v2.6: Notification bar shows on every tab except time_card.
-           Surfaces available pickups across categories. */
+           Surfaces alerts across categories. */
         tab !== 'time_card' && e(TrainerNotificationBar, {
           ctx: ctx,
           onJumpToTab: function(t, opts){ navigate(t, opts); }
