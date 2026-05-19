@@ -15590,6 +15590,19 @@
     var coverLog = coverLogTuple[0];
     var setCoverLog = coverLogTuple[1];
 
+    /* Full-schedule browse mode: cross-trainer GX week, optional facility
+       chip filter. Entered via the "Full schedule" header button. Tap any
+       card to open the existing ClassDetail (same setDetailId path as
+       My Classes). Exit via the back chevron in the mode header. State
+       lives at the component top so the hook order stays stable across
+       renders. */
+    var fullSchedOpenTuple = useState(false);
+    var fullSchedOpen = fullSchedOpenTuple[0]; var setFullSchedOpen = fullSchedOpenTuple[1];
+    var fullSchedOffsetTuple = useState(0);
+    var fullSchedOffset = fullSchedOffsetTuple[0]; var setFullSchedOffset = fullSchedOffsetTuple[1];
+    var fullSchedFacilityTuple = useState('all');
+    var fullSchedFacility = fullSchedFacilityTuple[0]; var setFullSchedFacility = fullSchedFacilityTuple[1];
+
     var myClasses = useMemo(function(){
       return ctx.classes.filter(function(c){ return trainerNameMatches(trainerName, c.instructor); });
     }, [ctx.classes, trainerName]);
@@ -15683,6 +15696,184 @@
       );
     }
 
+    /* Full schedule mode: cross-trainer week of GX classes, optionally
+       filtered to one facility. Mirrors the available_subs early-return
+       shape. Reuses occurrencesInWindow (same primitive TrainerWeekView
+       uses) without the per-trainer teaching filter so every scheduled
+       class shows up. Cards tap into ClassDetail via setDetailId, same
+       as My Classes. */
+    if (fullSchedOpen) {
+      var fsTodayYMD = todayStr();
+      var fsTodayDate = parseYMD(fsTodayYMD);
+      var fsStartOfWeek = (function(){
+        var d = new Date(fsTodayDate.getTime());
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - d.getDay()); /* back to Sunday */
+        return d;
+      })();
+      var fsWeekStart = addDays(fsStartOfWeek, fullSchedOffset * 7);
+      var fsWeekEnd = addDays(fsWeekStart, 6);
+      var fsCanGoBack = fullSchedOffset > -4;
+      function fsWeekLabel(){
+        var s = fsWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        var en = fsWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (fullSchedOffset === 0) return 'This week · ' + s + ' – ' + en;
+        if (fullSchedOffset === 1) return 'Next week · ' + s + ' – ' + en;
+        if (fullSchedOffset === -1) return 'Last week · ' + s + ' – ' + en;
+        return s + ' – ' + en;
+      }
+
+      var fsOccs = occurrencesInWindow(ctx.classes || [], fsWeekStart, fsWeekEnd, ctx.closures);
+      /* Skip cancellations and closed dates so the browse view shows what
+         is actually happening. Facility filter applies after the window
+         expansion so closures still match the right facility. */
+      var fsByDate = {};
+      fsOccs.forEach(function(o){
+        if (o.isClosed || o.isCancelled) return;
+        if (fullSchedFacility !== 'all' && (o.cls.location || '') !== fullSchedFacility) return;
+        if (!fsByDate[o.date]) fsByDate[o.date] = [];
+        fsByDate[o.date].push(o);
+      });
+      Object.keys(fsByDate).forEach(function(k){
+        fsByDate[k].sort(function(a, b){
+          return (a.cls.startTime || '') < (b.cls.startTime || '') ? -1 : 1;
+        });
+      });
+
+      function fsFacilityChip(value, label){
+        var active = fullSchedFacility === value;
+        return e('button', {
+          key: 'fac-' + value,
+          className: 'btn btn-sm ' + (active ? 'btn-primary' : 'btn-outline'),
+          onClick: function(){ setFullSchedFacility(value); }
+        }, label);
+      }
+
+      /* Per-occurrence card. Inlined from the TrainerWeekView gxCard
+         pattern (L10755-10789) — same stripe + meta shape, with the
+         instructor name added since this view crosses trainers. */
+      function fsCard(o){
+        var c = o.cls;
+        var stripeColor = o.logged
+          ? 'var(--moss)'
+          : (CLASS_TYPE_COLOR[c.classType] || 'var(--teal)');
+        var displayInstructor = o.scheduledInstructor || c.instructor || '—';
+        var isSub = !!(o.assignedSub && o.scheduledInstructor && o.scheduledInstructor !== c.instructor);
+        return e('div', {
+          key: 'fs-' + c.id + ':' + o.date,
+          className: 't-session',
+          style: { '--stripe-color': stripeColor, background: o.logged ? 'var(--moss-bg)' : '#fff' },
+          onClick: function(){
+            setDetailId(c.id);
+            setHeaderContext({
+              title: c.name, sub: c.location,
+              onBack: function(){ setDetailId(null); setHeaderContext(null); }
+            });
+          }
+        },
+          e('div', { className: 't-session-row' },
+            e('div', { className: 't-session-title' }, c.name + (o.logged ? ' ✓' : '')),
+            e('span', { className: 'pill pill-' + ((c.location === 'CMRC') ? 'cmrc' : 'baca') }, c.location || '—')
+          ),
+          e('div', { className: 't-session-meta' },
+            e('span', null, c.startTime ? formatTime12(c.startTime) : ''),
+            c.endTime && e('span', null, '·'),
+            c.endTime && e('span', null, formatTime12(c.endTime)),
+            e('span', null, '·'),
+            e('span', null, displayInstructor + (isSub ? ' (sub)' : '')),
+            c.room && e('span', null, '·'),
+            c.room && e('span', null, c.room)
+          )
+        );
+      }
+
+      var fsDays = [];
+      for (var fsI = 0; fsI < 7; fsI++) {
+        var fsD = addDays(fsWeekStart, fsI);
+        var fsYmd = toYMD(fsD);
+        var fsIsToday = fsYmd === fsTodayYMD;
+        var fsDayLabel = fsD.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+        var fsList = fsByDate[fsYmd] || [];
+        fsDays.push(e('div', {
+          key: fsYmd,
+          style: {
+            background: fsIsToday ? 'var(--cream-2)' : '#fff',
+            border: '1.5px solid ' + (fsIsToday ? 'var(--teal)' : 'var(--border)'),
+            borderRadius: '12px',
+            padding: '10px 12px',
+            marginBottom: '10px'
+          }
+        },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: fsList.length ? '8px' : '0', flexWrap: 'wrap' } },
+            e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, fsDayLabel),
+            fsIsToday && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '999px', background: 'var(--teal)', color: '#fff', fontWeight: 700, letterSpacing: '0.05em' } }, 'TODAY'),
+            e('span', { style: { fontSize: '11px', color: 'var(--slate-soft)', marginLeft: 'auto' } }, fsList.length + (fsList.length === 1 ? ' class' : ' classes'))
+          ),
+          fsList.length === 0
+            ? e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No GX classes scheduled.')
+            : fsList.map(fsCard)
+        ));
+      }
+
+      return e('div', null,
+        e('div', { className: 'section-head' },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+            e('button', {
+              className: 'btn btn-ghost btn-sm',
+              onClick: function(){ setFullSchedOpen(false); setFullSchedOffset(0); },
+              'aria-label': 'Back to My Classes'
+            }, '← My classes'),
+            e('div', null,
+              e('h2', null, 'Full schedule'),
+              e('div', { className: 'meta' }, 'All GX classes across facilities · tap a card for details')
+            )
+          )
+        ),
+        /* Week navigation - matches TrainerWeekView treatment so the
+           paging feels identical across surfaces. */
+        e('div', {
+          style: {
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: '10px',
+            background: 'var(--navy)', color: '#fff',
+            padding: '10px 14px', borderRadius: '12px', marginBottom: '10px'
+          }
+        },
+          e('button', {
+            onClick: function(){ if (fsCanGoBack) setFullSchedOffset(fullSchedOffset - 1); },
+            disabled: !fsCanGoBack,
+            'aria-label': 'Previous week',
+            style: {
+              background: 'transparent', border: 'none',
+              color: fsCanGoBack ? '#fff' : 'rgba(255,255,255,0.3)',
+              fontSize: '20px', cursor: fsCanGoBack ? 'pointer' : 'not-allowed',
+              padding: '4px 10px'
+            }
+          }, '←'),
+          e('div', { style: { fontSize: '14px', fontWeight: 700, textAlign: 'center', flex: 1 } }, fsWeekLabel()),
+          e('button', {
+            onClick: function(){ setFullSchedOffset(fullSchedOffset + 1); },
+            'aria-label': 'Next week',
+            style: {
+              background: 'transparent', border: 'none', color: '#fff',
+              fontSize: '20px', cursor: 'pointer', padding: '4px 10px'
+            }
+          }, '→')
+        ),
+        fullSchedOffset === -4 && e('div', { style: { fontSize: '11px', color: 'var(--slate-soft)', fontStyle: 'italic', marginBottom: '8px', textAlign: 'center' } },
+          'Earliest viewable week (4 weeks back).'
+        ),
+        /* Facility chip toggle. Default All; CMRC / Baca scope the
+           rendered occurrence set. */
+        e('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' } },
+          fsFacilityChip('all', 'All'),
+          fsFacilityChip('CMRC', 'CMRC'),
+          fsFacilityChip('Baca', 'Baca')
+        ),
+        fsDays
+      );
+    }
+
     return e('div', null,
       /* Upcoming sub assignments - shown above their own classes */
       upcomingSubs.length > 0 && e('div', { style: { marginBottom: '20px' } },
@@ -15729,6 +15920,7 @@
           e('div', { className: 'meta' }, myClasses.length + ' classes · ' + myClasses.reduce(function(s,c){ return s + (c.attendance || []).length; }, 0) + ' sessions logged')
         ),
         e('div', { style: { display: 'flex', gap: '8px' } },
+          e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setFullSchedOpen(true); } }, 'Full schedule'),
           e('button', { className: 'btn btn-amber btn-sm', onClick: function(){ setCoverOpen(true); } }, 'Pick up a class'),
           ctx.can('canAddClass') && e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setNewOpen(true); } }, '+ New Class')
         )
