@@ -53,9 +53,10 @@ Acceptable for prototype. Tighten before APC opens (April 2027) or
 before any clinical PHI flows through the system, whichever first.")
 The codebase contains zero RLS-aware paths.
 
-The 12-table `app-changes` realtime channel is set up at
-`RoundRock_Fitness_Tracker.html` line 5913. The per-trainer
-`notifications-<trainerId>` channel is at line 2856.
+The 12-table `app-changes` realtime channel is set up in the
+`buildAppChanges` closure of the main realtime `useEffect`. The
+per-trainer `notifications-<trainerId>` channel is built in
+`buildNotifications` inside the notifications storage adapter.
 
 ---
 
@@ -94,14 +95,15 @@ the primary target of ADR-0002 / ADR-0003 normalization work.
 | `deleted_at` | timestamptz | Soft-delete timestamp. |
 | `deleted_by` | text | Soft-delete actor. |
 
-**Translator mapping** (`RoundRock_Fitness_Tracker.html:2327-2344`):
-camelCase in-memory → snake_case at DB for the 13 pairs in the
-makeFieldTranslator map. Unmapped keys pass through unchanged.
+**Translator mapping** (`translate.clients`): camelCase in-memory →
+snake_case at DB for the 13 pairs in the `makeFieldTranslator` map.
+Unmapped keys pass through unchanged.
 
 **Soft FK references** (no DB constraint, enforced by code):
 - `from_queue_id` → `leads.id`
 - `trainer_name` → `trainers.name` (rename cascade in
-  `RenameTrainerModal`, line 22960+, rewrites this column on rename)
+  `EditTrainerModal`'s preview-step `Promise.all` rewrites this
+  column on rename)
 
 ### `classes`
 
@@ -133,7 +135,7 @@ attendance and sub coverage state inside JSONB columns.
 | `deleted_at` | timestamptz | Soft-delete. |
 | `deleted_by` | text | Soft-delete actor. |
 
-**Translator mapping** (line 2346-2361).
+**Translator mapping** (`translate.classes`).
 
 ### `wros`
 
@@ -152,16 +154,16 @@ are promoted to flat columns, everything else lives in `data`.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2517-2561, custom). The flat columns are
+**Translator mapping** (`translate.wros`, custom). The flat columns are
 the ones the audit / time-card queries filter or count by; the rest
 stays in JSONB so the WRO form can evolve without migrations.
 
 ### `leads`
 
 Consult queue / leads pipeline. Confirmed column set via the May 11
-information_schema query (preserved in code as `LEADS_ALLOWED_COLUMNS`
-at line 2621-2628). Writes are whitelist-filtered before upsert per
-Patch R - any key not in the allowed list is dropped at the wire.
+information_schema query (preserved in code as `LEADS_ALLOWED_COLUMNS`).
+Writes are whitelist-filtered before upsert per Patch R - any key not
+in the allowed list is dropped at the wire.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -189,7 +191,7 @@ Patch R - any key not in the allowed list is dropped at the wire.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2400-2424).
+**Translator mapping** (`translate.leads`).
 
 **Local-only fields** (in-memory only, dropped at the translator):
 - `followUpBy`, `rectracMemberId`, `packageInfo`, `lostAt`, `date`
@@ -214,7 +216,7 @@ capped at 4 hr per period.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2363-2366).
+**Translator mapping** (`translate.contacts`).
 
 ### `admin_items`
 
@@ -244,7 +246,7 @@ slated for cleanup in a future migration sprint.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2368-2375). The translator covers only
+**Translator mapping** (`translate.adminItems`). The translator covers only
 the snake/camel field pairs; columns whose camel and snake forms
 match (e.g. `title`, `date`, `hours`, `assignees`, `note`) pass
 through unchanged.
@@ -278,7 +280,7 @@ PT referrals between trainers.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2377-2382).
+**Translator mapping** (`translate.referrals`).
 
 ### `closures`
 
@@ -295,7 +297,7 @@ Facility closure dates.
 | `updated_at` | timestamptz | |
 | `audit_log` | jsonb | Append-only. |
 
-**Translator mapping** (line 2384-2388).
+**Translator mapping** (`translate.closures`).
 
 ### `trainers`
 
@@ -318,11 +320,12 @@ to false (no DELETE).
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator** (line 2431-2463, custom): not field-pair-based; the
-toSupabase/fromSupabase functions hard-code the shape.
+**Translator** (`translate.trainers`, custom): not field-pair-based;
+the `toSupabase` / `fromSupabase` functions hard-code the shape.
 
 **Unique constraint**: `trainers_name_unique` on `name`. Required for
-the upsert-by-name save pattern (line 2774).
+the upsert-by-name save pattern (`onConflict: 'name'` in
+`storage.trainers.save`).
 
 ### `schedule_versions`
 
@@ -342,7 +345,7 @@ a `data` JSONB carrying the class list snapshot for that version.
 | `deleted_by` | text | |
 | `data` | jsonb | `{endDate, activatedAt, classes[]}`. |
 
-**Translator** (line 2477-2510, custom).
+**Translator** (`translate.scheduleVersions`, custom).
 
 ### `trainer_time_off`
 
@@ -367,7 +370,7 @@ Per-trainer absence requests with approval workflow.
 | `deleted_at` | timestamptz | |
 | `deleted_by` | text | |
 
-**Translator mapping** (line 2594-2609).
+**Translator mapping** (`translate.timeOff`).
 
 ### `announcement_banners`
 
@@ -384,10 +387,10 @@ Short-lived ops broadcasts.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Translator mapping** (line 2393-2398).
+**Translator mapping** (`translate.announcementBanners`).
 
 Banners are the only entity that uses real `DELETE` instead of
-soft-delete (line 7063-7068, Patch E).
+soft-delete (`persistBannerDelete`, Patch E).
 
 ### `notifications`
 
@@ -404,9 +407,9 @@ pattern: per-trainer filtered channel rather than the shared
 | `read_at` | timestamptz | Null until the trainer marks read. |
 | `created_at` | timestamptz | |
 
-No `updated_at` column. The translator (line 2567-2586) is custom
-specifically to avoid auto-stamping one - the standard
-`makeFieldTranslator` would break the patch path that flips
+No `updated_at` column. The translator (`translate.notifications`,
+custom) is shaped specifically to avoid auto-stamping one - the
+standard `makeFieldTranslator` would break the patch path that flips
 `read_at`.
 
 ### `settings`
@@ -421,8 +424,8 @@ migrations.
 | `value` | jsonb | Arbitrary payload. |
 | `updated_at` | timestamptz | |
 
-Used via the `makeSettingsRow` factory (line 2693). Not in any
-realtime publication - settings are read on demand.
+Used via the `makeSettingsRow` factory. Not in any realtime
+publication - settings are read on demand.
 
 ---
 
@@ -455,9 +458,9 @@ keep it in lockstep with the in-code constructors.
 
 ### `clients.packages[]`
 
-Array of package records. Constructed in `buildSeedClients`
-(line 3521) and `addPackageToClient` (line 3866). Mutated by the
-package CRUD flow.
+Array of package records. Constructed in `buildSeedClients` (the
+fallback seed builder) and `addPackageToClient` (the canonical add
+path). Mutated by the package CRUD flow.
 
 ```
 {
@@ -522,9 +525,8 @@ package CRUD flow.
 
 ### `clients.sessions[]`
 
-Array of PT session records. Constructed in `addSession`
-(line 6507), `createRecurringSessions` (line 6629), and
-`rescheduleSeriesFromHere` (line 6695).
+Array of PT session records. Constructed in `addSession`,
+`createRecurringSessions`, and `rescheduleSeriesFromHere`.
 
 ```
 {
@@ -567,7 +569,7 @@ Array of PT session records. Constructed in `addSession`
 
 Append-only audit array. Same shape applies to `audit_log` on
 `trainers`, `leads`, `closures`, `classes`, and anything else that
-goes through `appendAuditEntry` (line 3810).
+goes through `appendAuditEntry`.
 
 ```
 {
@@ -650,11 +652,13 @@ Indices and uniqueness constraints are not documented in the
 codebase. Known constraints inferred from code patterns:
 
 - `trainers_name_unique` on `trainers.name`. Required by the
-  upsert-by-name save pattern (`onConflict: 'name'` at line 2774).
+  upsert-by-name save pattern (`onConflict: 'name'` in
+  `storage.trainers.save`).
 - `id` PK on every table. The `onConflict: 'id'` upsert pattern is
   used universally elsewhere.
 - `settings_key_unique` (or PK on `key`) on `settings.key`. Required
-  by `onConflict: 'key'` at line 2717.
+  by `onConflict: 'key'` in `storage.adminPin.save` (and any other
+  settings row built via `makeSettingsRow`).
 
 Other indices (foreign-key-style lookups, query optimization indices)
 exist server-side but are not referenced in code. Documenting them
@@ -668,7 +672,7 @@ The schema has no formal foreign key constraints. The following
 relationships are enforced by code only:
 
 - `clients.from_queue_id` → `leads.id`
-- `clients.trainer_name` → `trainers.name` (cascade-updated on rename via `RenameTrainerModal`)
+- `clients.trainer_name` → `trainers.name` (cascade-updated on rename via `EditTrainerModal`)
 - `clients.rectrac_member_id` → external RecTrac system (no in-DB target)
 - `classes.instructor` → `trainers.name` (cascade-updated on rename)
 - `classes.schedule_version_id` → `schedule_versions.id`
@@ -682,9 +686,12 @@ relationships are enforced by code only:
 - `notifications.target_trainer_id` → `trainers.id`
 - `admin_items.assignees[]` → `trainers.name` (cascade-updated on rename via flat text[])
 
-The cascade query at line 22866-22956 of the tracker is the
-authoritative reference for which fields participate in the rename
-cascade and which are denormalized name copies.
+The cascade query inside `EditTrainerModal`'s preview-step
+`Promise.all` (was `RenameTrainerModal` before v4.x naming cleanup)
+is the authoritative reference for which fields participate in the
+rename cascade and which are denormalized name copies. Search the
+HTML for `function EditTrainerModal` then for the `Promise.all`
+block that fans out the per-table count queries.
 
 ---
 

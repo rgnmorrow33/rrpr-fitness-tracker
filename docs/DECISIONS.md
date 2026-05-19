@@ -162,9 +162,9 @@ push consequences onto the others.
   backup / restore drill, smoke test harness) in place. Phase 2B
   exists to satisfy that prerequisite.
 - **Read-path rewrites.** Every code path that reads `client.sessions`
-  needs to be ported. There are many. The audit cascade query at
-  RoundRock_Fitness_Tracker.html:22885 is one of the heavier ones;
-  many sub-components read the field directly.
+  needs to be ported. There are many. The audit cascade query inside
+  `EditTrainerModal`'s preview-step `Promise.all` is one of the
+  heavier ones; many sub-components read the field directly.
 - **Future flexibility.** Group fitness packages, family packages,
   and corporate wellness contracts all become expressible without
   another foundational shift.

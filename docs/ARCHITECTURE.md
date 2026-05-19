@@ -145,9 +145,8 @@ stay JSONB pending separate review.
 **Translator pattern.** All Supabase reads and writes pass through a
 translator layer at the storage adapter boundary. In-memory
 representations are camelCase; database columns are snake_case. The
-`makeFieldTranslator` factory at `RoundRock_Fitness_Tracker.html:2292`
-generates symmetric `toSupabase` / `fromSupabase` functions from a
-field-pair map. Custom translators exist for entities whose shapes
+`makeFieldTranslator` factory generates symmetric `toSupabase` /
+`fromSupabase` functions from a field-pair map. Custom translators exist for entities whose shapes
 diverge from simple field-pair mapping: `trainers` (hard-coded shape
 because role and is_active have defaults), `scheduleVersions` (flat
 columns plus `data` JSONB), `wros` (5 promoted flat columns plus
@@ -155,9 +154,9 @@ columns plus `data` JSONB), `wros` (5 promoted flat columns plus
 
 This is the load-bearing data contract. Any code path that reaches
 Supabase without going through a translator is a bug. The Patch R
-whitelist on `leads` (`RoundRock_Fitness_Tracker.html:2621-2628`) is
-a belt-and-suspenders second filter at the wire, added after a
-translator bypass leaked an unknown column through.
+whitelist on `leads` (the `LEADS_ALLOWED_COLUMNS` constant filtering
+on write) is a belt-and-suspenders second filter at the wire, added
+after a translator bypass leaked an unknown column through.
 
 **Soft-delete pattern.** Most entities have `deleted_at` and
 `deleted_by` columns. Soft-deleted rows are filtered at the
@@ -192,9 +191,8 @@ covered by ADR-0004.
 **PIN-based per-user auth.** Trainers sign in with a 4-digit PIN
 stored on their row in `trainers.pin`. PINs are plaintext today;
 *PIN storage as plaintext* (proposed) commits to hashing before APC
-opens. The PIN
-modal at `RoundRock_Fitness_Tracker.html:9277` collects the PIN; the
-match check happens client-side against the loaded trainer row.
+opens. The `PinModal` component collects the PIN; the match check
+happens client-side against the loaded trainer row.
 
 **Role tiers.** `role_tier` on `trainers` is one of:
 - `trainer`: executes sessions, signs, claims subs, logs contacts.
@@ -204,12 +202,14 @@ match check happens client-side against the loaded trainer row.
   roster management, PIN setting, audit override.
 
 The legacy `role` column is kept in sync with `role_tier` for older
-read paths (RenameTrainerModal at line 23129 writes both). Future
-cleanup: collapse `role` and `role_tier` into one column.
+read paths (`EditTrainerModal`'s save path writes both - was named
+`RenameTrainerModal` before v4.x naming cleanup). Future cleanup:
+collapse `role` and `role_tier` into one column.
 
 **Session shape.** Three variants, hydrated synchronously from
-localStorage so reload doesn't kick the user back to login
-(`RoundRock_Fitness_Tracker.html:6371-6378`):
+localStorage so reload doesn't kick the user back to login (the
+session `useState` initializer in the main provider reads
+`rrpr_session_v1` before first render):
 
 ```
 Real user:   { trainer_id, trainer_name, role, role_tier, name, signed_in_at }
@@ -229,15 +229,17 @@ cockpit (AdminDashboard) and the trainer execution surface
 (TrainerView). The toggle is persisted per device, keyed by
 `trainer_id`, in localStorage under `viewMode:<trainer_id>`. Non-lead
 sessions ignore the value entirely (always `'lead'` internally, never
-shown). The toggle component is at line 11277; the state hook is at
-line 6403-6426; the dispatch lives at line 8385-8390.
+shown). The toggle component is `ViewModeToggle`; the state
+(`viewModeTuple`) and `setViewMode` setter live alongside the
+session hook in the main provider; the dispatch is exposed on the
+ctx as `ctx.setViewMode`.
 
 **Front Desk admin scope gap.** The Front Desk synthetic session has
 `trainer_id: null` and `role: 'admin'`. This works for permission
 checks (everything `admin` works because the role matches) but
-breaks notification fan-out: the producer pattern at
-`RoundRock_Fitness_Tracker.html:7150-7156` filters target trainers
-on `is_active && p.id`, and Front Desk has no id. Front Desk admins
+breaks notification fan-out: the producer pattern inside
+`requestTimeOff` (and the parallel sub-assigned fan-out) filters
+target trainers on `is_active && p.id`, and Front Desk has no id. Front Desk admins
 therefore never receive notifications about events they could
 otherwise act on (time-off requests, sub assignments). This is a
 known gap; the workaround today is that Front Desk admins read the
@@ -248,18 +250,19 @@ route Front Desk into a different notification queue.
 **Front Desk admin PIN.** The Front Desk session is gated by a
 separate PIN stored as `admin_pin` in the `settings` table. This
 existed before per-user PINs landed and is kept for the "tap any
-trainer to switch" admin workflow. See the legacy 1111 PIN reference
-at line 20394.
+trainer to switch" admin workflow. The legacy "1111" PIN comment
+sits inside `AdminDashboard`'s actor-resolution block (grep for
+`legacy 1111`).
 
 ---
 
 ## 5. Audit and observability
 
 **`auditedUpsertClient` pattern.** Writes that need to be audited go
-through `auditedUpsertClient` at line 7905. The function fetches the
-prior record for diffing, stamps an audit entry via
-`appendAuditEntry`, and routes through the standard `upsertClient`
-setter so subscriptions and saves work without special-casing. Other
+through `auditedUpsertClient`. The function fetches the prior record
+for diffing, stamps an audit entry via `appendAuditEntry`, and routes
+through the standard `upsertClient` setter so subscriptions and
+saves work without special-casing. Other
 entities have their own audited variants (e.g. `auditedUpsertClass`,
 `addCancellation`, `addAttendance` all stamp entries).
 
@@ -275,15 +278,15 @@ mutation type. The current set, observed in code:
 | trainer | `update`, `soft_delete`, `restore` |
 | class | `attendance_logged`, `attendance_deleted` |
 
-The Audit History viewer at `AuditView` (line 26354) is the read
-side. It walks the per-entity `audit_log` arrays, sorts by `ts`, and
-renders with action-specific phrasing.
+The Audit History viewer `AuditView` is the read side. It walks the
+per-entity `audit_log` arrays, sorts by `ts`, and renders with
+action-specific phrasing.
 
 **Audit entry shape.** Documented in SCHEMA.md JSONB section. Notable
 fields: `actor` (string, falls back to "unknown" when session is
 missing); `actor_id` (uuid, null for Front Desk); `changes` (object,
 populated only for `update` and `package_edited` actions, computed
-via `diffRecords` at line 3795); `amount` (number, session
+via `diffRecords`); `amount` (number, session
 consumption delta for session_* and recurring_* actions, so the audit
 view can render "deducted 0.5" / "returned 1.0").
 
@@ -298,12 +301,12 @@ For high-stakes flows we carve out **persist-then-toast**: the
 caller awaits a direct Supabase upsert before advancing local
 state. The four direct-persist surfaces today are:
 
-- `persistTimeOffRow` (line 7119) for time-off request/decide flows
-- `persistBannerRow` and `persistBannerDelete` (line 7056, 7063) for
-  announcement banners
-- `persistQueueEntryRow` (line 7423) for lead creates
-- `persistClientRow` (line 7440) for bulk client import (so per-row
-  errors halt the loop)
+- `persistTimeOffRow` for time-off request/decide flows
+- `persistBannerRow` and `persistBannerDelete` for announcement
+  banners
+- `persistQueueEntryRow` for lead creates
+- `persistClientRow` for bulk client import (so per-row errors halt
+  the loop)
 
 These bypass the dirty-check save useEffect by advancing the dirty-
 check ref to the post-write state, suppressing the redundant follow-
@@ -327,10 +330,11 @@ pre-allocated).
 
 **Supabase realtime via `postgres_changes`.** Twelve entity tables
 publish to a single shared channel named `app-changes`. The
-subscription map is at `RoundRock_Fitness_Tracker.html:5913-5926`.
-Each entity registers a `(table, setter, entity)` triple; the
-channel listener for `event: '*'` calls a per-entity debounced reload
-that fetches fresh data and dispatches the setter.
+subscription map is built inside the `buildAppChanges` closure of
+the main realtime `useEffect`. Each entity registers a
+`(table, setter, entity)` triple; the channel listener for
+`event: '*'` calls a per-entity debounced reload that fetches fresh
+data and dispatches the setter.
 
 **`storage.X.load()` chain pattern.** Realtime events trigger a full
 entity reload rather than incremental patches. The handler is
@@ -357,7 +361,9 @@ to the fresh channel.
 **Wake / online / pageshow sweeps.** iPads sleep, roam wifi, and
 suspend tabs. Any of these can leave channels stuck in a
 non-`SUBSCRIBED` state without a hard error. The mitigation is a
-sweep on three signals (`RoundRock_Fitness_Tracker.html:5960-5968`):
+sweep on three signals (the `visibilitychange` / `online` /
+`pageshow` listeners attached alongside `subscribeWithReconnect` in
+the main realtime `useEffect`):
 
 - `visibilitychange` with `document.visibilityState === 'visible'`
 - `window.online` event
@@ -376,7 +382,8 @@ during transient outages, which silently masked subscription drops.
 
 **Notifications channel.** Distinct from `app-changes`. Each signed-in
 trainer subscribes to a per-trainer-id channel named
-`notifications-<trainerId>` (line 2856). Server-side filter:
+`notifications-<trainerId>` (built in `buildNotifications` inside
+the notifications storage adapter). Server-side filter:
 `target_trainer_id=eq.<trainerId>`. Only inserts are subscribed
 (`event: 'INSERT'`); read-state changes are patched optimistically
 client-side. This isolation means a noisy trainer's notification
@@ -401,7 +408,7 @@ to reconstruct it from event payloads.
 
 **`_selfSuppress(trainerIdByName(name))` guard.** Every emit site
 filters out the current actor so users don't receive notifications
-about their own actions. The helper at line 8198:
+about their own actions. The helper `_selfSuppress`:
 
 ```
 function _selfSuppress(targetId){
@@ -417,7 +424,7 @@ every emit site (5 trigger hooks share this pattern).
 
 **`trainerIdByName` lookup.** Notifications target trainers by uuid,
 but most call sites have a name string (because that's what's stored
-on the client/lead/class record). The helper at line 8190 walks
+on the client/lead/class record). The helper `trainerIdByName` walks
 `trainerProfiles` to find a matching uuid via `trainerNameMatches`
 (case-insensitive trim compare). Returns null on miss, which the
 `_selfSuppress` guard then handles.
@@ -427,7 +434,7 @@ on the client/lead/class record). The helper at line 8190 walks
 `emitMany` with a pre-built `rows` array. The filtering happens at
 the producer: walk `trainerProfiles`, filter to the right tier,
 exclude the requester, build the rows array, call `emitMany` once.
-This is at line 7150-7172 for the time-off request flow.
+This is inside `requestTimeOff` for the time-off request flow.
 
 **Notification types in use.** `consult_assigned`,
 `consult_unassigned`, `time_off_requested`, `sub_admin_assigned`,
@@ -436,9 +443,9 @@ This is at line 7150-7172 for the time-off request flow.
 assignerName}`).
 
 **`notificationText` centralized rendering.** Every type's
-human-readable string lives in `notificationText` at line 8480. The
-function branches on `n.type` and returns the rendered string. The
-bell UI consumer (line 8881) calls it once per notification.
+human-readable string lives in `notificationText`. The function
+branches on `n.type` and returns the rendered string. The bell UI
+consumer (`NotificationsBell`) calls it once per notification.
 Centralizing rendering here keeps the producer side simple (just
 pack the payload) and means new types only need two new pieces of
 code: the producer call and the `notificationText` branch.
@@ -446,18 +453,20 @@ code: the producer call and the `notificationText` branch.
 **`package_expiring` sweep with `existsForTrainer` dedup.** Unlike
 the other notification types, `package_expiring` isn't event-driven;
 it's a one-shot sweep that runs once per session, gated by
-`trainer_id`. The sweep at line 6317 finds packages within the
-expiration window, builds candidate notifications, and filters out
-ones that have already been emitted for this trainer/type combo via
+`trainer_id`. The sweep (in the `package_expiring` block of the
+`NotificationsBell` useEffect) finds packages within the expiration
+window, builds candidate notifications, and filters out ones that
+have already been emitted for this trainer/type combo via
 `existsForTrainer(trainerId, 'package_expiring', dedupKey)`. The
-dedup check uses an in-memory cache built once per session (line
-2908). `dedup_key` in the payload is the convention any other
-sweep-style trigger should follow.
+dedup check uses an in-memory cache built once per session
+(`storage.notifications.existsForTrainer`'s IIFE). `dedup_key` in
+the payload is the convention any other sweep-style trigger should
+follow.
 
 **Bell UI consumer.** Top-right bell shows unread count; tapping
 opens the notification list with `notificationText`-rendered entries.
-Read state patches through `markNotificationRead` (line 8205) with
-optimistic local update and toast-on-failure rollback.
+Read state patches through `markNotificationRead` with optimistic
+local update and toast-on-failure rollback.
 
 **Tier-specific notification behaviors.** Things like filter chips, a
 dedicated full-list view, time bucketing, and grouping rollups are
@@ -474,27 +483,30 @@ purchases, and registration. The tracker reads RecTrac data (via CSV
 exports) and never writes back. This is a deliberate boundary: if a
 client's package count, payment status, or membership end date
 disagrees with RecTrac, RecTrac wins. The tracker's package shape
-mirrors RecTrac's, and pricing in the seed taxonomy (line 3036) is
-sourced from RecTrac.
+mirrors RecTrac's, and pricing in the seed taxonomy
+(`PT_PACKAGES_BY_FACILITY`) is sourced from RecTrac.
 
-The Patch T 17-entry standardized package taxonomy (line 3025-3056)
-locked the canonical type strings to match RecTrac's registration
-items. CMRC solo PT is `CMRC-PT-N`, Baca solo PT is `Baca-PT-N`, the
+The Patch T 17-entry standardized package taxonomy
+(`PT_PACKAGES_BY_FACILITY`, with its preamble comment) locked the
+canonical type strings to match RecTrac's registration items. CMRC solo PT is `CMRC-PT-N`, Baca solo PT is `Baca-PT-N`, the
 Baca intro pack is `Baca-1stTime-3`. Pairs are 4/8 only (no Pairs-12
 or Group-* tiers). Each entry carries metadata flags
 (`is_pairs`, `is_consult`, `is_intro`) that downstream code keys off
 of.
 
 **RecTrac member ID as primary match key.** `clients.rectrac_member_id`
-is the highest-confidence match on import. The matcher at line 3837
-tries member ID first, then email, then name+DOB, then name alone.
+is the highest-confidence match on import. The matcher
+(`findMatchingClient`) tries member ID first, then email, then
+name+DOB, then name alone.
 A member ID match returns `confidence: 'high'`; a name-only match
 returns `confidence: 'medium', reason: 'name match (verify)'` to
 flag for admin review.
 
 **CSV import flow.** RecTrac registration exports are pasted or
-uploaded into the Import Clients modal (line 21739+). Per-row
-classification:
+uploaded into `ImportClientsModal` (paired with its peer
+`BulkImportClientsModal` for the non-RecTrac bulk path; see the
+"Distinct from ImportClientsModal" comment in code for the split).
+Per-row classification:
 - `invalid`: missing required fields or malformed data
 - `duplicate`: this row was already in this batch
 - `reup`: matches an existing client; renew that client's package
