@@ -34,6 +34,7 @@
     --brick-soft: #e58a73;
     --moss: #506b3a;
     --moss-bg: #e7ecdd;
+    --moss-bg-strong: #c8d4ad;
     --ochre: #c89548;
     --ochre-bg: #f4e9d3;
     --brick-bg: #f2dcd5;
@@ -10333,7 +10334,7 @@
           return e('div', {
             key: c.id + ':' + o.date,
             className: 't-session',
-            style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg)' : '#fff' },
+            style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg-strong)' : '#fff' },
             onClick: function(){
               setClassDetailId(c.id);
               setHeaderContext({
@@ -10383,7 +10384,7 @@
           return e('div', {
             key: item.client.id + ':' + (sess.id || sess.date + sess.time),
             className: 't-session',
-            style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg)' : '#fff' },
+            style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg-strong)' : '#fff' },
             onClick: function(){
               if (isScheduled) {
                 /* Direct sign-off: skip the ClientDetail intermediate. */
@@ -10629,6 +10630,11 @@
     var wroOpenTuple = useState(null);
     var wroOpen = wroOpenTuple[0]; var setWroOpen = wroOpenTuple[1];
 
+    /* Per-day manual expand override for the auto-collapse on fully-resolved
+       days. Keyed by ymd string; truthy = user has manually expanded. */
+    var expandedDaysTuple = useState({});
+    var expandedDays = expandedDaysTuple[0]; var setExpandedDays = expandedDaysTuple[1];
+
     var todayYMD = todayStr();
     var todayDate = parseYMD(todayYMD);
     var startOfThisWeek = (function(){
@@ -10764,7 +10770,7 @@
       return e('div', {
         key: 'gx-' + c.id + ':' + o.date,
         className: 't-session',
-        style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg)' : '#fff' },
+        style: { '--stripe-color': stripeColor, background: logged ? 'var(--moss-bg-strong)' : '#fff' },
         onClick: function(){
           if (props.onOpenClass) {
             /* Admin: delegate detail nav up so admin's outer single-header
@@ -10780,7 +10786,8 @@
         }
       },
         e('div', { className: 't-session-row' },
-          e('div', { className: 't-session-title' }, c.name + (logged ? ' ✓' : '')),
+          e('div', { className: 't-session-title' }, c.name),
+          logged && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '4px', background: 'var(--moss)', color: '#fff', fontWeight: 700, letterSpacing: '0.04em' } }, 'LOGGED'),
           e('span', { style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' } }, 'GX')
         ),
         e('div', { className: 't-session-meta' },
@@ -10806,7 +10813,7 @@
       return e('div', {
         key: 'pt-' + sess.id,
         className: 't-session',
-        style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg)' : '#fff' },
+        style: { '--stripe-color': stripeColor, background: isSignedAttended ? 'var(--moss-bg-strong)' : '#fff' },
         onClick: function(){
           if (isScheduled && allowDirectSignOff) {
             setSignOff({ client: client, session: sess });
@@ -10824,7 +10831,8 @@
         }
       },
         e('div', { className: 't-session-row' },
-          e('div', { className: 't-session-title' }, client.name + (isSignedAttended ? ' ✓' : '')),
+          e('div', { className: 't-session-title' }, client.name),
+          isSignedAttended && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '4px', background: 'var(--moss)', color: '#fff', fontWeight: 700, letterSpacing: '0.04em' } }, 'SIGNED'),
           e('span', {
             title: sess.series_id ? 'PT (recurring series)' : 'PT',
             style: { fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'var(--paper-2)', color: 'var(--slate)', fontWeight: 700, letterSpacing: '0.04em' }
@@ -10907,6 +10915,27 @@
       );
     }
 
+    /* A day is "fully resolved" when every item on it is in a terminal /
+       no-action-needed state: GX class logged, PT session non-scheduled,
+       WRO post-form completed. Approved time-off is always informational.
+       An empty day is not "resolved" (the empty-state placeholder already
+       renders compactly). Drives auto-collapse below. */
+    function dayIsFullyResolved(gxList, ptList, wroList, timeOffList){
+      if (gxList.length + ptList.length + wroList.length + timeOffList.length === 0) return false;
+      if (!gxList.every(function(o){ return !!o.logged; })) return false;
+      if (!ptList.every(function(it){ return (it.session.status || 'attended') !== 'scheduled'; })) return false;
+      if (!wroList.every(function(w){ return !!w.postCompleted; })) return false;
+      return true;
+    }
+    function summarizeDay(gxList, ptList, wroList, timeOffList){
+      var parts = [];
+      if (gxList.length) parts.push(gxList.length + ' class' + (gxList.length === 1 ? '' : 'es'));
+      if (ptList.length) parts.push(ptList.length + ' session' + (ptList.length === 1 ? '' : 's'));
+      if (wroList.length) parts.push(wroList.length + ' WRO' + (wroList.length === 1 ? '' : 's'));
+      if (timeOffList.length) parts.push(timeOffList.length + ' time off');
+      return parts.join(' · ');
+    }
+
     var days = [];
     for (var i = 0; i < 7; i++) {
       var d = addDays(weekStart, i);
@@ -10922,40 +10951,78 @@
          filter without us deriving a facility set. */
       var dayClosures = closuresOnDate(ctx.closures || [], ymd);
       var hasAny = gxList.length + ptList.length + wroList.length + timeOffList.length > 0;
-      days.push(e('div', {
-        key: ymd,
-        style: {
-          background: isToday ? 'var(--cream-2)' : '#fff',
-          border: '1.5px solid ' + (isToday ? 'var(--teal)' : 'var(--border)'),
-          borderRadius: '12px',
-          padding: '10px 12px',
-          marginBottom: '10px'
-        }
-      },
-        e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: (hasAny || dayClosures.length) ? '8px' : '0', flexWrap: 'wrap' } },
-          e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, dayLabel),
-          isToday && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '999px', background: 'var(--teal)', color: '#fff', fontWeight: 700, letterSpacing: '0.05em' } }, 'TODAY')
-        ),
-        dayClosures.length > 0 && e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: hasAny ? '8px' : '0' } },
-          dayClosures.map(function(cl){
-            var fac = cl.facility || 'all';
-            var facLabel = fac === 'all' ? 'All facilities' : fac;
-            return e('span', { key: cl.id || (ymd + ':' + fac), className: 'holiday-chip' },
-              'HOLIDAY',
-              e('span', { style: { color: 'var(--slate)', fontWeight: 500 } }, '· ' + (cl.reason || 'Closed')),
-              e('span', { className: 'scope' }, facLabel)
-            );
-          })
-        ),
-        hasAny
-          ? e('div', null,
-              timeOffList.map(function(t){ return safeRender('to-' + t.id + ':' + ymd, function(){ return timeOffCard(t, ymd); }); }),
-              gxList.map(function(o){ return safeRender('gx-' + (o.cls && o.cls.id) + ':' + o.date, function(){ return gxCard(o); }); }),
-              ptList.map(function(it){ return safeRender('pt-' + (it.session && it.session.id), function(){ return ptCard(it); }); }),
-              wroList.map(function(w){ return safeRender('wro-' + w.id, function(){ return wroCard(w); }); })
-            )
-          : !dayClosures.length && e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No sessions or classes')
-      ));
+      var fullyResolved = dayIsFullyResolved(gxList, ptList, wroList, timeOffList);
+      var collapsed = !isToday && fullyResolved && !expandedDays[ymd];
+      if (collapsed) {
+        (function(ymd){
+          days.push(e('div', {
+            key: ymd,
+            onClick: function(){ setExpandedDays(function(prev){ var n = Object.assign({}, prev); n[ymd] = true; return n; }); },
+            style: {
+              background: 'var(--moss-bg-strong)',
+              border: '1.5px solid var(--moss)',
+              borderRadius: '12px',
+              padding: '10px 12px',
+              marginBottom: '10px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              flexWrap: 'wrap'
+            }
+          },
+            e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, dayLabel),
+            e('div', { style: { fontSize: '12px', color: 'var(--moss)', fontWeight: 600, flex: 1, minWidth: 0 } },
+              summarizeDay(gxList, ptList, wroList, timeOffList) + ' · all done'
+            ),
+            e('span', { style: { fontSize: '14px', color: 'var(--moss)', fontWeight: 700 }, 'aria-hidden': 'true' }, '▸')
+          ));
+        })(ymd);
+        continue;
+      }
+      var showCollapseToggle = !isToday && fullyResolved;
+      (function(ymd){
+        days.push(e('div', {
+          key: ymd,
+          style: {
+            background: isToday ? 'var(--cream-2)' : '#fff',
+            border: '1.5px solid ' + (isToday ? 'var(--teal)' : 'var(--border)'),
+            borderRadius: '12px',
+            padding: '10px 12px',
+            marginBottom: '10px'
+          }
+        },
+          e('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: (hasAny || dayClosures.length) ? '8px' : '0', flexWrap: 'wrap' } },
+            e('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--navy)' } }, dayLabel),
+            isToday && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '999px', background: 'var(--teal)', color: '#fff', fontWeight: 700, letterSpacing: '0.05em' } }, 'TODAY'),
+            showCollapseToggle && e('button', {
+              type: 'button',
+              onClick: function(){ setExpandedDays(function(prev){ var n = Object.assign({}, prev); n[ymd] = false; return n; }); },
+              'aria-label': 'Collapse day',
+              style: { marginLeft: 'auto', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px', color: 'var(--moss)', fontWeight: 700, padding: '0 4px' }
+            }, '▾')
+          ),
+          dayClosures.length > 0 && e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: hasAny ? '8px' : '0' } },
+            dayClosures.map(function(cl){
+              var fac = cl.facility || 'all';
+              var facLabel = fac === 'all' ? 'All facilities' : fac;
+              return e('span', { key: cl.id || (ymd + ':' + fac), className: 'holiday-chip' },
+                'HOLIDAY',
+                e('span', { style: { color: 'var(--slate)', fontWeight: 500 } }, '· ' + (cl.reason || 'Closed')),
+                e('span', { className: 'scope' }, facLabel)
+              );
+            })
+          ),
+          hasAny
+            ? e('div', null,
+                timeOffList.map(function(t){ return safeRender('to-' + t.id + ':' + ymd, function(){ return timeOffCard(t, ymd); }); }),
+                gxList.map(function(o){ return safeRender('gx-' + (o.cls && o.cls.id) + ':' + o.date, function(){ return gxCard(o); }); }),
+                ptList.map(function(it){ return safeRender('pt-' + (it.session && it.session.id), function(){ return ptCard(it); }); }),
+                wroList.map(function(w){ return safeRender('wro-' + w.id, function(){ return wroCard(w); }); })
+              )
+            : !dayClosures.length && e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', fontStyle: 'italic' } }, 'No sessions or classes')
+        ));
+      })(ymd);
     }
 
     var canGoBack = offset > -4;
@@ -15767,7 +15834,7 @@
         return e('div', {
           key: 'fs-' + c.id + ':' + o.date,
           className: 't-session',
-          style: { '--stripe-color': stripeColor, background: o.logged ? 'var(--moss-bg)' : '#fff' },
+          style: { '--stripe-color': stripeColor, background: o.logged ? 'var(--moss-bg-strong)' : '#fff' },
           onClick: function(){
             setDetailId(c.id);
             setHeaderContext({
@@ -15777,7 +15844,8 @@
           }
         },
           e('div', { className: 't-session-row' },
-            e('div', { className: 't-session-title' }, c.name + (o.logged ? ' ✓' : '')),
+            e('div', { className: 't-session-title' }, c.name),
+            o.logged && e('span', { style: { fontSize: '10px', padding: '2px 8px', borderRadius: '4px', background: 'var(--moss)', color: '#fff', fontWeight: 700, letterSpacing: '0.04em' } }, 'LOGGED'),
             e('span', { className: 'pill pill-' + ((c.location === 'CMRC') ? 'cmrc' : 'baca') }, c.location || '—')
           ),
           e('div', { className: 't-session-meta' },
