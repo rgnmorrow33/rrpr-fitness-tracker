@@ -16956,7 +16956,11 @@
     var cls = props.cls;
     var sessionName = (ctx.session && ctx.session.name) || '';
 
-    var dateTuple = useState(todayStr());
+    var dateTuple = useState(function(){
+      var idx = DOW_TO_IDX[normalizeDow(cls && cls.dayOfWeek)];
+      if (idx == null) return todayStr();
+      return generateSeriesDates({ startDate: todayStr(), weekdays: [idx], count: 1 })[0] || todayStr();
+    });
     var date = dateTuple[0]; var setDate = dateTuple[1];
 
     /* 'queue' | 'direct' */
@@ -17042,7 +17046,7 @@
             e('label', null, 'Date being covered'),
             e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } }),
             d && !dayMatch && e('div', { style: { color: 'var(--red)', fontSize: '12px', marginTop: '4px' } },
-              '⚠ ' + IDX_TO_DOW[d.getDay()] + ' - class meets on ' + cls.dayOfWeek
+              '⚠ ' + IDX_TO_DOW[d.getDay()] + ': class meets on ' + cls.dayOfWeek
             ),
             existing && e('div', { style: { color: 'var(--amber)', fontSize: '12px', marginTop: '4px' } },
               '⚠ Existing assignment for this date will be replaced.'
@@ -17054,9 +17058,11 @@
               e('label', {
                 style: {
                   display: 'flex', alignItems: 'flex-start', gap: '10px',
+                  width: '100%', boxSizing: 'border-box',
                   padding: '10px 12px', borderRadius: '8px',
                   border: '1.5px solid ' + (mode === 'queue' ? 'var(--teal)' : 'var(--border)'),
                   background: mode === 'queue' ? 'var(--teal-bg)' : '#fff',
+                  textTransform: 'none', letterSpacing: 0,
                   cursor: 'pointer'
                 }
               },
@@ -17065,7 +17071,7 @@
                   checked: mode === 'queue',
                   onChange: function(){ setMode('queue'); }
                 }),
-                e('div', null,
+                e('div', { style: { flex: '1 1 0', minWidth: 0 } },
                   e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, 'Post to sub queue'),
                   e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
                     'Anyone on the team can claim it. Surfaces in the GX notification bar.'
@@ -17075,9 +17081,11 @@
               e('label', {
                 style: {
                   display: 'flex', alignItems: 'flex-start', gap: '10px',
+                  width: '100%', boxSizing: 'border-box',
                   padding: '10px 12px', borderRadius: '8px',
                   border: '1.5px solid ' + (mode === 'direct' ? 'var(--teal)' : 'var(--border)'),
                   background: mode === 'direct' ? 'var(--teal-bg)' : '#fff',
+                  textTransform: 'none', letterSpacing: 0,
                   cursor: 'pointer'
                 }
               },
@@ -17086,7 +17094,7 @@
                   checked: mode === 'direct',
                   onChange: function(){ setMode('direct'); }
                 }),
-                e('div', null,
+                e('div', { style: { flex: '1 1 0', minWidth: 0 } },
                   e('div', { style: { fontWeight: 600, color: 'var(--navy)' } }, 'Directly assign someone'),
                   e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '2px' } },
                     'Already coordinated with the cover. Skip the queue.'
