@@ -4195,7 +4195,12 @@
          session_create / session_delete / recurring_* entries so the
          audit view can render "deducted 0.5" / "returned 1.0". Direction
          is implied by the action. */
-      amount: (opts.amount != null) ? opts.amount : null
+      amount: (opts.amount != null) ? opts.amount : null,
+      /* Patch CC: free-form payload slot for actions whose audit context
+         doesn't fit before/after/changes - e.g., schedule_conflict_override
+         carries { conflicts:[...], reason } so the audit view can render
+         the override justification alongside the normal mutation. */
+      payload: (opts.payload != null) ? opts.payload : null
     };
     var log = (record.audit_log || []).concat([entry]);
     if (log.length > 100) log = log.slice(log.length - 100);
@@ -5071,27 +5076,37 @@
     return out;
   }
 
-  /* Sprint M (Spec 1 rewrite): scan a pre-computed series of session
-     dates for collision with facility closures or approved trainer
-     time-off. Date generation happens upstream via generateSeriesDates
-     so this function is a pure date-array iterator. Returns one row
-     per conflicting occurrence with a human-readable reason.
+  /* Sprint M / Patch CC: scan a pre-computed series of session
+     dates for collisions. Closure rows are warn-severity (per existing
+     UX — Carlos's escape-hatch checkbox stays). All trainer-self
+     overlaps (gx / sub / pt / approved time-off) and missing-window
+     edge cases are block-severity. Pending time-off is warn.
 
-       dates        - array of YMD strings to scan
-       trainerName  - regular trainer for the series (string)
-       trainerId    - resolved id for time-off lookup (nullable)
-       facility     - 'CMRC' | 'Baca' | etc (matches closure.facility scope)
-       closures     - ctx.closures
-       timeOff      - ctx.timeOff
+     Returns one row per conflicting occurrence:
+       { date, reason, scope, kind, severity }
 
-     Closure scope label: 'all' renders as 'all facilities', otherwise
-     the literal facility name. Time-off label includes the trainer
-     name + kind so the warning block reads naturally. */
+     where severity is 'block' or 'warn'. Callers can split on severity
+     for the 3-way "skip / keep-with-reason / cancel" choice.
+
+       dates           - array of YMD strings to scan
+       time            - 'HH:MM' time of day for each occurrence (for trainer-self check)
+       durationHours   - occurrence length (defaults to 1.0)
+       trainerName     - regular trainer for the series (string)
+       trainerId       - resolved id for time-off lookup (nullable)
+       facility        - 'CMRC' | 'Baca' (matches closure.facility scope)
+       closures        - ctx.closures
+       timeOff         - ctx.timeOff
+       classes         - ctx.classes (for GX/sub overlap)
+       clients         - ctx.clients (for PT overlap)
+       trainerProfiles - ctx.trainerProfiles (for id↔name)
+       excludeSessionId, excludeSubAssignmentId, excludeSeriesId
+                       - self-exclusion for reschedule paths */
   function scanSeriesConflicts(opts){
     var dates = opts.dates || [];
     if (dates.length === 0) return [];
     var closures = opts.closures || [];
-    var timeOff = opts.timeOff || [];
+    var time = opts.time || null;
+    var durationHours = opts.durationHours || 1;
     var trainerId = opts.trainerId || null;
     var trainerName = opts.trainerName || '';
     var facility = opts.facility || null;
@@ -5109,29 +5124,265 @@
           date: ymd,
           reason: closure.reason || 'Facility closure',
           scope: scopeLabel,
-          kind: 'closure'
+          kind: 'closure',
+          severity: 'warn'
         });
         continue;
       }
 
-      if (trainerId) {
-        var dayStartIso = ymd + 'T00:00:00';
-        var dayEndIso = ymd + 'T23:59:59';
-        var hits = listTimeOffForTrainer(timeOff, trainerId, dayStartIso, dayEndIso)
-          .filter(isTimeOffApproved);
-        if (hits.length > 0) {
-          var t = hits[0];
-          var kindLabel = t.kind ? (t.kind.charAt(0).toUpperCase() + t.kind.slice(1)) : 'Time off';
-          var who = trainerName || 'Trainer';
-          out.push({
-            date: ymd,
-            reason: who + ' ' + kindLabel.toLowerCase(),
-            scope: kindLabel,
-            kind: 'time_off'
+      /* Delegate trainer-self overlap (GX / sub / PT / time-off) to the
+         shared helper. Compose the date+time into a window and ask. */
+      if (trainerId || trainerName) {
+        var win = ymdTimeToWindow(ymd, time || '00:00', durationHours);
+        if (win) {
+          var conflicts = getScheduleConflicts(trainerId || trainerName, win.startISO, win.endISO, {
+            classes: opts.classes,
+            clients: opts.clients,
+            timeOff: opts.timeOff,
+            trainerProfiles: opts.trainerProfiles,
+            excludeSessionId: opts.excludeSessionId,
+            excludeSubAssignmentId: opts.excludeSubAssignmentId,
+            excludeSeriesId: opts.excludeSeriesId,
+            includeSoftWarnings: opts.includeSoftWarnings !== false
           });
+          if (conflicts.length > 0) {
+            /* First hit per date wins to keep the warning block readable. */
+            var c = conflicts[0];
+            out.push({
+              date: ymd,
+              reason: c.label,
+              scope: c.kind === 'time_off_approved' ? 'Time off' :
+                     c.kind === 'time_off_pending'  ? 'Pending time off' :
+                     c.kind === 'gx' ? 'GX class' :
+                     c.kind === 'sub' ? 'Sub coverage' :
+                     c.kind === 'pt' ? 'PT session' : null,
+              kind: c.kind,
+              severity: c.severity
+            });
+          }
         }
       }
     }
+    return out;
+  }
+
+  /* Patch CC: helpers shared by scanSeriesConflicts and the single-window
+     gate sites (#1, #2, #3, #4, #6, #8, #9). All times are HH:MM
+     strings; all dates are YMD; windows are ISO-8601 strings so they
+     line up with time_off.startAt/endAt (also ISO) for lex-comparable
+     overlap math. */
+
+  /* Parse 'HH:MM' to minutes-since-midnight. Returns null on malformed. */
+  function parseHHMMToMinutes(hhmm){
+    if (!hhmm) return null;
+    var parts = String(hhmm).split(':');
+    if (parts.length < 2) return null;
+    var h = parseInt(parts[0], 10);
+    var m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m)) return null;
+    return h * 60 + m;
+  }
+  function _mmToHHMM(mins){
+    mins = Math.max(0, Math.min(24*60 - 1, mins));
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+  /* Compose YMD + HH:MM + duration into ISO start/end strings. Returns
+     null on malformed inputs. Floors end at 23:59 so a duration that
+     crosses midnight stays in-day (close enough — the gate is single-day). */
+  function ymdTimeToWindow(ymd, time, durationHours){
+    if (!ymd) return null;
+    var startMin = parseHHMMToMinutes(time || '00:00');
+    if (startMin == null) return null;
+    var durMin = Math.max(1, Math.round((durationHours || 1) * 60));
+    var endMin = startMin + durMin;
+    return {
+      startISO: ymd + 'T' + _mmToHHMM(startMin) + ':00',
+      endISO:   ymd + 'T' + _mmToHHMM(endMin) + ':00'
+    };
+  }
+  /* Sub occurrence window: subAssignment rows are date-only, so end-time
+     is inherited from the parent class's startTime/endTime. endTime
+     missing on a legacy class row → fallback to startTime + 1h. */
+  function subOccurrenceWindow(cls, ymd){
+    if (!cls || !ymd) return null;
+    var startMin = parseHHMMToMinutes(cls.startTime || '08:00');
+    if (startMin == null) return null;
+    var endMin = parseHHMMToMinutes(cls.endTime || '');
+    if (endMin == null || endMin <= startMin) endMin = startMin + 60;
+    return {
+      startISO: ymd + 'T' + _mmToHHMM(startMin) + ':00',
+      endISO:   ymd + 'T' + _mmToHHMM(endMin)   + ':00'
+    };
+  }
+  function ptSessionWindow(s){
+    if (!s || !s.date) return null;
+    return ymdTimeToWindow(s.date, s.time, s.durationHours || 1);
+  }
+  /* Lex-comparable ISO overlap test. Half-open: touching ends don't
+     overlap (e.g., 9:00–10:00 and 10:00–11:00 are back-to-back, not
+     conflicting). */
+  function _isoOverlaps(aS, aE, bS, bE){
+    if (!aS || !aE || !bS || !bE) return false;
+    return aS < bE && bS < aE;
+  }
+  /* Resolve a trainer identifier (id or name) to { id, name } using
+     the trainerProfiles roster. Either lookup may return null. */
+  function _resolveTrainer(identifier, trainerProfiles){
+    if (!identifier) return { id: null, name: null };
+    var list = trainerProfiles || [];
+    /* Try id-match first. */
+    var byId = list.find(function(p){ return p.id && p.id === identifier; });
+    if (byId) return { id: byId.id, name: byId.name };
+    /* Fall back to name-match (handles legacy name-keyed data). */
+    var byName = list.find(function(p){ return trainerNameMatches(identifier, p.name); });
+    if (byName) return { id: byName.id, name: byName.name };
+    /* Last resort: treat the identifier as a name with no resolved id. */
+    return { id: null, name: String(identifier) };
+  }
+
+  /* Patch CC: trainer-self schedule conflict scanner.
+
+     Returns an array of conflict rows for a single candidate window:
+       { kind, severity, label, startISO, endISO, ref:{id,type} }
+
+     kinds: 'gx' | 'sub' | 'pt' | 'time_off_approved' | 'time_off_pending'
+     severity: 'block' | 'warn'
+
+     Per the Sprint R severity matrix, gx/sub/pt/time_off_approved are
+     block; time_off_pending is warn. Closures are NOT scanned here
+     (they're facility-scoped, not trainer-scoped); existing handlers
+     in ScheduleSessionModal/Intake keep that responsibility.
+
+     Options:
+       classes, clients, timeOff, trainerProfiles  — data sources
+       excludeSessionId         — skip a PT session row by id
+       excludeSubAssignmentId   — skip a sub assignment row by id
+       excludeSeriesId          — skip every PT session sharing this series_id
+       includeSoftWarnings      — default true; set false to omit pending TO */
+  function getScheduleConflicts(trainerIdentifier, startISO, endISO, opts){
+    opts = opts || {};
+    if (!trainerIdentifier || !startISO || !endISO) return [];
+    var classes = opts.classes || [];
+    var clients = opts.clients || [];
+    var timeOff = opts.timeOff || [];
+    var includeSoftWarnings = opts.includeSoftWarnings !== false;
+    var excludeSessionId = opts.excludeSessionId || null;
+    var excludeSubAssignmentId = opts.excludeSubAssignmentId || null;
+    var excludeSeriesId = opts.excludeSeriesId || null;
+
+    var resolved = _resolveTrainer(trainerIdentifier, opts.trainerProfiles);
+    var trainerId = resolved.id;
+    var trainerName = resolved.name;
+    if (!trainerId && !trainerName) return [];
+
+    /* Date the window falls on (used for sub/GX matching, which are
+       date-keyed). Single-day gate — multi-day overlaps would need the
+       caller to slice into per-day windows first. */
+    var ymd = String(startISO).slice(0, 10);
+    var d = parseYMD(ymd);
+    var dow = d ? IDX_TO_DOW[d.getDay()] : null;
+
+    var out = [];
+
+    /* 1) GX classes where this trainer is the regular instructor and the
+          occurrence on this date overlaps the candidate window. */
+    classes.forEach(function(c){
+      if (!c || c.deleted_at) return;
+      if (!trainerNameMatches(trainerName, c.instructor)) return;
+      if (normalizeDow(c.dayOfWeek) !== dow) return;
+      var w = subOccurrenceWindow(c, ymd);
+      if (!w) return;
+      if (!_isoOverlaps(startISO, endISO, w.startISO, w.endISO)) return;
+      /* Skip if a sub has been claimed/approved on this date — the
+         regular instructor is off the hook for that occurrence. */
+      var coveredBySub = (c.subAssignments || []).some(function(s){
+        if (!s || s.date !== ymd) return false;
+        var st = s.status;
+        return st === 'claimed' || st === 'approved';
+      });
+      if (coveredBySub) return;
+      out.push({
+        kind: 'gx',
+        severity: 'block',
+        label: formatTime12(c.startTime) + ' ' + (c.location || '') + ' ' + (c.name || 'GX class'),
+        startISO: w.startISO,
+        endISO:   w.endISO,
+        ref: { id: c.id, type: 'class', date: ymd }
+      });
+    });
+
+    /* 2) Sub coverage this trainer has claimed or been approved for on
+          this date, where the parent class's time-window overlaps. */
+    classes.forEach(function(c){
+      if (!c || c.deleted_at) return;
+      (c.subAssignments || []).forEach(function(s){
+        if (!s || s.date !== ymd) return;
+        if (excludeSubAssignmentId && s.id === excludeSubAssignmentId) return;
+        var st = s.status;
+        if (st !== 'claimed' && st !== 'approved') return;
+        var who = s.subInstructor || s.claimedBy;
+        if (!trainerNameMatches(trainerName, who)) return;
+        var w = subOccurrenceWindow(c, ymd);
+        if (!w) return;
+        if (!_isoOverlaps(startISO, endISO, w.startISO, w.endISO)) return;
+        out.push({
+          kind: 'sub',
+          severity: 'block',
+          label: 'Cover ' + (c.name || 'class') + ' ' + formatTime12(c.startTime),
+          startISO: w.startISO,
+          endISO:   w.endISO,
+          ref: { id: s.id, type: 'sub_assignment', classId: c.id, date: ymd }
+        });
+      });
+    });
+
+    /* 3) PT scheduled sessions held by this trainer that overlap. */
+    clients.forEach(function(cl){
+      if (!cl || cl.deleted_at) return;
+      (cl.sessions || []).forEach(function(s){
+        if (!s || s.status !== 'scheduled') return;
+        if (excludeSessionId && s.id === excludeSessionId) return;
+        if (excludeSeriesId && s.series_id === excludeSeriesId) return;
+        if (!s.trainerName || !trainerNameMatches(trainerName, s.trainerName)) return;
+        if (s.date !== ymd) return;
+        var w = ptSessionWindow(s);
+        if (!w) return;
+        if (!_isoOverlaps(startISO, endISO, w.startISO, w.endISO)) return;
+        out.push({
+          kind: 'pt',
+          severity: 'block',
+          label: formatTime12(s.time) + ' PT — ' + (cl.name || 'client'),
+          startISO: w.startISO,
+          endISO:   w.endISO,
+          ref: { id: s.id, type: 'session', clientId: cl.id, date: ymd }
+        });
+      });
+    });
+
+    /* 4) Time-off: approved → block, pending → warn (soft). Legacy rows
+          with !t.status count as approved per isTimeOffApproved. */
+    if (trainerId) {
+      var toRows = listTimeOffForTrainer(timeOff, trainerId, startISO, endISO);
+      toRows.forEach(function(t){
+        var approved = isTimeOffApproved(t);
+        var pending = !approved && t.status === 'pending';
+        if (!approved && !pending) return;
+        if (pending && !includeSoftWarnings) return;
+        var kindLabel = t.kind ? (t.kind.charAt(0).toUpperCase() + t.kind.slice(1)) : 'Time off';
+        out.push({
+          kind: approved ? 'time_off_approved' : 'time_off_pending',
+          severity: approved ? 'block' : 'warn',
+          label: (trainerName || 'Trainer') + ' ' + kindLabel.toLowerCase() +
+                 (pending ? ' (pending)' : ''),
+          startISO: t.startAt || startISO,
+          endISO:   t.endAt   || endISO,
+          ref: { id: t.id, type: 'time_off' }
+        });
+      });
+    }
+
     return out;
   }
 
@@ -7083,11 +7334,23 @@
       var weekdays = opts.weekdays || [];
       var count = Math.max(0, parseInt(opts.count, 10) || 0);
       var note = opts.note || null;
+      /* Patch CC: optional skip-list when the caller dropped conflicting
+         occurrences via the "Skip conflicting" choice. Walk the requested
+         weekdays as usual, then filter. count refers to the kept count,
+         so seed generation with count + skipDates.length to compensate
+         for the drop. */
+      var skipDates = (opts.skipDates || []).slice();
       if (!clientId || !startDate || !time || count === 0 || weekdays.length === 0) return null;
       var before = clients.find(function(x){ return x.id === clientId; });
       if (!before) return null;
 
-      var dates = generateSeriesDates({ startDate: startDate, weekdays: weekdays, count: count });
+      var rawCount = count + skipDates.length;
+      var dates = generateSeriesDates({ startDate: startDate, weekdays: weekdays, count: rawCount });
+      if (skipDates.length > 0) {
+        var skipSet = {};
+        skipDates.forEach(function(d){ skipSet[d] = true; });
+        dates = dates.filter(function(d){ return !skipSet[d]; });
+      }
       if (dates.length === 0) return null;
 
       var seriesId = uid();
@@ -7147,6 +7410,9 @@
       var trainerName = anchor.trainerName || null;
       var note = anchor.note || null;
       var durationHours = anchor.durationHours || null;
+      /* Patch CC: optional skip-list when the caller dropped conflicting
+         occurrences via the reschedule "Skip conflicting" choice. */
+      var skipDates = (opts.skipDates || []).slice();
 
       var toDelete = (before.sessions || []).filter(function(s){
         return s.series_id === seriesId && s.date >= anchorDate;
@@ -7157,7 +7423,13 @@
       var kept = (before.sessions || []).filter(function(s){
         return !(s.series_id === seriesId && s.date >= anchorDate);
       });
-      var dates = generateSeriesDates({ startDate: newStartDate, weekdays: newWeekdays, count: count });
+      var rawCount = count + skipDates.length;
+      var dates = generateSeriesDates({ startDate: newStartDate, weekdays: newWeekdays, count: rawCount });
+      if (skipDates.length > 0) {
+        var skipSet2 = {};
+        skipDates.forEach(function(d){ skipSet2[d] = true; });
+        dates = dates.filter(function(d){ return !skipSet2[d]; });
+      }
       if (dates.length === 0) return false;
 
       var nowIso = new Date().toISOString();
@@ -8382,9 +8654,43 @@
         after: opts.after !== undefined ? opts.after : c
       },
         opts.changes !== undefined ? { changes: opts.changes } : {},
-        opts.amount !== undefined ? { amount: opts.amount } : {}
+        opts.amount !== undefined ? { amount: opts.amount } : {},
+        opts.payload !== undefined ? { payload: opts.payload } : {}
       ));
       upsertClient(stamped);
+    }
+    /* Patch CC: stamp a schedule_conflict_override audit entry on the
+       relevant record. payload carries the conflict list + override
+       reason. Writes a no-op upsert (same record content) so the
+       audit_log row lands without changing other fields. Entity type
+       is the caller's responsibility ('client' for PT/consult,
+       'class' for sub/GX). */
+    function recordScheduleOverride(entityType, entityId, payload){
+      if (entityType === 'client') {
+        var c = clients.find(function(x){ return x.id === entityId; });
+        if (!c) return;
+        var stampedC = appendAuditEntry(c, session, 'schedule_conflict_override', {
+          entity_type: 'client',
+          target_id: entityId,
+          before: null,
+          after: null,
+          payload: payload
+        });
+        upsertClient(stampedC);
+        return;
+      }
+      if (entityType === 'class') {
+        var cl = classes.find(function(x){ return x.id === entityId; });
+        if (!cl) return;
+        var stampedCl = appendAuditEntry(cl, session, 'schedule_conflict_override', {
+          entity_type: 'class',
+          target_id: entityId,
+          before: null,
+          after: null,
+          payload: payload
+        });
+        upsertClass(stampedCl);
+      }
     }
     function softDeleteClient(id){
       var before = clients.find(function(x){ return x.id === id; });
@@ -8805,6 +9111,7 @@
       setSession: setSession,
       upsertClient: upsertClient,
       auditedUpsertClient: auditedUpsertClient,
+      recordScheduleOverride: recordScheduleOverride,
       softDeleteClient: softDeleteClient,
       restoreClient: restoreClient,
       softDeletePackage: softDeletePackage,
@@ -14481,6 +14788,11 @@
     var weekdays = weekdaysTuple[0]; var setWeekdays = weekdaysTuple[1];
     var confirmConflictsTuple = useState(false);
     var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
+    /* Patch CC: pending block-severity conflicts open a dialog. State
+       holds { conflicts, warnings, kind: 'single'|'skip'|'keepAll' } so
+       the same component handles the override-with-reason flow. */
+    var pendingConflictTuple = useState(null);
+    var pendingConflict = pendingConflictTuple[0]; var setPendingConflict = pendingConflictTuple[1];
     var maxSeries = Math.floor(remaining / ratio);
 
     /* Resolve trainerId from name for time-off scan. trainerProfiles
@@ -14493,6 +14805,7 @@
       var prof = trainerProfiles.find(function(p){ return p.name === client.trainerName; });
       if (prof) trainerId = prof.id;
     }
+    var canOverride = ctx.can && ctx.can('canEditClassStructure');
 
     /* Seed weekdays from the start date when recurring is toggled on
        (and the user hasn't touched the picker yet). Re-seeds whenever
@@ -14517,13 +14830,28 @@
       if (!recurring || dates.length === 0) return [];
       return scanSeriesConflicts({
         dates: dates,
+        time: time,
+        durationHours: duration,
         closures: ctx.closures || [],
         timeOff: ctx.timeOff || [],
+        classes: ctx.classes || [],
+        clients: ctx.clients || [],
+        trainerProfiles: trainerProfiles,
         trainerId: trainerId,
         trainerName: client.trainerName,
-        facility: client.location
+        facility: client.location,
+        includeSoftWarnings: true
       });
-    }, [recurring, dates, trainerId, client.trainerName, client.location, ctx.closures, ctx.timeOff]);
+    }, [recurring, dates, time, duration, trainerId, client.trainerName, client.location, ctx.closures, ctx.timeOff, ctx.classes, ctx.clients]);
+
+    /* Split for the new 3-way choice: block-severity occurrences gate
+       the submit (Skip / Keep-with-reason / Cancel); warn-severity uses
+       the existing checkbox UX. Closure stays warn (Carlos's escape
+       hatch); approved time-off + GX/sub/PT overlap are block. */
+    var blockingConflicts = conflicts.filter(function(c){ return c.severity === 'block'; });
+    var warnConflicts = conflicts.filter(function(c){ return c.severity !== 'block'; });
+    var blockingDateSet = {};
+    blockingConflicts.forEach(function(c){ blockingDateSet[c.date] = true; });
 
     /* Reset the confirmation gate whenever the conflict shape changes,
        so the user has to re-acknowledge after editing weekdays/date. */
@@ -14551,24 +14879,22 @@
 
       if (recurring) {
         if (weekdays.length === 0) { ctx.toast('Pick at least one weekday', 'error'); return; }
-        /* Sprint M: locked mechanic 4 - warning-only at scan time, not
-           hard-block. User confirms via the checkbox once conflicts
-           render. The HOLIDAY chip on the schedule view is the safety
-           net for the day-of view. */
-        if (conflicts.length > 0 && !confirmConflicts) {
+        /* Patch CC: closure rows (warn) still gated by the checkbox so
+           Carlos's escape hatch keeps working. Block-severity rows fall
+           through to the 3-way choice rendered alongside the chip list. */
+        if (warnConflicts.length > 0 && !confirmConflicts) {
           ctx.toast('Acknowledge the listed conflicts to continue', 'error');
           return;
         }
-        props.onScheduleSeries && props.onScheduleSeries({
-          clientId: client.id,
-          trainerName: client.trainerName,
-          startDate: date,
-          time: time,
-          weekdays: weekdays,
-          count: seriesCount,
-          durationMin: duration === 0.5 ? 30 : 60,
-          note: note || null
-        });
+        if (blockingConflicts.length > 0) {
+          /* The 3-way buttons in the warning block handle this branch
+             directly (commitSeriesSkip / commitSeriesKeepAll). Reaching
+             here means the user hit the bare Save without picking — nudge
+             them. */
+          ctx.toast('Pick how to handle the conflicting occurrences below', 'error');
+          return;
+        }
+        commitSeriesAll(null);
         return;
       }
 
@@ -14585,6 +14911,35 @@
         );
         return;
       }
+      /* Patch CC: trainer-self overlap gate. Empty trainerName (Awaiting
+         Trainer) yields no resolver, so the scan returns []. */
+      if (client.trainerName) {
+        var win = ymdTimeToWindow(date, time, duration);
+        if (win) {
+          var single = getScheduleConflicts(trainerId || client.trainerName, win.startISO, win.endISO, {
+            classes: ctx.classes || [],
+            clients: ctx.clients || [],
+            timeOff: ctx.timeOff || [],
+            trainerProfiles: trainerProfiles,
+            includeSoftWarnings: true
+          });
+          var blockSingle = single.filter(function(c){ return c.severity === 'block'; });
+          if (blockSingle.length > 0) {
+            setPendingConflict({
+              conflicts: blockSingle,
+              warnings: single.filter(function(c){ return c.severity !== 'block'; }),
+              kind: 'single'
+            });
+            return;
+          }
+        }
+      }
+      commitSingle(null);
+    }
+
+    /* Patch CC: single-session commit, optionally with an override reason
+       audited on the client record. */
+    function commitSingle(overrideReason){
       var sess = {
         id: uid(),
         date: date,
@@ -14596,7 +14951,62 @@
         scheduledAt: new Date().toISOString(),
         durationHours: duration
       };
+      if (overrideReason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('client', client.id, {
+          conflicts: (pendingConflict && pendingConflict.conflicts) || [],
+          reason: overrideReason,
+          context: { kind: 'pt_single', sessionId: sess.id }
+        });
+      }
+      setPendingConflict(null);
       props.onSchedule(sess);
+    }
+
+    /* Patch CC: recurring commits. commitSeriesAll keeps every date in
+       `dates`; commitSeriesSkip drops dates that have any block-severity
+       conflict. Both audit on the client when overrideReason is set. */
+    function commitSeriesAll(overrideReason){
+      var payload = {
+        clientId: client.id,
+        trainerName: client.trainerName,
+        startDate: date,
+        time: time,
+        weekdays: weekdays,
+        count: seriesCount,
+        durationMin: duration === 0.5 ? 30 : 60,
+        note: note || null
+      };
+      if (overrideReason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('client', client.id, {
+          conflicts: blockingConflicts,
+          reason: overrideReason,
+          context: { kind: 'pt_series_keep_all', count: seriesCount }
+        });
+      }
+      setPendingConflict(null);
+      props.onScheduleSeries && props.onScheduleSeries(payload);
+    }
+    function commitSeriesSkip(){
+      /* Filter the generated dates down to only non-blocking ones. The
+         downstream createRecurringSessions accepts an explicit dates
+         array via the skipDates opt (additive — back-compat). */
+      var keptDates = dates.filter(function(d){ return !blockingDateSet[d]; });
+      if (keptDates.length === 0) {
+        ctx.toast('No occurrences left after skipping conflicts', 'error');
+        return;
+      }
+      setPendingConflict(null);
+      props.onScheduleSeries && props.onScheduleSeries({
+        clientId: client.id,
+        trainerName: client.trainerName,
+        startDate: date,
+        time: time,
+        weekdays: weekdays,
+        count: keptDates.length,
+        durationMin: duration === 0.5 ? 30 : 60,
+        note: note || null,
+        skipDates: Object.keys(blockingDateSet)
+      });
     }
 
     var recurringDisabled = maxSeries <= 0;
@@ -14709,35 +15119,56 @@
               placeholder: 'e.g. focus on lower body'
             })
           ),
-          /* Conflict warning block - recurring only. Reads from
-             scanSeriesConflicts; first hit per date wins. User
-             acknowledges via the checkbox before save unblocks. */
+          /* Conflict warning block - recurring only. Patch CC: warn-severity
+             rows (closures, pending time-off) keep the existing checkbox
+             UX. Block-severity rows (GX/sub/PT overlap, approved time-off)
+             render a 3-way choice: Skip / Keep-all-with-reason / Cancel. */
           recurring && conflicts.length > 0 && e('div', {
             style: {
               padding: '12px', marginTop: '8px',
-              background: 'var(--amber-bg)',
-              border: '1.5px solid var(--amber)',
+              background: blockingConflicts.length > 0 ? 'var(--brick-bg, var(--amber-bg))' : 'var(--amber-bg)',
+              border: '1.5px solid ' + (blockingConflicts.length > 0 ? 'var(--brick, var(--red))' : 'var(--amber)'),
               borderRadius: '8px'
             }
           },
-            e('div', { style: { fontWeight: 700, color: 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
+            e('div', { style: { fontWeight: 700, color: blockingConflicts.length > 0 ? 'var(--brick, var(--red))' : 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
               'Heads up: ' + conflicts.length + ' of your ' + seriesCount + ' sessions have conflicts.'
             ),
             e('ul', { style: { margin: 0, paddingLeft: '18px', fontSize: '12px', color: 'var(--navy)', lineHeight: 1.5 } },
               conflicts.map(function(c){
-                return e('li', { key: c.date },
+                var isBlock = c.severity === 'block';
+                return e('li', { key: c.date, style: { color: isBlock ? 'var(--brick, var(--red))' : 'var(--navy)' } },
                   formatShort(parseYMD(c.date)) + ' - ' + c.reason +
-                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '')
+                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '') +
+                  (isBlock ? ' [blocks]' : '')
                 );
               })
             ),
-            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
+            warnConflicts.length > 0 && blockingConflicts.length === 0 && e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
               e('input', {
                 type: 'checkbox',
                 checked: confirmConflicts,
                 onChange: function(ev){ setConfirmConflicts(ev.target.checked); }
               }),
               e('span', null, 'I\'ve reviewed the conflicts and want to book all ' + seriesCount + ' sessions anyway.')
+            ),
+            blockingConflicts.length > 0 && e('div', { style: { display: 'flex', gap: '6px', marginTop: '10px', flexWrap: 'wrap' } },
+              e('button', {
+                className: 'btn btn-outline btn-sm',
+                type: 'button',
+                onClick: commitSeriesSkip
+              }, 'Skip conflicting (' + Object.keys(blockingDateSet).length + ')'),
+              canOverride && e('button', {
+                className: 'btn btn-primary btn-sm',
+                type: 'button',
+                onClick: function(){
+                  setPendingConflict({
+                    conflicts: blockingConflicts,
+                    warnings: warnConflicts,
+                    kind: 'keepAll'
+                  });
+                }
+              }, 'Keep all with reason')
             )
           ),
           !recurring && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '8px' } },
@@ -14750,9 +15181,21 @@
             className: 'btn btn-primary',
             onClick: save,
             disabled: !date || !time || remaining < ratio ||
-              (recurring && (weekdays.length === 0 || seriesCount === 0 || (conflicts.length > 0 && !confirmConflicts)))
+              (recurring && (weekdays.length === 0 || seriesCount === 0 ||
+                (blockingConflicts.length > 0) ||
+                (warnConflicts.length > 0 && !confirmConflicts)))
           }, recurring ? ('Schedule ' + seriesCount + ' sessions') : 'Schedule')
-        )
+        ),
+        pendingConflict && e(ConflictDialog, {
+          conflicts: pendingConflict.conflicts,
+          warnings: pendingConflict.warnings,
+          canOverride: canOverride,
+          onCancel: function(){ setPendingConflict(null); },
+          onOverride: function(reason){
+            if (pendingConflict.kind === 'single') commitSingle(reason);
+            else if (pendingConflict.kind === 'keepAll') commitSeriesAll(reason);
+          }
+        })
       )
     );
   }
@@ -14807,6 +15250,10 @@
     var weekdays = weekdaysTuple[0]; var setWeekdays = weekdaysTuple[1];
     var confirmConflictsTuple = useState(false);
     var confirmConflicts = confirmConflictsTuple[0]; var setConfirmConflicts = confirmConflictsTuple[1];
+    /* Patch CC: pending block-severity conflicts open the dialog.
+       kind ∈ 'single' (scope=one) | 'keepAll' (scope=future). */
+    var pendingConflictTuple = useState(null);
+    var pendingConflict = pendingConflictTuple[0]; var setPendingConflict = pendingConflictTuple[1];
 
     var seriesCount = inSeries
       ? (client.sessions || []).filter(function(x){
@@ -14821,6 +15268,9 @@
       var prof = trainerProfiles.find(function(p){ return p.name === lookupName; });
       if (prof) trainerId = prof.id;
     }
+    var trainerForGate = s.trainerName || client.trainerName;
+    var canOverride = ctx.can && ctx.can('canEditClassStructure');
+    var sessionDuration = s.durationHours || 1;
 
     var dates = useMemo(function(){
       if (scope !== 'future') return [];
@@ -14831,13 +15281,28 @@
       if (scope !== 'future' || dates.length === 0) return [];
       return scanSeriesConflicts({
         dates: dates,
+        time: time,
+        durationHours: sessionDuration,
         closures: ctx.closures || [],
         timeOff: ctx.timeOff || [],
+        classes: ctx.classes || [],
+        clients: ctx.clients || [],
+        trainerProfiles: trainerProfiles,
         trainerId: trainerId,
-        trainerName: s.trainerName || client.trainerName,
-        facility: client.location
+        trainerName: trainerForGate,
+        facility: client.location,
+        /* Exclude the whole series being rescheduled - the existing
+           tail will be hard-deleted before recreate, so it cannot
+           conflict with itself. */
+        excludeSeriesId: s.series_id || null,
+        includeSoftWarnings: true
       });
-    }, [scope, dates, trainerId, client.trainerName, client.location, ctx.closures, ctx.timeOff]);
+    }, [scope, dates, time, sessionDuration, trainerId, trainerForGate, client.location, ctx.closures, ctx.timeOff, ctx.classes, ctx.clients]);
+
+    var blockingConflicts = conflicts.filter(function(c){ return c.severity === 'block'; });
+    var warnConflicts = conflicts.filter(function(c){ return c.severity !== 'block'; });
+    var blockingDateSet = {};
+    blockingConflicts.forEach(function(c){ blockingDateSet[c.date] = true; });
 
     useEffect(function(){ setConfirmConflicts(false); }, [scope, date, weekdays]);
 
@@ -14852,17 +15317,60 @@
       if (!date) { ctx.toast('Date is required', 'error'); return; }
       if (!time) { ctx.toast('Time is required', 'error'); return; }
       if (scope === 'one') {
-        ctx.updateSession(client.id, s.id, { date: date, time: time });
-        props.onClose();
-        ctx.toast('Session rescheduled ✓');
+        /* Patch CC: trainer-self overlap gate for single-row reschedule.
+           Exclude this session by id so moving a row inside its own
+           window doesn't self-flag. */
+        if (trainerForGate) {
+          var win = ymdTimeToWindow(date, time, sessionDuration);
+          if (win) {
+            var single = getScheduleConflicts(trainerId || trainerForGate, win.startISO, win.endISO, {
+              classes: ctx.classes || [],
+              clients: ctx.clients || [],
+              timeOff: ctx.timeOff || [],
+              trainerProfiles: trainerProfiles,
+              excludeSessionId: s.id,
+              includeSoftWarnings: true
+            });
+            var blockSingle = single.filter(function(c){ return c.severity === 'block'; });
+            if (blockSingle.length > 0) {
+              setPendingConflict({
+                conflicts: blockSingle,
+                warnings: single.filter(function(c){ return c.severity !== 'block'; }),
+                kind: 'single'
+              });
+              return;
+            }
+          }
+        }
+        commitSingle(null);
         return;
       }
       if (weekdays.length === 0) { ctx.toast('Pick at least one weekday', 'error'); return; }
-      /* Future-scope: warning-only conflict gate, same as booking. */
-      if (conflicts.length > 0 && !confirmConflicts) {
+      if (warnConflicts.length > 0 && !confirmConflicts) {
         ctx.toast('Acknowledge the listed conflicts to continue', 'error');
         return;
       }
+      if (blockingConflicts.length > 0) {
+        ctx.toast('Pick how to handle the conflicting occurrences below', 'error');
+        return;
+      }
+      commitSeriesAll(null);
+    }
+
+    function commitSingle(overrideReason){
+      ctx.updateSession(client.id, s.id, { date: date, time: time });
+      if (overrideReason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('client', client.id, {
+          conflicts: (pendingConflict && pendingConflict.conflicts) || [],
+          reason: overrideReason,
+          context: { kind: 'pt_reschedule_one', sessionId: s.id }
+        });
+      }
+      setPendingConflict(null);
+      props.onClose();
+      ctx.toast('Session rescheduled ✓');
+    }
+    function commitSeriesAll(overrideReason){
       var ok = ctx.rescheduleSeriesFromHere({
         clientId: client.id,
         fromSessionId: s.id,
@@ -14870,12 +15378,36 @@
         newTime: time,
         newWeekdays: weekdays
       });
-      if (ok) {
-        ctx.toast(seriesCount + ' sessions rescheduled ✓');
-        props.onClose();
-      } else {
-        ctx.toast('Could not reschedule series', 'error');
+      if (!ok) { ctx.toast('Could not reschedule series', 'error'); return; }
+      if (overrideReason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('client', client.id, {
+          conflicts: blockingConflicts,
+          reason: overrideReason,
+          context: { kind: 'pt_reschedule_future_keep_all', seriesId: s.series_id, count: seriesCount }
+        });
       }
+      setPendingConflict(null);
+      ctx.toast(seriesCount + ' sessions rescheduled ✓');
+      props.onClose();
+    }
+    function commitSeriesSkip(){
+      var keptDates = dates.filter(function(d){ return !blockingDateSet[d]; });
+      if (keptDates.length === 0) {
+        ctx.toast('No occurrences left after skipping conflicts', 'error');
+        return;
+      }
+      var ok = ctx.rescheduleSeriesFromHere({
+        clientId: client.id,
+        fromSessionId: s.id,
+        newStartDate: date,
+        newTime: time,
+        newWeekdays: weekdays,
+        skipDates: Object.keys(blockingDateSet)
+      });
+      if (!ok) { ctx.toast('Could not reschedule series', 'error'); return; }
+      setPendingConflict(null);
+      ctx.toast(keptDates.length + ' sessions rescheduled (' + Object.keys(blockingDateSet).length + ' skipped) ✓');
+      props.onClose();
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -14940,29 +15472,49 @@
           scope === 'future' && conflicts.length > 0 && e('div', {
             style: {
               padding: '12px', marginTop: '8px',
-              background: 'var(--amber-bg)',
-              border: '1.5px solid var(--amber)',
+              background: blockingConflicts.length > 0 ? 'var(--brick-bg, var(--amber-bg))' : 'var(--amber-bg)',
+              border: '1.5px solid ' + (blockingConflicts.length > 0 ? 'var(--brick, var(--red))' : 'var(--amber)'),
               borderRadius: '8px'
             }
           },
-            e('div', { style: { fontWeight: 700, color: 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
+            e('div', { style: { fontWeight: 700, color: blockingConflicts.length > 0 ? 'var(--brick, var(--red))' : 'var(--amber)', marginBottom: '6px', fontSize: '13px' } },
               'Heads up: ' + conflicts.length + ' of your ' + seriesCount + ' sessions have conflicts.'
             ),
             e('ul', { style: { margin: 0, paddingLeft: '18px', fontSize: '12px', color: 'var(--navy)', lineHeight: 1.5 } },
               conflicts.map(function(c){
-                return e('li', { key: c.date },
+                var isBlock = c.severity === 'block';
+                return e('li', { key: c.date, style: { color: isBlock ? 'var(--brick, var(--red))' : 'var(--navy)' } },
                   formatShort(parseYMD(c.date)) + ' - ' + c.reason +
-                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '')
+                  (c.scope && c.kind === 'closure' ? ' - ' + c.scope : '') +
+                  (isBlock ? ' [blocks]' : '')
                 );
               })
             ),
-            e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
+            warnConflicts.length > 0 && blockingConflicts.length === 0 && e('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '12px', color: 'var(--navy)', cursor: 'pointer' } },
               e('input', {
                 type: 'checkbox',
                 checked: confirmConflicts,
                 onChange: function(ev){ setConfirmConflicts(ev.target.checked); }
               }),
               e('span', null, 'I\'ve reviewed the conflicts and want to reschedule all ' + seriesCount + ' sessions anyway.')
+            ),
+            blockingConflicts.length > 0 && e('div', { style: { display: 'flex', gap: '6px', marginTop: '10px', flexWrap: 'wrap' } },
+              e('button', {
+                className: 'btn btn-outline btn-sm',
+                type: 'button',
+                onClick: commitSeriesSkip
+              }, 'Skip conflicting (' + Object.keys(blockingDateSet).length + ')'),
+              canOverride && e('button', {
+                className: 'btn btn-primary btn-sm',
+                type: 'button',
+                onClick: function(){
+                  setPendingConflict({
+                    conflicts: blockingConflicts,
+                    warnings: warnConflicts,
+                    kind: 'keepAll'
+                  });
+                }
+              }, 'Keep all with reason')
             )
           )
         ),
@@ -14972,9 +15524,21 @@
             className: 'btn btn-primary',
             onClick: save,
             disabled: !date || !time ||
-              (scope === 'future' && (weekdays.length === 0 || (conflicts.length > 0 && !confirmConflicts)))
+              (scope === 'future' && (weekdays.length === 0 ||
+                blockingConflicts.length > 0 ||
+                (warnConflicts.length > 0 && !confirmConflicts)))
           }, scope === 'future' ? ('Reschedule ' + seriesCount + ' sessions') : 'Save')
-        )
+        ),
+        pendingConflict && e(ConflictDialog, {
+          conflicts: pendingConflict.conflicts,
+          warnings: pendingConflict.warnings,
+          canOverride: canOverride,
+          onCancel: function(){ setPendingConflict(null); },
+          onOverride: function(reason){
+            if (pendingConflict.kind === 'single') commitSingle(reason);
+            else if (pendingConflict.kind === 'keepAll') commitSeriesAll(reason);
+          }
+        })
       )
     );
   }
@@ -15053,6 +15617,72 @@
           e('button', { className: 'btn btn-primary', style: { background: 'var(--red)' }, onClick: confirm },
             scope === 'future' ? ('Cancel ' + seriesCount + ' sessions') : 'Cancel session'
           )
+        )
+      )
+    );
+  }
+
+  /* Patch CC: schedule-conflict gate dialog used by single-window submit
+     sites (#1 claimSub, #2 SubRequest direct, #3 approveSub, #4 single
+     PT, #6 reschedule scope=one, #8 admin consult picker, #9 trainer
+     "I'll take it"). props:
+       conflicts        - array of block-severity rows from getScheduleConflicts
+       warnings         - array of warn-severity rows (rendered as soft chips)
+       canOverride      - true when actor is admin/lead
+       onCancel         - close without acting
+       onOverride(reason) - admin/lead override with required reason text
+     Trainers see Cancel only. Admin/lead see Cancel + Override-with-reason. */
+  function ConflictDialog(props){
+    var conflicts = props.conflicts || [];
+    var warnings = props.warnings || [];
+    var reasonTuple = useState('');
+    var reason = reasonTuple[0]; var setReason = reasonTuple[1];
+    var canOverride = !!props.canOverride;
+    var hasBlockers = conflicts.length > 0;
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h3', null, 'Schedule conflict'),
+          e('button', { className: 'modal-close', onClick: props.onCancel }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          hasBlockers && e('div', { style: { fontSize: '14px', color: 'var(--navy)', marginBottom: '10px' } },
+            'This conflicts with:'
+          ),
+          hasBlockers && e('ul', { style: { margin: '0 0 12px 0', paddingLeft: '18px', fontSize: '13px', color: 'var(--navy)', lineHeight: 1.5 } },
+            conflicts.map(function(c, i){
+              return e('li', { key: 'cf-' + i, style: { color: 'var(--brick, var(--red))' } }, c.label);
+            })
+          ),
+          warnings.length > 0 && e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '10px' } },
+            'Soft warnings:'
+          ),
+          warnings.length > 0 && e('ul', { style: { margin: '0 0 12px 0', paddingLeft: '18px', fontSize: '12px', color: 'var(--slate)', lineHeight: 1.5 } },
+            warnings.map(function(w, i){
+              return e('li', { key: 'wn-' + i }, w.label);
+            })
+          ),
+          canOverride && hasBlockers && e('div', { className: 'field' },
+            e('label', null, 'Override reason (required)'),
+            e('textarea', {
+              rows: 3,
+              value: reason,
+              onChange: function(ev){ setReason(ev.target.value); },
+              placeholder: 'Explain why this override is needed - written to audit.'
+            })
+          ),
+          !canOverride && hasBlockers && e('div', { style: { fontSize: '12px', color: 'var(--slate)', fontStyle: 'italic' } },
+            'Ask a lead or admin to override if you need to schedule anyway.'
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onCancel }, 'Cancel'),
+          canOverride && hasBlockers && e('button', {
+            className: 'btn btn-primary',
+            disabled: !reason.trim(),
+            onClick: function(){ props.onOverride(reason.trim()); }
+          }, 'Override with reason')
         )
       )
     );
@@ -15675,6 +16305,12 @@
     var fullSchedFacilityTuple = useState('all');
     var fullSchedFacility = fullSchedFacilityTuple[0]; var setFullSchedFacility = fullSchedFacilityTuple[1];
 
+    /* Patch CC: pending claim's conflict gate. Declared at the top so
+       hook order is stable across the early-return branches below. */
+    var pendingClaimTuple = useState(null);
+    var pendingClaim = pendingClaimTuple[0]; var setPendingClaim = pendingClaimTuple[1];
+    var trainerGxCanOverride = ctx.can && ctx.can('canEditClassStructure');
+
     var myClasses = useMemo(function(){
       return ctx.classes.filter(function(c){ return trainerNameMatches(trainerName, c.instructor); });
     }, [ctx.classes, trainerName]);
@@ -15717,8 +16353,47 @@
       });
       function claim(item){
         if (!window.confirm('Claim ' + item.cls.name + ' on ' + formatShort(parseYMD(item.sub.date)) + '?')) return;
+        /* Patch CC: trainer-self overlap gate. Sub window comes from the
+           parent class's startTime/endTime. */
+        var win = subOccurrenceWindow(item.cls, item.sub.date);
+        if (win) {
+          var hits = getScheduleConflicts(trainerName, win.startISO, win.endISO, {
+            classes: ctx.classes || [],
+            clients: ctx.clients || [],
+            timeOff: ctx.timeOff || [],
+            trainerProfiles: ctx.trainerProfiles || [],
+            excludeSubAssignmentId: item.sub.id,
+            includeSoftWarnings: true
+          });
+          var blockers = hits.filter(function(c){ return c.severity === 'block'; });
+          if (blockers.length > 0) {
+            setPendingClaim({
+              kind: 'sub',
+              classId: item.cls.id,
+              subId: item.sub.id,
+              conflicts: blockers,
+              warnings: hits.filter(function(c){ return c.severity !== 'block'; })
+            });
+            return;
+          }
+        }
         ctx.claimSub(item.cls.id, item.sub.id, trainerName);
         ctx.toast('Claimed ✓');
+      }
+      function commitPendingClaim(overrideReason){
+        if (!pendingClaim) return;
+        if (pendingClaim.kind === 'sub') {
+          ctx.claimSub(pendingClaim.classId, pendingClaim.subId, trainerName);
+          if (overrideReason && ctx.recordScheduleOverride) {
+            ctx.recordScheduleOverride('class', pendingClaim.classId, {
+              conflicts: pendingClaim.conflicts,
+              reason: overrideReason,
+              context: { kind: 'sub_claim', subAssignmentId: pendingClaim.subId, claimerName: trainerName }
+            });
+          }
+          ctx.toast('Claimed ✓');
+        }
+        setPendingClaim(null);
       }
       return e('div', null,
         e('div', { className: 'section-head' },
@@ -15764,7 +16439,14 @@
                   }, 'Claim')
                 )
               );
-            })
+            }),
+        pendingClaim && e(ConflictDialog, {
+          conflicts: pendingClaim.conflicts,
+          warnings: pendingClaim.warnings,
+          canOverride: trainerGxCanOverride,
+          onCancel: function(){ setPendingClaim(null); },
+          onOverride: function(reason){ commitPendingClaim(reason); }
+        })
       );
     }
 
@@ -16975,25 +17657,21 @@
 
     var noteTuple = useState('');
     var note = noteTuple[0]; var setNote = noteTuple[1];
+    /* Patch CC: pending direct-assign conflict gate. Only fires when
+       mode === 'direct' since queue-mode assignments don't commit a
+       specific trainer yet. */
+    var pendingConflictTuple = useState(null);
+    var pendingConflict = pendingConflictTuple[0]; var setPendingConflict = pendingConflictTuple[1];
+    var canOverride = ctx.can && ctx.can('canEditClassStructure');
 
     var d = parseYMD(date);
     var dayMatch = d && IDX_TO_DOW[d.getDay()] === normalizeDow(cls.dayOfWeek);
     var existing = getAssignedSubForDate(cls, date);
 
-    function submit(){
-      if (!d) { ctx.toast('Pick a valid date', 'error'); return; }
-      if (!dayMatch) {
-        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + (normalizeDow(cls.dayOfWeek) || cls.dayOfWeek), 'error');
-        return;
-      }
-      if (mode === 'direct') {
-        if (!assignee) { ctx.toast('Pick a trainer', 'error'); return; }
-        if (assignee === cls.instructor) { ctx.toast('Cover must be different from regular instructor', 'error'); return; }
-      }
+    function buildAssignment(){
       var nowIso = new Date().toISOString();
-      var assignment;
       if (mode === 'queue') {
-        assignment = {
+        return {
           id: existing ? existing.id : uid(),
           date: date,
           status: 'open',
@@ -17009,25 +17687,69 @@
           note: note,
           createdAt: nowIso
         };
-      } else {
-        assignment = {
-          id: existing ? existing.id : uid(),
-          date: date,
-          status: 'claimed',
-          originalInstructor: cls.instructor,
-          requestedBy: sessionName || cls.instructor,
-          requestedAt: nowIso,
-          subInstructor: assignee,
-          claimedBy: assignee,
-          claimedAt: nowIso,
-          approvedBy: null,
-          approvedAt: null,
-          denyReason: null,
-          note: note,
-          createdAt: nowIso
-        };
       }
+      return {
+        id: existing ? existing.id : uid(),
+        date: date,
+        status: 'claimed',
+        originalInstructor: cls.instructor,
+        requestedBy: sessionName || cls.instructor,
+        requestedAt: nowIso,
+        subInstructor: assignee,
+        claimedBy: assignee,
+        claimedAt: nowIso,
+        approvedBy: null,
+        approvedAt: null,
+        denyReason: null,
+        note: note,
+        createdAt: nowIso
+      };
+    }
+    function submit(){
+      if (!d) { ctx.toast('Pick a valid date', 'error'); return; }
+      if (!dayMatch) {
+        ctx.toast('That date is a ' + IDX_TO_DOW[d.getDay()] + ' but the class is on ' + (normalizeDow(cls.dayOfWeek) || cls.dayOfWeek), 'error');
+        return;
+      }
+      if (mode === 'direct') {
+        if (!assignee) { ctx.toast('Pick a trainer', 'error'); return; }
+        if (assignee === cls.instructor) { ctx.toast('Cover must be different from regular instructor', 'error'); return; }
+        /* Patch CC: check the *assignee's* conflicts, not the actor's.
+           Exclude an existing assignment for the same date when one is
+           being replaced. */
+        var win = subOccurrenceWindow(cls, date);
+        if (win) {
+          var hits = getScheduleConflicts(assignee, win.startISO, win.endISO, {
+            classes: ctx.classes || [],
+            clients: ctx.clients || [],
+            timeOff: ctx.timeOff || [],
+            trainerProfiles: ctx.trainerProfiles || [],
+            excludeSubAssignmentId: existing ? existing.id : null,
+            includeSoftWarnings: true
+          });
+          var blockers = hits.filter(function(c){ return c.severity === 'block'; });
+          if (blockers.length > 0) {
+            setPendingConflict({
+              conflicts: blockers,
+              warnings: hits.filter(function(c){ return c.severity !== 'block'; })
+            });
+            return;
+          }
+        }
+      }
+      props.onSave(buildAssignment());
+    }
+    function commitOverride(reason){
+      var assignment = buildAssignment();
       props.onSave(assignment);
+      if (reason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('class', cls.id, {
+          conflicts: pendingConflict.conflicts,
+          reason: reason,
+          context: { kind: 'sub_direct_assign', subAssignmentId: assignment.id, assignee: assignee }
+        });
+      }
+      setPendingConflict(null);
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -17128,7 +17850,14 @@
               ? 'Replace assignment'
               : (mode === 'queue' ? 'Post to queue' : 'Assign')
           )
-        )
+        ),
+        pendingConflict && e(ConflictDialog, {
+          conflicts: pendingConflict.conflicts,
+          warnings: pendingConflict.warnings,
+          canOverride: canOverride,
+          onCancel: function(){ setPendingConflict(null); },
+          onOverride: commitOverride
+        })
       )
     );
   }
@@ -17961,17 +18690,61 @@
     var action = actionTuple[0]; var setAction = actionTuple[1];
     var noteTuple = useState(''); var note = noteTuple[0]; var setNote = noteTuple[1];
     var reasonTuple = useState(''); var reason = reasonTuple[0]; var setReason = reasonTuple[1];
+    /* Patch CC: pending approval conflict gate. Fires only on approve
+       (deny is a return-to-open transition, no commitment held). */
+    var pendingConflictTuple = useState(null);
+    var pendingConflict = pendingConflictTuple[0]; var setPendingConflict = pendingConflictTuple[1];
+    var canOverride = ctx.can && ctx.can('canEditClassStructure');
 
+    function doApprove(){
+      ctx.approveSub(cls.id, sub.id, (ctx.session && ctx.session.name) || 'admin', note);
+      ctx.toast('Sub approved \u2713');
+      props.onClose();
+    }
     function submit(){
       if (action === 'approve') {
-        ctx.approveSub(cls.id, sub.id, (ctx.session && ctx.session.name) || 'admin', note);
-        ctx.toast('Sub approved \u2713');
+        /* Patch CC: re-check the claimer's conflicts at approval time.
+           Exclude this sub assignment itself. */
+        var claimer = sub.subInstructor || sub.claimedBy;
+        if (claimer) {
+          var win = subOccurrenceWindow(cls, sub.date);
+          if (win) {
+            var hits = getScheduleConflicts(claimer, win.startISO, win.endISO, {
+              classes: ctx.classes || [],
+              clients: ctx.clients || [],
+              timeOff: ctx.timeOff || [],
+              trainerProfiles: ctx.trainerProfiles || [],
+              excludeSubAssignmentId: sub.id,
+              includeSoftWarnings: true
+            });
+            var blockers = hits.filter(function(c){ return c.severity === 'block'; });
+            if (blockers.length > 0) {
+              setPendingConflict({
+                conflicts: blockers,
+                warnings: hits.filter(function(c){ return c.severity !== 'block'; })
+              });
+              return;
+            }
+          }
+        }
+        doApprove();
       } else {
         if (!reason.trim()) { ctx.toast('Denial reason is required', 'error'); return; }
         ctx.denySub(cls.id, sub.id, reason.trim());
         ctx.toast('Sub denied, returned to open');
+        props.onClose();
       }
-      props.onClose();
+    }
+    function commitApproveOverride(overrideReason){
+      doApprove();
+      if (overrideReason && ctx.recordScheduleOverride) {
+        ctx.recordScheduleOverride('class', cls.id, {
+          conflicts: pendingConflict.conflicts,
+          reason: overrideReason,
+          context: { kind: 'sub_approve', subAssignmentId: sub.id, claimer: sub.subInstructor || sub.claimedBy }
+        });
+      }
+      setPendingConflict(null);
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -18029,7 +18802,14 @@
             className: action === 'approve' ? 'btn btn-green' : 'btn btn-danger',
             onClick: submit
           }, action === 'approve' ? 'Approve Sub' : 'Deny Sub')
-        )
+        ),
+        pendingConflict && e(ConflictDialog, {
+          conflicts: pendingConflict.conflicts,
+          warnings: pendingConflict.warnings,
+          canOverride: canOverride,
+          onCancel: function(){ setPendingConflict(null); },
+          onOverride: commitApproveOverride
+        })
       )
     );
   }
@@ -20154,6 +20934,10 @@
        (always '' for rows that surface here, since these are the
        unassigned consults) and applies the assignment immediately. */
     var trainerNames = (ctx.trainers || []).slice().sort();
+    /* Patch CC: pending consult-assign conflict gate. */
+    var pendingConsultClaimTuple = useState(null);
+    var pendingConsultClaim = pendingConsultClaimTuple[0]; var setPendingConsultClaim = pendingConsultClaimTuple[1];
+    var consultCanOverride = ctx.can && ctx.can('canEditClassStructure');
 
     /* Patch J: triage hub. Two new sections sit above the existing
        leads queue: unconverted WROs and unassigned consultations.
@@ -20661,6 +21445,33 @@
                       else ctx.toast && ctx.toast('Could not clear trainer.');
                       return;
                     }
+                    /* Patch CC: gate the trainer's overlap with the
+                       consult's already-fixed date+time before committing. */
+                    var nextSess = row.next;
+                    if (nextSess && nextSess.date) {
+                      var win = ymdTimeToWindow(nextSess.date, nextSess.time || '08:00', nextSess.durationHours || 0.75);
+                      if (win) {
+                        var hits = getScheduleConflicts(v, win.startISO, win.endISO, {
+                          classes: ctx.classes || [],
+                          clients: ctx.clients || [],
+                          timeOff: ctx.timeOff || [],
+                          trainerProfiles: ctx.trainerProfiles || [],
+                          excludeSessionId: nextSess.id,
+                          includeSoftWarnings: true
+                        });
+                        var blockers = hits.filter(function(x){ return x.severity === 'block'; });
+                        if (blockers.length > 0) {
+                          setPendingConsultClaim({
+                            clientId: c.id,
+                            clientName: c.name,
+                            trainerName: v,
+                            conflicts: blockers,
+                            warnings: hits.filter(function(x){ return x.severity !== 'block'; })
+                          });
+                          return;
+                        }
+                      }
+                    }
                     var ok = ctx.claimConsult(c.id, v);
                     if (ok) ctx.toast && ctx.toast(c.name + ' assigned to ' + v + '.');
                     else ctx.toast && ctx.toast('Could not assign trainer.');
@@ -20845,6 +21656,28 @@
         ctx: ctx,
         lead: (ctx.queue || []).find(function(x){ return x.id === leadDetail.id; }) || leadDetail,
         onClose: function(){ setLeadDetail(null); }
+      }),
+      pendingConsultClaim && e(ConflictDialog, {
+        conflicts: pendingConsultClaim.conflicts,
+        warnings: pendingConsultClaim.warnings,
+        canOverride: consultCanOverride,
+        onCancel: function(){ setPendingConsultClaim(null); },
+        onOverride: function(reason){
+          var ok = ctx.claimConsult(pendingConsultClaim.clientId, pendingConsultClaim.trainerName);
+          if (ok) {
+            ctx.toast && ctx.toast(pendingConsultClaim.clientName + ' assigned to ' + pendingConsultClaim.trainerName + '.');
+            if (reason && ctx.recordScheduleOverride) {
+              ctx.recordScheduleOverride('client', pendingConsultClaim.clientId, {
+                conflicts: pendingConsultClaim.conflicts,
+                reason: reason,
+                context: { kind: 'consult_assign_admin', trainerName: pendingConsultClaim.trainerName }
+              });
+            }
+          } else {
+            ctx.toast && ctx.toast('Could not assign trainer.');
+          }
+          setPendingConsultClaim(null);
+        }
       })
     );
   }
@@ -21109,6 +21942,10 @@
     /* v2.3: lead detail modal */
     var leadDetailTuple = useState(null);
     var leadDetail = leadDetailTuple[0]; var setLeadDetail = leadDetailTuple[1];
+    /* Patch CC: pending consult-claim conflict gate for "I'll take it". */
+    var pendingConsultClaimTuple = useState(null);
+    var pendingConsultClaim = pendingConsultClaimTuple[0]; var setPendingConsultClaim = pendingConsultClaimTuple[1];
+    var consultCanOverride = ctx.can && ctx.can('canEditClassStructure');
 
     var allEntries = ctx.queue || [];
     /* Waiting = unclaimed pool */
@@ -21331,6 +22168,32 @@
               e('button', {
                 className: 'btn btn-gold btn-sm',
                 onClick: function(){
+                  /* Patch CC: trainer-self overlap gate at claim moment.
+                     Consult window is the already-fixed next-scheduled
+                     session date+time+0.75h (consult default). */
+                  if (s && s.date) {
+                    var win = ymdTimeToWindow(s.date, s.time || '08:00', s.durationHours || 0.75);
+                    if (win) {
+                      var hits = getScheduleConflicts(trainerName, win.startISO, win.endISO, {
+                        classes: ctx.classes || [],
+                        clients: ctx.clients || [],
+                        timeOff: ctx.timeOff || [],
+                        trainerProfiles: ctx.trainerProfiles || [],
+                        excludeSessionId: s.id,
+                        includeSoftWarnings: true
+                      });
+                      var blockers = hits.filter(function(x){ return x.severity === 'block'; });
+                      if (blockers.length > 0) {
+                        setPendingConsultClaim({
+                          clientId: c.id,
+                          clientName: c.name,
+                          conflicts: blockers,
+                          warnings: hits.filter(function(x){ return x.severity !== 'block'; })
+                        });
+                        return;
+                      }
+                    }
+                  }
                   var ok = ctx.claimConsult(c.id, trainerName);
                   if (ok) ctx.toast && ctx.toast('Claimed for ' + trainerName, 'success');
                   else ctx.toast && ctx.toast('Could not claim consult.');
@@ -21507,6 +22370,28 @@
         ctx: ctx,
         lead: (ctx.queue || []).find(function(x){ return x.id === leadDetail.id; }) || leadDetail,
         onClose: function(){ setLeadDetail(null); }
+      }),
+      pendingConsultClaim && e(ConflictDialog, {
+        conflicts: pendingConsultClaim.conflicts,
+        warnings: pendingConsultClaim.warnings,
+        canOverride: consultCanOverride,
+        onCancel: function(){ setPendingConsultClaim(null); },
+        onOverride: function(reason){
+          var ok = ctx.claimConsult(pendingConsultClaim.clientId, trainerName);
+          if (ok) {
+            ctx.toast && ctx.toast('Claimed for ' + trainerName, 'success');
+            if (reason && ctx.recordScheduleOverride) {
+              ctx.recordScheduleOverride('client', pendingConsultClaim.clientId, {
+                conflicts: pendingConsultClaim.conflicts,
+                reason: reason,
+                context: { kind: 'consult_self_claim', trainerName: trainerName }
+              });
+            }
+          } else {
+            ctx.toast && ctx.toast('Could not claim consult.');
+          }
+          setPendingConsultClaim(null);
+        }
       })
     );
   }
