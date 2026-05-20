@@ -11142,7 +11142,7 @@
     }, []);
 
     var closuresCount = (ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length;
-    var timeOffCount = (ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length;
+    var timeOffCount = (ctx.timeOff || []).filter(function(t){ return t.status === 'pending'; }).length;
 
     /* Patch J: unassigned consultations panel relocated to the Leads
        hub (ConsultQueueView). AdminScheduleView returns to being purely
@@ -11162,7 +11162,7 @@
           ctx.can('addTimeOff') && e('button', {
             className: 'btn btn-primary btn-sm',
             onClick: function(){ setTimeOffOpen(true); }
-          }, '🏖 Time Off (' + timeOffCount + ')'),
+          }, '🏖 Time Off Requests (' + timeOffCount + ')'),
           ctx.can('canManageBanners') && e('button', {
             className: 'btn btn-outline btn-sm',
             onClick: function(){ setBannersOpen(true); }
@@ -28416,7 +28416,7 @@
           e('button', { className: 'btn btn-primary btn-sm', onClick: function(){ setClosuresOpen(true); } },
             '\ud83d\udcc5 Closures (' + ((ctx.closures || []).filter(function(c){ return !c.deleted_at; }).length) + ')'),
           ctx.can('addTimeOff') && e('button', { className: 'btn btn-primary btn-sm', onClick: function(){ setTimeOffOpen(true); } },
-            '\ud83c\udfd6 Time Off (' + ((ctx.timeOff || []).filter(function(t){ return !t.deleted_at; }).length) + ')'),
+            '\ud83c\udfd6 Time Off Requests (' + ((ctx.timeOff || []).filter(function(t){ return t.status === 'pending'; }).length) + ')'),
           ctx.can('canManageBanners') && e('button', { className: 'btn btn-outline btn-sm', onClick: function(){ setBannersOpen(true); } },
             'Banners'),
           e('button', { className: 'btn btn-outline btn-sm', onClick: exportScheduleAuditCSV }, '\u2193 CSV')
