@@ -6366,6 +6366,7 @@
         setNotifications([]);
         return;
       }
+      setNotifications([]);    // clear stale rows before fetching new user's
       var trainerId = session.trainer_id;
       var cancelled = false;
       storage.notifications.listForTrainer(trainerId, 50).then(function(rows){
@@ -6375,6 +6376,10 @@
       });
       var unsubscribe = storage.notifications.subscribeForTrainer(trainerId, function(n){
         if (cancelled) return;
+        if (n.targetTrainerId !== trainerId) {
+          console.warn('[bell] cross-user push blocked:', { expected: trainerId, got: n.targetTrainerId, rowId: n.id, type: n.type });
+          return;
+        }
         setNotifications(function(prev){
           /* Dedupe by id - guards against double-fire on reconnect or
              a self-write echo (triggers won't fire from this client today,
