@@ -14181,10 +14181,10 @@
     var errors = errorsTuple[0]; var setErrors = errorsTuple[1];
 
     /* v4.21: partner slots for new pairs packages. Only renders in the
-       create branch (!isEdit) since the edit-mode pkgRecord rebuild has
-       a known latent bug that strips participant_ids; fixing that is a
-       separate spec. partnerIds is an array of length = packageSize - 1
-       where each entry is '' (empty) or a client id (filled). */
+       create branch (!isEdit) by design - participant changes on an
+       existing package go through the Pairs to Confirm queue, not this
+       modal. partnerIds is an array of length = packageSize - 1 where
+       each entry is '' (empty) or a client id (filled). */
     var partnerIdsTuple = useState(function(){ return []; });
     var partnerIds = partnerIdsTuple[0];
     var setPartnerIds = partnerIdsTuple[1];
@@ -14239,8 +14239,8 @@
     var selectedPkg = packagesAvailable.find(function(p){ return p.id === form.pkgId; }) || packagesAvailable[0];
 
     /* v4.21: derive slot count from the selected template. The edit
-       branch never renders slots (deferred bug), so the count drives
-       only the create-branch UI. */
+       branch never renders slots by design (see partnerIds comment), so
+       the count drives only the create-branch UI. */
     var packageSize = getPackageParticipantCount(selectedPkg);
     var partnerSlotCount = (!isEdit && selectedPkg && (selectedPkg.is_pairs || isPairsPackageType(selectedPkg.type)))
       ? Math.max(0, packageSize - 1)
@@ -14308,12 +14308,9 @@
         paymentType: form.paymentType,
         source: isConsult ? 'consultation' : 'manual'
       };
-      /* v4.21: stamp participant metadata only on the create branch.
-         Edit-mode pkgRecord intentionally omits these fields - the
-         current rebuild replaces packages[0] entirely, and stamping
-         a fresh participant_ids array here would erase any partners
-         confirmed via the Pairs to Confirm queue (this is the deferred
-         edit-mode bug; do not widen its blast radius). */
+      /* v4.21: stamp participant metadata fresh on create. Edit-mode
+         stamping happens inline in the overlay below as fill-if-missing
+         so present values win and confirmed partners survive. */
       if (!isEdit) {
         pkgRecord.participant_ids = [newClientId].concat(filledPartners);
         pkgRecord.package_size = packageSize;
@@ -14352,9 +14349,34 @@
       }
       var out;
       if (isEdit) {
-        /* Editing - preserve any additional packages, replace just the first one's metadata */
-        var existingPkgs = getPackages(existing);
-        var updatedPkgs = [pkgRecord].concat(existingPkgs.slice(1));
+        /* Overlay edited fields on the first non-soft-deleted package
+           (matched by reference) so id, participant_ids, package_size,
+           primary_holder_id, dismissed_participant_candidates,
+           participants_at_creation, and source provenance survive. Map
+           over existing.packages RAW (not getPackages) so soft-deleted
+           rows persist. EditPackageModal.save uses the same shape. */
+        var existingArr = existing.packages || [];
+        var targetPkg = existingArr.find(function(p){ return p && !p.deleted_at; });
+        var editOverlay = {
+          sessions: pkgRecord.sessions,
+          price: pkgRecord.price,
+          type: pkgRecord.type,
+          template_id: pkgRecord.template_id,
+          amountPaid: pkgRecord.amountPaid,
+          purchaseDate: pkgRecord.purchaseDate,
+          paymentType: pkgRecord.paymentType
+        };
+        var updatedPkgs = existingArr.map(function(p){
+          if (!targetPkg || p !== targetPkg) return p;
+          var merged = Object.assign({}, p, editOverlay);
+          /* Fill-if-missing participant defaults for pre-Phase-2A rows;
+             present values win so confirmed partners are never
+             overwritten. Mirrors migrate_package_participants. */
+          if (merged.participant_ids == null) merged.participant_ids = [existing.id];
+          if (merged.package_size == null) merged.package_size = isPairsPackageType(merged.type) ? 2 : 1;
+          if (merged.primary_holder_id == null) merged.primary_holder_id = existing.id;
+          return merged;
+        });
         out = Object.assign({}, existing, {
           name: form.name.trim(),
           phone: form.phone,
