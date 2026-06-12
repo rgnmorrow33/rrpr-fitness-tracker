@@ -22538,6 +22538,10 @@
     var notificationCount = props.notificationCount || 0;
     var notificationsNode = props.notificationsNode;
     var actions = props.actions;
+    var searchValue = props.searchValue || '';
+    var onSearchChange = props.onSearchChange;
+    var searchResults = props.searchResults || [];
+    var onSearchResultClick = props.onSearchResultClick;
 
     /* Use the provided notifications node (e.g., real NotificationsBell)
        when given; otherwise render the spec's decorative bell. */
@@ -22552,12 +22556,40 @@
         e('div', { className: 'meta' }, kicker || dateText || '')
       ),
       e('div', { className: 'topbar-right' },
-        e('div', { className: 'search' },
+        e('div', { className: 'search', style: { position: 'relative' } },
           e('span', { style: { fontSize: 12 } }, '⌕'),
-          /* TODO Phase 1: search field is decoration only. Wire to a
-             real global search in a later phase. */
-          e('input', { placeholder: 'search clients, classes, leads…', defaultValue: '' }),
-          e('span', { className: 'kbd' }, '⌘K')
+          e('input', {
+            placeholder: 'Search clients...',
+            value: searchValue,
+            onChange: function(ev){ if (onSearchChange) onSearchChange(ev.target.value); }
+          }),
+          e('span', { className: 'kbd' }, '⌘K'),
+          searchResults.length > 0 && e('div', {
+            style: {
+              position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+              background: '#fff', border: '1px solid var(--rule)', borderRadius: 4,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 50,
+              maxHeight: '360px', overflowY: 'auto'
+            }
+          },
+            searchResults.map(function(c){
+              return e('div', {
+                key: c.id,
+                className: 'list-row',
+                style: { cursor: 'pointer', padding: '10px 12px' },
+                onClick: function(){ if (onSearchResultClick) onSearchResultClick(c.id); }
+              },
+                e('div', null,
+                  e('div', { style: { fontWeight: 700, color: 'var(--navy)' } }, c.name),
+                  e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
+                    (c.trainerName ? c.trainerName + ' · ' : '') +
+                    (c.location || '') +
+                    (c.phone ? ' · ' + c.phone : '')
+                  )
+                )
+              );
+            })
+          )
         ),
         bell,
         e('div', { className: 'iconbtn', title: 'Help' },
@@ -22621,6 +22653,22 @@
     var pendingScheduleActionTuple = useState(null);
     var pendingScheduleAction = pendingScheduleActionTuple[0];
     var setPendingScheduleAction = pendingScheduleActionTuple[1];
+
+    /* TopBar global PT-client search. State lifted here so TopBar can
+       render an inline dropdown of results and clicking a row opens
+       ClientDetail via the existing setClientDetailId pattern. */
+    var adminSearchTuple = useState('');
+    var adminSearch = adminSearchTuple[0];
+    var setAdminSearch = adminSearchTuple[1];
+    var adminSearchResults = useMemo(function(){
+      var q = (adminSearch || '').trim().toLowerCase();
+      if (q.length < 2) return [];
+      return (ctx.clients || []).filter(function(c){
+        return (c.name || '').toLowerCase().indexOf(q) !== -1
+            || (c.phone || '').toLowerCase().indexOf(q) !== -1
+            || (c.email || '').toLowerCase().indexOf(q) !== -1;
+      }).slice(0, 8);
+    }, [adminSearch, ctx.clients]);
 
     /* Cleanup-B: DOMAIN_TABS + changeDomain removed with the pill row
        and admin tab strip. Sidebar items now drive (domain, tab)
@@ -22913,6 +22961,13 @@
           kicker: 'all facilities',
           notificationCount: ctx.unreadCount || 0,
           notificationsNode: e(NotificationsBell, { ctx: ctx }),
+          searchValue: adminSearch,
+          onSearchChange: setAdminSearch,
+          searchResults: adminSearchResults,
+          onSearchResultClick: function(id){
+            setClientDetailId(id);
+            setAdminSearch('');
+          },
           actions: e('button', {
             className: 'logout-btn',
             onClick: function(){ ctx.setSession(null); }
