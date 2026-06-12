@@ -8186,6 +8186,13 @@
         .upsert(supabaseRow, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
     }
+    function persistReferralRow(r){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.referrals.toSupabase(r);
+      return supabaseClient.from('referrals')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
     /* Patch P: lead-create with persist-then-toast sequencing. Persists
        first, then advances local state. On reject, no optimistic state
        lands and the caller's .catch surfaces the error. Mirrors the
@@ -8200,6 +8207,19 @@
           return next;
         });
         return entry;
+      });
+    }
+    function upsertReferralAsync(r){
+      return persistReferralRow(r).then(function(){
+        setReferrals(function(list){
+          var exists = list.some(function(x){ return x.id === r.id; });
+          var next = exists
+            ? list.map(function(x){ return x.id === r.id ? r : x; })
+            : list.concat([r]);
+          referralsRef.current = next;
+          return next;
+        });
+        return r;
       });
     }
     function deleteQueueEntry(id){
@@ -9160,6 +9180,7 @@
       deleteWRO: deleteWRO,
       referrals: referrals,
       upsertReferral: upsertReferral,
+      upsertReferralAsync: upsertReferralAsync,
       deleteReferral: deleteReferral,
       addTrainer: addTrainer,
       removeTrainer: removeTrainer,
@@ -13503,9 +13524,10 @@
           client: c,
           onClose: function(){ setReferOpen(false); },
           onSave: function(r){
-            ctx.upsertReferral(r);
-            setReferOpen(false);
-            ctx.toast('PT referral submitted ✓');
+            ctx.upsertReferralAsync(r).then(function(){
+              setReferOpen(false);
+              ctx.toast('PT referral submitted ✓');
+            }).catch(function(err){ ctx.toast('Could not save referral: ' + ((err && err.message) || 'unknown error'), 'error'); });
           }
         }),
         addPkgOpen && e(AddPackageModal, {
@@ -27206,9 +27228,10 @@
         client: editRef.clientId ? ctx.clients.find(function(c){ return c.id === editRef.clientId; }) : null,
         onClose: function(){ setEditRef(null); },
         onSave: function(r){
-          ctx.upsertReferral(r);
-          setEditRef(null);
-          ctx.toast('Referral updated ✓');
+          ctx.upsertReferralAsync(r).then(function(){
+            setEditRef(null);
+            ctx.toast('Referral updated ✓');
+          }).catch(function(err){ ctx.toast('Could not save referral: ' + ((err && err.message) || 'unknown error'), 'error'); });
         }
       })
     );
