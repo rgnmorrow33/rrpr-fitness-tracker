@@ -46,8 +46,8 @@ explaining the transition.
 
 ## ADR-0001: Round Rock Fitness Tracker as permanent system
 
-**Status.** Proposed
-**Date.** 2026-05-15
+**Status.** Accepted
+**Date.** 2026-06-12
 
 ### Context
 
@@ -96,12 +96,9 @@ Multi-year horizon assumed. No replacement is on the roadmap.
 
 ### Notes
 
-Status moves to **Accepted** after Selisa ratifies via the one-pager
-scheduled for delivery by 2026-06-12. If ratification fails or is
-substantively contested, this ADR moves to **Deprecated** and the
-system reverts to stopgap framing. In that case, ADR-0002 and ADR-0003
-are also likely to revert, since both depend on this ADR's premise to
-justify their scope.
+Ratified by Selisa (Asst. Head of Facilities, CMRC), June 12, 2026.
+ADR-0003 Phase 2B is now ungated; ADR-0002's ratification contingency
+is resolved.
 
 Council record preserved in the 2026-05-15 chat history.
 
@@ -171,10 +168,10 @@ push consequences onto the others.
 
 ### Notes
 
-Council record preserved in the 2026-05-15 chat history. Decisions
-ratified contingent on ADR-0001 ratifying - if the tracker reverts to
-stopgap framing, this ADR moves to Deprecated and the duplicate-client
-workaround stands.
+Council record preserved in the 2026-05-15 chat history. The
+ratification contingency on ADR-0001 is resolved as of 2026-06-12
+(ADR-0001 Accepted); the duplicate-client-workaround fallback no
+longer applies.
 
 Will partially supersede ADR-0004 on the JSONB-on-clients rationale,
 specifically the `sessions` JSONB portion. `packages` and
