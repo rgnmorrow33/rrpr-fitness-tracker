@@ -6632,19 +6632,37 @@
       setNotifications([]);    // clear stale rows before fetching new user's
       var trainerId = session.trainer_id;
       var cancelled = false;
-      storage.notifications.listForTrainer(trainerId, 50).then(function(rows){
-        if (cancelled) return;
-        /* Patch 2B: scope the fetch render the same way the push render is
-           scoped (server .eq is trusted but no longer the sole gate). */
-        var scoped = (rows || []).filter(function(n){
-          if (notificationBelongsTo(n, trainerId)) return true;
-          console.warn('[bell] cross-user fetch row dropped:', { expected: trainerId, got: n && n.targetTrainerId, rowId: n && n.id, type: n && n.type });
-          return false;
+      /* Mount-fetch, also reused as the refetch-on-wake catch-up. The push
+         onInsert below is append-only, so rows inserted while an iOS socket
+         was dead (sleep/background) never arrive live - the channel
+         reconnects on sweep but postgres_changes does not replay misses.
+         Re-running the scoped fetch on visible/online/pageshow recovers them
+         without a hard refresh, mirroring the app-changes reload-on-event
+         catch-up. Full replace (not append) so the list converges to truth. */
+      function loadNotifications(){
+        storage.notifications.listForTrainer(trainerId, 50).then(function(rows){
+          if (cancelled) return;
+          /* Patch 2B: scope the fetch render the same way the push render is
+             scoped (server .eq is trusted but no longer the sole gate). */
+          var scoped = (rows || []).filter(function(n){
+            if (notificationBelongsTo(n, trainerId)) return true;
+            console.warn('[bell] cross-user fetch row dropped:', { expected: trainerId, got: n && n.targetTrainerId, rowId: n && n.id, type: n && n.type });
+            return false;
+          });
+          setNotifications(scoped);
+        }).catch(function(err){
+          console.error('Notifications load failed:', err);
         });
-        setNotifications(scoped);
-      }).catch(function(err){
-        console.error('Notifications load failed:', err);
-      });
+      }
+      loadNotifications();
+      /* Patch 2A: refetch-on-wake. Reconnect (Patch K sweep) restores the
+         channel for future inserts; this restores the DATA missed during the
+         dead window. Cheap (one filtered select) on a benign visibility flip. */
+      function onNotifVisible(){ if (document.visibilityState === 'visible') loadNotifications(); }
+      function onNotifWake(){ loadNotifications(); }
+      document.addEventListener('visibilitychange', onNotifVisible);
+      window.addEventListener('online', onNotifWake);
+      window.addEventListener('pageshow', onNotifWake);
       var unsubscribe = storage.notifications.subscribeForTrainer(trainerId, function(n){
         if (cancelled) return;
         if (!notificationBelongsTo(n, trainerId)) {
@@ -6661,6 +6679,9 @@
       });
       return function(){
         cancelled = true;
+        document.removeEventListener('visibilitychange', onNotifVisible);
+        window.removeEventListener('online', onNotifWake);
+        window.removeEventListener('pageshow', onNotifWake);
         try { unsubscribe(); } catch(_){}
       };
     }, [session && session.trainer_id]);
