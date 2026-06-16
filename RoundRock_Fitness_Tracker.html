@@ -6315,6 +6315,17 @@
     };
   }
 
+  /* v4.27 + Patch 2B: per-user scope predicate for the notification bell.
+     A row belongs in the current session's bell only when its target matches
+     the signed-in trainer. Applied to BOTH injectors of the bell state - the
+     realtime push render and the mount-fetch render - so neither can seat an
+     off-target row regardless of what the server channel filter or the
+     listForTrainer .eq returns. Defense-in-depth: hardens the cross-user
+     leak symptom; does NOT fix session misattribution (the real root cause). */
+  function notificationBelongsTo(n, trainerId){
+    return !!n && n.targetTrainerId === trainerId;
+  }
+
   /* ============ APP ROOT ============ */
   function App(){
     /* Storage adapter refactor (session 1):
@@ -6622,13 +6633,21 @@
       var trainerId = session.trainer_id;
       var cancelled = false;
       storage.notifications.listForTrainer(trainerId, 50).then(function(rows){
-        if (!cancelled) setNotifications(rows || []);
+        if (cancelled) return;
+        /* Patch 2B: scope the fetch render the same way the push render is
+           scoped (server .eq is trusted but no longer the sole gate). */
+        var scoped = (rows || []).filter(function(n){
+          if (notificationBelongsTo(n, trainerId)) return true;
+          console.warn('[bell] cross-user fetch row dropped:', { expected: trainerId, got: n && n.targetTrainerId, rowId: n && n.id, type: n && n.type });
+          return false;
+        });
+        setNotifications(scoped);
       }).catch(function(err){
         console.error('Notifications load failed:', err);
       });
       var unsubscribe = storage.notifications.subscribeForTrainer(trainerId, function(n){
         if (cancelled) return;
-        if (n.targetTrainerId !== trainerId) {
+        if (!notificationBelongsTo(n, trainerId)) {
           console.warn('[bell] cross-user push blocked:', { expected: trainerId, got: n.targetTrainerId, rowId: n.id, type: n.type });
           return;
         }
