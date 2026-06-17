@@ -10,6 +10,7 @@
     "log:scaffold": "node scripts/log-scaffold.js"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "pg": "^8.21.0"
   }
 }
