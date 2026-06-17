@@ -30,7 +30,7 @@ import { test as base, expect, type Page } from '@playwright/test';
  * so a genuine UNrecovered drop still fails the suite.
  * ------------------------------------------------------------------ */
 const CONSOLE_ALLOWLIST: string[] = [
-  '[realtime] subscribed',   // single-channel subscribe confirmation on load
+  '[realtime] subscribed',   // per-table subscribe confirmation on load (one per channel)
   '[realtime] reconnected',  // benign recovery confirmation after the sweep
   '[realtime] sweep',        // benign pageshow/visibility resubscribe trigger
   'migrate_',                // lazy package migrations - idempotent, log-only when clean
@@ -47,10 +47,12 @@ function isAllowed(text: string): boolean {
   return CONSOLE_ALLOWLIST.some((p) => text.startsWith(p));
 }
 
-/** Transient realtime warnings emitted by the on-load pageshow sweep. */
+/** Transient realtime warnings emitted by the on-load pageshow sweep.
+ *  v4.33: channels are now per-table ('table-changes-<table>') rather than a
+ *  single 'app-changes' channel, so the sweep emits one CLOSED warn per table. */
 function isRealtimeTransient(text: string): boolean {
   return (
-    text.startsWith('[realtime] app-changes status=CLOSED') ||
+    (text.startsWith('[realtime] table-changes-') && text.includes('status=CLOSED')) ||
     text.startsWith('[realtime] scheduling reconnect')
   );
 }

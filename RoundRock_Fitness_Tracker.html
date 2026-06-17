@@ -2859,13 +2859,6 @@
           { event: 'INSERT', schema: 'public', table: 'notifications',
             filter: 'target_trainer_id=eq.' + trainerId },
           function(payload){
-            /* PHASE 1 TEMP (v4.33 diagnostic): working-control. notifications
-               is the confirmed-firing path; if THIS logs but app-changes does
-               not, the instrumentation works and the single-channel path is
-               the dead one. Remove in Phase 2. */
-            console.info('[realtime] notifications FIRED table=notifications' +
-              ' event=' + (payload && payload.eventType) +
-              ' ts=' + new Date().toISOString());
             try { onInsert(translate.notifications.fromSupabase(payload.new)); }
             catch(err){ console.error('Notification insert handler failed:', err); }
           });
@@ -6575,43 +6568,75 @@
         ['trainer_time_off',  setTimeOff,           'timeOff'],
         ['announcement_banners', setAnnouncementBanners, 'announcementBanners']
       ];
-      /* Patch C: route through subscribeWithReconnect. Builder runs on
-         every reconnect so the rebuilt channel re-attaches all 12
-         postgres_changes listeners. setSyncStatus is the existing UI
-         dot - layered as the onStatus side-effect. */
-      function buildAppChanges(client){
-        var channel = client.channel('app-changes');
-        subs.forEach(function(sub){
-          var table = sub[0]; var setter = sub[1]; var entity = sub[2];
-          /* Patch X: 100ms trailing-edge debounce per entity. A burst
-             of inserts on one table coalesces into one reload; other
-             entities' updates are unaffected (separate closures). */
-          var reload = debounce(function(){
-            storage[entity].load().then(function(fresh){
-              if (fresh != null) setter(fresh);
-            }).catch(function(err){
-              console.error('Subscription reload failed for ' + table + ':', err);
-            });
-          }, 100);
+      /* v4.33: PER-TABLE channels. The prior single 'app-changes' channel
+         stacked all 12 postgres_changes bindings and delivered ZERO events to
+         any of them - confirmed by the two-window test plus Phase 1
+         instrumentation: the channel reached SUBSCRIBED but no row event ever
+         reached a handler. supabase-js v2 does not reliably fan multiple
+         postgres_changes bindings out on one shared channel. The fix mirrors
+         the proven notifications pattern (one channel, one binding): each table
+         gets its own channel keyed 'table-changes-<table>'. subscribeWithReconnect
+         registers each in the module-scoped _activeChannels registry, so the
+         existing registry-wide sweepReconnectChannels (visibility / online /
+         pageshow wake recovery, Patch C/K) addresses and recovers every channel
+         independently - the wake-recovery listeners below are unchanged.
+
+         Sync dot aggregation across N channels: green ('connected') only when
+         EVERY table channel reports SUBSCRIBED; amber ('disconnected') as soon
+         as any reports CHANNEL_ERROR / TIMED_OUT / CLOSED. Mid-connect (some
+         pending, none errored) leaves the dot at its prior value (starts amber
+         per the useState default), so it flips green once the whole set lands.
+
+         Self-write echo is unchanged by the split: one write still produces one
+         row event on one table -> one debounced reload, and the per-entity
+         dirty-check on save no-ops the echo exactly as before. More channels do
+         not multiply echoes. */
+      var channelStatus = {};
+      function recomputeSyncDot(){
+        var allSubscribed = subs.every(function(s){ return channelStatus[s[0]] === 'SUBSCRIBED'; });
+        if (allSubscribed) { setSyncStatus('connected'); return; }
+        var anyDown = subs.some(function(s){
+          var st = channelStatus[s[0]];
+          return st === 'CHANNEL_ERROR' || st === 'TIMED_OUT' || st === 'CLOSED';
+        });
+        if (anyDown) setSyncStatus('disconnected');
+      }
+      var unsubscribers = subs.map(function(sub){
+        var table = sub[0]; var setter = sub[1]; var entity = sub[2];
+        /* Patch X: 100ms trailing-edge debounce per entity. A burst of inserts
+           on one table coalesces into one reload (preserved per-channel). */
+        var reload = debounce(function(){
+          storage[entity].load().then(function(fresh){
+            if (fresh != null) setter(fresh);
+          }).catch(function(err){
+            console.error('Subscription reload failed for ' + table + ':', err);
+          });
+        }, 100);
+        /* Builder re-runs on every reconnect (channels can't be re-subscribed
+           once CLOSED), re-attaching the single binding to a fresh channel. */
+        function buildTableChannel(client){
+          var channel = client.channel('table-changes-' + table);
           channel.on('postgres_changes',
             { event: '*', schema: 'public', table: table },
             function(payload){
-              /* PHASE 1 TEMP (v4.33 diagnostic): prove whether the
-                 single-channel app-changes handler fires at all. Expected
-                 dead per the two-window diagnosis. Remove in Phase 2.
-                 [realtime] prefix + console.info keeps the smoke console
-                 guard happy (guard only fails on error/warn). */
-              console.info('[realtime] app-changes FIRED table=' + table +
-                ' event=' + (payload && payload.eventType) +
-                ' ts=' + new Date().toISOString());
+              /* Runtime-gated verification log. Default silent - ships no
+                 console noise. Set window.__REALTIME_DEBUG = true in a client
+                 console to watch live events fire (the Phase 2 verification
+                 path). [realtime] prefix stays consistent with the smoke
+                 console allowlist; console.info never trips the guard. */
+              if (typeof window !== 'undefined' && window.__REALTIME_DEBUG) {
+                console.info('[realtime] event table=' + table +
+                  ' event=' + (payload && payload.eventType) +
+                  ' ts=' + new Date().toISOString());
+              }
               reload();
             });
+          return channel;
+        }
+        return subscribeWithReconnect('table-changes-' + table, buildTableChannel, function(status){
+          channelStatus[table] = status;
+          recomputeSyncDot();
         });
-        return channel;
-      }
-      var unsubscribe = subscribeWithReconnect('app-changes', buildAppChanges, function(status){
-        if (status === 'SUBSCRIBED') setSyncStatus('connected');
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setSyncStatus('disconnected');
       });
 
       /* Patch C: wake/online sweep. iPad sleep, wifi roam, brief
@@ -6629,7 +6654,7 @@
       window.addEventListener('pageshow', onPageShow);
 
       return function(){
-        unsubscribe();
+        unsubscribers.forEach(function(u){ try { u(); } catch(_){} });
         window.removeEventListener('online', onOnline);
         document.removeEventListener('visibilitychange', onVisible);
         window.removeEventListener('pageshow', onPageShow);
