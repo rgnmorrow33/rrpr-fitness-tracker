@@ -201,6 +201,25 @@ serving RoundRock_Fitness_Tracker.html at the root URL.
 Do NOT put the repo in a OneDrive-synced folder. Conflicts with
 Git's .git folder.
 
+## Version tagging (tag on release)
+
+Every shipped version gets a lightweight git tag at release: `git tag v4.32`
+then `git push origin v4.32`. Tag AFTER the version's commits are pushed to main,
+not before. The tag marks the exact commit that went live as that version.
+
+Why: versions otherwise live only as inline comments and in the update-log docx,
+which makes version-to-version history archaeology (this caused the v4.30/v4.31
+reconstruction problem). Tags give the log scaffold (`npm run log:scaffold`) clean
+ranges with no argument, let the SCHEMA.md checker stamp drift reports against a
+known version, and mean future-me never has to guess whether a version existed.
+
+Rule: a version is not done until it is tagged. The update-log entry and the tag
+are the two closing acts of shipping a version. If you used the tag+scaffold
+helper (`npm run release:tag -- v4.32`), the tag is handled; otherwise tag by hand.
+
+Tags are cheap and local-cost-free. This is a habit, not a process. No annotated
+tags, no release notes in the tag, no signing. Just `git tag vX.Y`.
+
 ## Required field validation
 
 - Name required on new client and WRO intake
