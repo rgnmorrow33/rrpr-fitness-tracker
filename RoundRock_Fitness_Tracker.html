@@ -2859,6 +2859,13 @@
           { event: 'INSERT', schema: 'public', table: 'notifications',
             filter: 'target_trainer_id=eq.' + trainerId },
           function(payload){
+            /* PHASE 1 TEMP (v4.33 diagnostic): working-control. notifications
+               is the confirmed-firing path; if THIS logs but app-changes does
+               not, the instrumentation works and the single-channel path is
+               the dead one. Remove in Phase 2. */
+            console.info('[realtime] notifications FIRED table=notifications' +
+              ' event=' + (payload && payload.eventType) +
+              ' ts=' + new Date().toISOString());
             try { onInsert(translate.notifications.fromSupabase(payload.new)); }
             catch(err){ console.error('Notification insert handler failed:', err); }
           });
@@ -6588,7 +6595,17 @@
           }, 100);
           channel.on('postgres_changes',
             { event: '*', schema: 'public', table: table },
-            function(){ reload(); });
+            function(payload){
+              /* PHASE 1 TEMP (v4.33 diagnostic): prove whether the
+                 single-channel app-changes handler fires at all. Expected
+                 dead per the two-window diagnosis. Remove in Phase 2.
+                 [realtime] prefix + console.info keeps the smoke console
+                 guard happy (guard only fails on error/warn). */
+              console.info('[realtime] app-changes FIRED table=' + table +
+                ' event=' + (payload && payload.eventType) +
+                ' ts=' + new Date().toISOString());
+              reload();
+            });
         });
         return channel;
       }
