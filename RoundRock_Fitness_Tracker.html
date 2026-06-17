@@ -9854,7 +9854,7 @@
       setPinTarget(profile);
     }
 
-    return e('div', { className: 'login-wrap' },
+    return e('div', { className: 'login-wrap', 'data-testid': 'view-login' },
       e('div', { className: 'login-head' },
         e('div', { className: 'brand' }, 'Round Rock Parks and Recreation'),
         e('div', { className: 'tag' }, 'Clay Madsen Recreation Center')
@@ -10193,7 +10193,7 @@
 
     var keys = ['1','2','3','4','5','6','7','8','9','','0','⌫'];
 
-    return e('div', { className: 'modal-overlay' },
+    return e('div', { className: 'modal-overlay', 'data-testid': 'modal-pin' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); }, style: { maxWidth: '360px' } },
         e('div', { className: 'modal-header' },
           e('h2', null, props.title || 'Admin PIN'),
@@ -10613,7 +10613,7 @@
       });
     }
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-trainer-today' },
       /* Phase 3b-B: simplified date headline (gradient hero retired).
          Suppressed in compact mode (stacked "All trainers" view).
          Spec 2 (A): HOLIDAY chips for any closures on today's date so
@@ -11516,7 +11516,7 @@
        hub (ConsultQueueView). AdminScheduleView returns to being purely
        about scheduling. */
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-admin-schedule' },
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'Schedule'),
@@ -13122,7 +13122,7 @@
         )
       : null;
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-client-detail' },
       /* Header is suppressed when rendered inside TrainerView's
          consolidated header (hideHeader=true). Admin and standalone uses
          keep their own sticky header. */
@@ -16654,7 +16654,7 @@
         ));
       }
 
-      return e('div', null,
+      return e('div', { 'data-testid': 'view-gx-full-schedule' },
         e('div', { className: 'section-head' },
           e('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
             e('button', {
@@ -16713,7 +16713,7 @@
       );
     }
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-gx-my-classes' },
       /* Upcoming sub assignments - shown above their own classes */
       upcomingSubs.length > 0 && e('div', { style: { marginBottom: '20px' } },
         e('h2', { style: { fontSize: '20px', color: 'var(--amber)', marginBottom: '4px' } },
@@ -17043,7 +17043,7 @@
 
     var cancellationsSorted = (c.cancellations || []).slice().sort(function(a,b){ return a.date < b.date ? 1 : -1; });
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-class-detail' },
       /* Header is suppressed when rendered inside TrainerView's
          consolidated header (hideHeader=true). */
       !props.hideHeader && e('div', { className: 'header' },
@@ -19938,7 +19938,7 @@
       }, label);
     }
 
-    return e('div', { className: 'team-hours' },
+    return e('div', { className: 'team-hours', 'data-testid': 'view-payroll' },
       e('div', { className: 'team-hours-header' },
         e('h2', null, 'Team hours'),
         e('div', { className: 'team-hours-period' },
@@ -21406,7 +21406,7 @@
       );
     }
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-leads' },
       foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
@@ -23360,7 +23360,7 @@
       })
     );
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-admin-overview' },
       drillLink,
       e('div', { className: 'kpi-strip' },
         e(KPI, {
@@ -23662,7 +23662,7 @@
       }, 'View contacts →')
     ) : null;
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-admin-clients' },
       foldLinks,
       e('div', { className: 'section-head' },
         e('div', null,
@@ -24805,7 +24805,7 @@
       ctx.toast('Classes CSV exported \u2713');
     }
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-admin-classes' },
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'Group Classes'),
@@ -29427,7 +29427,7 @@
       )
     );
 
-    return e('div', null,
+    return e('div', { 'data-testid': 'view-audit' },
       e('div', { className: 'section-head' },
         e('div', null,
           /* Patch: rename from "Bi-Weekly Audit" so the sidebar
