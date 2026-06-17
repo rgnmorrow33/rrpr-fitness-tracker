@@ -8,7 +8,8 @@
     "test:headed": "playwright test --headed",
     "test:report": "playwright show-report",
     "log:scaffold": "node scripts/log-scaffold.js",
-    "release:tag": "node scripts/release-tag.js"
+    "release:tag": "node scripts/release-tag.js",
+    "schema:check": "node --env-file-if-exists=.env scripts/schema-check.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
