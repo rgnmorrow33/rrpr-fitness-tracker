@@ -65,28 +65,34 @@ jobs:
         id: htmlchange
         run: |
           set -uo pipefail
+          HTML='RoundRock_Fitness_Tracker.html'
+
+          # 0 = HTML changed between base..head, 1 = unchanged, 2 = cannot diff.
+          diff_has_html() {
+            git rev-parse -q --verify "$1^{commit}" >/dev/null 2>&1 || return 2
+            git rev-parse -q --verify "$2^{commit}" >/dev/null 2>&1 || return 2
+            if git diff --name-only "$1" "$2" -- "$HTML" | grep -q .; then return 0; else return 1; fi
+          }
+
           changed=true
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             changed=false
-            echo "Manual run: no new deploy expected; will verify live is up and run."
+            reason="manual run - no new deploy expected"
           else
             before="${{ github.event.before }}"
             sha="${{ github.sha }}"
-            zero="0000000000000000000000000000000000000000"
-            if [ -n "$before" ] && [ "$before" != "$zero" ] && git cat-file -e "${before}^{commit}" 2>/dev/null; then
-              if git diff --name-only "$before" "$sha" | grep -qx 'RoundRock_Fitness_Tracker.html'; then
-                changed=true
-                echo "Served HTML changed in this push -> will wait for the new build to go live."
-              else
-                changed=false
-                echo "Served HTML NOT changed in this push -> no content swap to wait for."
-              fi
-            else
-              echo "Could not resolve the before-SHA; assuming HTML may have changed (will wait for a new build)."
-              changed=true
-            fi
+            # Prefer the push's before..after range (correct for multi-commit
+            # pushes); fall back to HEAD~1..HEAD when the before-SHA is not a
+            # resolvable object on the runner (it is not always fetched).
+            if diff_has_html "$before" "$sha"; then changed=true; reason="HTML changed (before..after)"
+            elif [ $? -eq 1 ]; then changed=false; reason="HTML unchanged (before..after)"
+            elif diff_has_html "HEAD~1" "HEAD"; then changed=true; reason="HTML changed (HEAD~1..HEAD fallback)"
+            elif [ $? -eq 1 ]; then changed=false; reason="HTML unchanged (HEAD~1..HEAD fallback)"
+            else changed=true; reason="could not diff - assuming changed (safe default)"; fi
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Served HTML changed: $changed ($reason)"
+          echo "Served HTML changed: **$changed** ($reason)" >> "$GITHUB_STEP_SUMMARY"
 
       # Solve the deploy-timing problem: a push-triggered Action starts before
       # Netlify finishes building, so running immediately would test the OLD
