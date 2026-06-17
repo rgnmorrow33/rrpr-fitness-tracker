@@ -44,6 +44,40 @@ Hard failures to watch for: `[bell] cross-user`, `[realtime] ... status=`,
 `scheduling reconnect`, `unable to resolve actor name` - these are real bugs,
 not test-tuning issues.
 
+## Continuous smoke (GitHub Actions)
+
+`.github/workflows/smoke.yml` runs this suite automatically on every push to
+`main` and via the **Run workflow** button on the repo's Actions tab
+(`workflow_dispatch`). It reports status only - it never deploys, pushes,
+merges, or runs SQL.
+
+**Deploy timing:** a push fires the Action and the Netlify build at the same
+moment, so the Action waits before testing. It captures the live `ETag` before
+its slow setup steps, then polls (up to ~4 min) until the served `ETag` changes
+away from that value - i.e. the new build actually swapped in - before running.
+If the push did not change `RoundRock_Fitness_Tracker.html` (e.g. a test- or
+workflow-only commit) there is no content swap to wait for, so it just confirms
+the site is up and runs. Caveat: Netlify's `ETag` is its own content hash and
+is not derivable from the repo, so the workflow detects a content *change*, not
+cryptographic proof that the exact pushed commit is serving. If the bounded
+wait times out it proceeds anyway and logs a `::warning::` saying so.
+
+**What a red check means:** a target view failed to render, or a
+non-allowlisted console error/warning (or uncaught page error) fired on the live
+site. The commit gets a ❌ status check; on a push failure the workflow also
+posts a commit comment listing the failing view name(s).
+
+**Where the report is:** open the failed run under the repo **Actions** tab and
+download the **`playwright-report`** artifact (HTML report + `results.json`,
+retained 14 days). Open `index.html` from it to see each step, screenshots, and
+traces without re-running.
+
+**Secret:** the workflow reads `SMOKE_TEST_PIN` from a GitHub Actions secret of
+the same name (add it under Settings -> Secrets and variables -> Actions). If
+the secret is unset the suite falls back to its default PIN, so the workflow
+still runs before the secret is added. `SMOKE_URL` is a plain env default in the
+workflow.
+
 ## Coverage (v1)
 
 Reachable as 1111 / Front Desk (`role: 'admin'`):

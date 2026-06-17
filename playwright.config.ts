@@ -19,7 +19,9 @@ export default defineConfig({
   // React + Supabase from CDNs per fresh context. Too many parallel cold loads
   // get throttled and time out at the login screen.
   workers: process.env.CI ? 2 : 3,
-  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
+  reporter: process.env.CI
+    ? [['list'], ['html', { open: 'never' }], ['json', { outputFile: 'results.json' }]]
+    : 'list',
   timeout: 45_000,
   expect: { timeout: 15_000 },
   use: {

@@ -1,0 +1,194 @@
+name: Smoke (live)
+
+# Read-only post-deploy smoke suite. Reports status only - it never deploys,
+# pushes, merges, or runs SQL. It loads the live deployment, logs in as Front
+# Desk, and asserts the admin views render with no unexpected console output.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# contents: write is used ONLY to post a status commit comment on failure
+# (the nice-to-have below). No code is written/pushed by this workflow.
+permissions:
+  contents: write
+
+# A newer push supersedes an in-flight run (which would be testing an older
+# build anyway).
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SMOKE_URL: https://pardfitnesstracker2.netlify.app
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      # Capture the CURRENTLY-served ETag before the slow setup steps run.
+      # The push fires this Action and the Netlify build at ~the same moment,
+      # so this first step usually observes the OLD build's ETag. The
+      # wait-for-deploy step later polls until the live ETag changes away from
+      # this value, which confirms the new content actually swapped in.
+      # (Netlify's ETag is its own content hash - it changes on every content
+      # change but is NOT derivable from the repo, so we detect *change*, not a
+      # specific expected value.)
+      - name: Capture pre-deploy ETag
+        run: |
+          e="$(curl -fsS -D - -o /dev/null "$SMOKE_URL" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')"
+          echo "PRE_DEPLOY_ETAG=$e" >> "$GITHUB_ENV"
+          echo "Pre-deploy ETag: ${e:-<none>}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need the parent commit to diff whether the served HTML changed.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright (Chromium + OS deps)
+        run: npx playwright install --with-deps chromium
+
+      # Did THIS event change the file Netlify actually serves? If not, there
+      # is no content swap to wait for - we just confirm the site is up and run.
+      - name: Detect served-HTML change
+        id: htmlchange
+        run: |
+          set -uo pipefail
+          changed=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            changed=false
+            echo "Manual run: no new deploy expected; will verify live is up and run."
+          else
+            before="${{ github.event.before }}"
+            sha="${{ github.sha }}"
+            zero="0000000000000000000000000000000000000000"
+            if [ -n "$before" ] && [ "$before" != "$zero" ] && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              if git diff --name-only "$before" "$sha" | grep -qx 'RoundRock_Fitness_Tracker.html'; then
+                changed=true
+                echo "Served HTML changed in this push -> will wait for the new build to go live."
+              else
+                changed=false
+                echo "Served HTML NOT changed in this push -> no content swap to wait for."
+              fi
+            else
+              echo "Could not resolve the before-SHA; assuming HTML may have changed (will wait for a new build)."
+              changed=true
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      # Solve the deploy-timing problem: a push-triggered Action starts before
+      # Netlify finishes building, so running immediately would test the OLD
+      # build. Poll until the new build is serving (ETag changed from the
+      # pre-deploy value) or until a bounded timeout, whichever comes first.
+      - name: Wait for deploy to go live
+        env:
+          HTML_CHANGED: ${{ steps.htmlchange.outputs.changed }}
+        run: |
+          set -uo pipefail
+          url="$SMOKE_URL"
+          interval=15
+          deadline=$(( SECONDS + 240 ))   # ~4 min upper bound
+          start_etag="${PRE_DEPLOY_ETAG:-}"
+
+          etag_of() { curl -fsS -D - -o /dev/null "$url" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}'; }
+          shell_ok() { curl -fsS "$url" 2>/dev/null | grep -q 'Round Rock Parks and Recreation - Fitness Tracker'; }
+
+          echo "Target: $url"
+          echo "Pre-deploy ETag: ${start_etag:-<none>}  (HTML_CHANGED=$HTML_CHANGED)"
+
+          while :; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "$url" || echo 000)"
+            cur_etag="$(etag_of || true)"
+            if [ "$code" = "200" ] && shell_ok; then
+              if [ "$HTML_CHANGED" != "true" ]; then
+                echo "Live site up (HTTP 200 + app shell). No served-HTML change to wait for; proceeding."
+                exit 0
+              fi
+              if [ -n "$start_etag" ] && [ -n "$cur_etag" ] && [ "$cur_etag" != "$start_etag" ]; then
+                echo "New build is live (ETag ${start_etag} -> ${cur_etag}). Proceeding."
+                exit 0
+              fi
+              echo "Up (HTTP 200) but new build not detected yet (ETag ${cur_etag:-<none>}). Waiting ${interval}s..."
+            else
+              echo "Site not ready (HTTP ${code}). Waiting ${interval}s..."
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::warning title=Deploy wait timed out::Proceeded after ~4m without a confirmed new-build ETag change. This confirms the site is UP, not that the exact pushed commit is serving. If this push changed the HTML, the suite may be testing the prior build."
+              exit 0
+            fi
+            sleep "$interval"
+          done
+
+      - name: Run smoke suite
+        env:
+          # PIN comes from a repo secret, never hardcoded (even though the
+          # legacy value is "1111"). Falls back to the suite's own default if
+          # the secret is unset, so the workflow still runs before the secret
+          # is added.
+          SMOKE_TEST_PIN: ${{ secrets.SMOKE_TEST_PIN }}
+        run: npm test
+
+      # Make a failure inspectable without re-running: the full Playwright HTML
+      # report (and json) is kept as a downloadable artifact on the run.
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            results.json
+          retention-days: 14
+
+      # Nice-to-have: on failure, comment the failing view name(s) on the commit
+      # so the red check is self-explanatory. Best-effort - never fails the job.
+      - name: Comment failing views on commit
+        if: ${{ failure() && github.event_name == 'push' }}
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let data;
+            try {
+              data = JSON.parse(fs.readFileSync('results.json', 'utf8'));
+            } catch (e) {
+              core.info('No results.json to parse; skipping commit comment.');
+              return;
+            }
+            const failed = [];
+            const walk = (suites = []) => {
+              for (const s of suites) {
+                for (const sp of (s.specs || [])) {
+                  const bad = (sp.tests || []).some(t =>
+                    (t.results || []).some(r => ['failed', 'timedOut'].includes(r.status)));
+                  if (bad) failed.push(sp.title);
+                }
+                walk(s.suites || []);
+              }
+            };
+            walk(data.suites || []);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = failed.length
+              ? `🔴 **Smoke suite failed** against ${process.env.SMOKE_URL}\n\nFailing view(s):\n` +
+                failed.map(f => `- ${f}`).join('\n') +
+                `\n\nFull report: download the **playwright-report** artifact on the [run](${runUrl}).`
+              : `🔴 **Smoke suite failed** against ${process.env.SMOKE_URL}. See the [run](${runUrl}) and the playwright-report artifact.`;
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body,
+            });
