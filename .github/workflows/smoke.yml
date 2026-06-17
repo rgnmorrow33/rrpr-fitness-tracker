@@ -71,7 +71,10 @@ jobs:
           diff_has_html() {
             git rev-parse -q --verify "$1^{commit}" >/dev/null 2>&1 || return 2
             git rev-parse -q --verify "$2^{commit}" >/dev/null 2>&1 || return 2
-            if git diff --name-only "$1" "$2" -- "$HTML" | grep -q .; then return 0; else return 1; fi
+            # Pipe-free (same SIGPIPE-under-pipefail reasoning as shell_ok).
+            local out
+            out="$(git diff --name-only "$1" "$2" -- "$HTML")"
+            [ -n "$out" ]
           }
 
           changed=true
@@ -109,7 +112,18 @@ jobs:
           start_etag="${PRE_DEPLOY_ETAG:-}"
 
           etag_of() { curl -fsS -D - -o /dev/null "$url" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}'; }
-          shell_ok() { curl -fsS "$url" 2>/dev/null | grep -q 'Round Rock Parks and Recreation - Fitness Tracker'; }
+          # Pipe-free on purpose: `curl | grep -q` makes grep close the pipe on
+          # match, which SIGPIPEs curl; under `set -o pipefail` that non-zero
+          # propagates and shell_ok would wrongly report "not up" on every
+          # match, hanging the loop until timeout. Read the body, then match.
+          shell_ok() {
+            local body
+            body="$(curl -fsS "$url" 2>/dev/null)" || return 1
+            case "$body" in
+              *"Round Rock Parks and Recreation - Fitness Tracker"*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
 
           echo "Target: $url"
           echo "Pre-deploy ETag: ${start_etag:-<none>}  (HTML_CHANGED=$HTML_CHANGED)"
