@@ -122,35 +122,20 @@ function changedFiles(base) {
   return out ? out.split('\n').filter(Boolean) : [];
 }
 
-function main() {
-  // Confirm we are inside a git work tree before doing anything.
-  if (gitQuiet(['rev-parse', '--is-inside-work-tree']) !== 'true') {
-    die('error: not inside a git repository.');
-  }
+// Build the full scaffold text for a ref (tag/SHA/date). Returns a string;
+// does not write anything. Used by both this CLI and release-tag.js.
+function generateScaffold(ref) {
+  return generateScaffoldFromBase(resolveBase(ref));
+}
 
-  let ref = process.argv[2];
+// Same as generateScaffold but takes an already-resolved base descriptor
+// { base, kind, label }. release-tag.js uses this directly for the first-ever
+// release (base = EMPTY_TREE, kind = 'root'), where there is no previous tag.
+function generateScaffoldFromBase(baseInfo) {
+  const { base, kind, label } = baseInfo;
   const tagCount = gitQuiet(['tag']).split('\n').filter(Boolean).length;
-
-  if (!ref) {
-    const latestTag = gitQuiet(['describe', '--tags', '--abbrev=0']);
-    if (latestTag) {
-      ref = latestTag;
-      process.stderr.write('note: no ref given; defaulting to most recent tag "' + ref + '".\n');
-    } else {
-      die(
-        'error: no <last-version-ref> given and this repo has no git tags.\n' +
-        'Pass a SHA or date instead, e.g.:\n' +
-        '  npm run log:scaffold -- ba8e24b\n' +
-        '  npm run log:scaffold -- 2026-06-01\n' +
-        '  npm run log:scaffold -- "2 weeks ago"\n' +
-        '\nThis app is not git-tagged per version yet. Adopting lightweight\n' +
-        'tags per shipped version (git tag v4.32) would let you run this with\n' +
-        'no argument and make ranges unambiguous - flagged as a suggestion only.'
-      );
-    }
-  }
-
-  const { base, kind, label } = resolveBase(ref);
+  const kindSuffix =
+    kind === 'date' ? '  (interpreted as a date)' : kind === 'root' ? '' : '  (tag/SHA)';
   const headSha = gitQuiet(['rev-parse', '--short', 'HEAD']);
   const headFull = gitQuiet(['rev-parse', 'HEAD']);
   const baseShort = base === EMPTY_TREE ? '(empty tree / all history)' : gitQuiet(['rev-parse', '--short', base]);
@@ -176,7 +161,7 @@ function main() {
   p('to git, the docx, or docs/. Drop the skeleton below into a Claude');
   p('session and write the entry with the fitness-tracker-update-log skill.');
   p('');
-  p('Since ref : ' + label + (kind === 'date' ? '  (interpreted as a date)' : '  (tag/SHA)'));
+  p('Since ref : ' + label + kindSuffix);
   p('Base      : ' + baseShort);
   p('HEAD      : ' + headSha + '  (' + headFull + ')');
   p('Range     : ' + range);
@@ -258,7 +243,47 @@ function main() {
     p('');
   }
 
-  process.stdout.write(out.join('\n') + '\n');
+  return out.join('\n') + '\n';
 }
 
-main();
+function main() {
+  // Confirm we are inside a git work tree before doing anything.
+  if (gitQuiet(['rev-parse', '--is-inside-work-tree']) !== 'true') {
+    die('error: not inside a git repository.');
+  }
+
+  let ref = process.argv[2];
+
+  if (!ref) {
+    const latestTag = gitQuiet(['describe', '--tags', '--abbrev=0']);
+    if (latestTag) {
+      ref = latestTag;
+      process.stderr.write('note: no ref given; defaulting to most recent tag "' + ref + '".\n');
+    } else {
+      die(
+        'error: no <last-version-ref> given and this repo has no git tags.\n' +
+        'Pass a SHA or date instead, e.g.:\n' +
+        '  npm run log:scaffold -- ba8e24b\n' +
+        '  npm run log:scaffold -- 2026-06-01\n' +
+        '  npm run log:scaffold -- "2 weeks ago"\n' +
+        '\nThis app is not git-tagged per version yet. Adopting lightweight\n' +
+        'tags per shipped version (git tag v4.32) would let you run this with\n' +
+        'no argument and make ranges unambiguous - flagged as a suggestion only.'
+      );
+    }
+  }
+
+  process.stdout.write(generateScaffold(ref));
+}
+
+// Run as a CLI only when invoked directly; stay quiet when require()d.
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  generateScaffold,
+  generateScaffoldFromBase,
+  resolveBase,
+  EMPTY_TREE,
+};
