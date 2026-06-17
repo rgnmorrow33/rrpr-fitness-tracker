@@ -85,7 +85,9 @@ that wraps all reads/writes. Two modes: 'localStorage' and 'supabase'.
 Currently in 'supabase' mode.
 
 Supabase project: ofezaezijafglyjmisgz.supabase.co
-Anon key is committed in the file (designed-public, RLS gates access).
+Anon key is committed in the file (designed-public). RLS is disabled
+project-wide, so the key is NOT RLS-gated - access is open at the DB
+layer. See Security posture.
 
 Storage adapter exposes: storage.X.load() / storage.X.save(arr) for
 each entity. Returns Promises in both modes.
@@ -129,10 +131,33 @@ network writes on unchanged data.
 
 ## Real-time subscriptions
 
-App subscribes to postgres_changes on all 10 entity tables via a
-single channel ('app-changes'). On any row change, the affected
-entity reloads via storage.X.load() and the corresponding setter
-fires.
+Two layers, and they do NOT match. Know the gap before relying on
+live sync.
+
+Client side: the app opens one channel ('app-changes') and attaches
+postgres_changes listeners for 12 entity tables (clients, classes,
+wros, leads, member_contacts, admin_items, referrals, closures,
+trainers, schedule_versions, trainer_time_off, announcement_banners -
+the `subs` array in the realtime useEffect). On a change event the
+affected entity reloads via storage.X.load() and its setter fires
+(100ms per-entity debounce). Notifications use a SEPARATE per-trainer
+channel ('notifications-<trainerId>'), not app-changes.
+
+Publication side: the live supabase_realtime publication contains
+exactly 2 tables - notifications and trainer_time_off (verified
+June 17 against the Supabase publications screen). Only tables in the
+publication actually broadcast change events.
+
+Net effect: of the 12 listeners attached to app-changes, only
+trainer_time_off ever fires - the other 11 are attached but receive
+nothing because their tables are not in the publication. notifications
+fires live on its own dedicated channel. Every other entity converges
+only on reload (navigation / mount-fetch / wake sweep), not live push.
+To make a table sync live, ADD IT TO the supabase_realtime
+publication; attaching a client listener alone does nothing. (Note:
+some app-code comments still claim "convergence comes free via the
+app-changes channel (clients table)" - that is stale; clients is not
+in the publication. Left untouched here as this is a docs-only pass.)
 
 Sync indicator (small green/amber dot bottom-right) shows channel
 state.
@@ -354,9 +379,11 @@ Not built; not a priority right now.
 
 ## Security posture
 
-Anon RLS allowing read/write on all tables. Acceptable for prototype.
-Tighten before APC opens (April 2027) or before any clinical PHI
-flows through the system, whichever first.
+RLS is DISABLED across all 17 public tables (verified June 17). Reads
+and writes go through the committed anon key with no RLS gating -
+access is open at the DB layer. Acceptable for prototype. Tighten
+(enable RLS, add policies) before APC opens (April 2027) or before any
+clinical PHI flows through the system, whichever first.
 
 PIN is in the settings table. Plaintext for now. Hash before APC opens.
 
