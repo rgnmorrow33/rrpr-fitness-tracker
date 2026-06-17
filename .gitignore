@@ -2,6 +2,11 @@
 *.csv
 supabase/
 
+# Local env / credentials - never commit. .env.example is the only tracked one.
+.env
+.env.*
+!.env.example
+
 # Playwright smoke suite
 node_modules/
 /test-results/
