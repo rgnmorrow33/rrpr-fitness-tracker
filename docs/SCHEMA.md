@@ -36,18 +36,18 @@ following the per-table detail.
 <!-- AUTOGEN:table-inventory START -->
 | Table | Purpose | RLS | Realtime |
 |---|---|---|---|
-| `clients` | Core PT client records. JSONB-heavy: packages, sessions, audit_log all embedded. | Disabled | Yes (app-changes) |
-| `classes` | Group exercise class definitions and per-occurrence attendance / sub assignments. | Disabled | Yes (app-changes) |
-| `wros` | Wellness Recovery Outcomes intake forms. 5 flat columns plus `data` JSONB. | Disabled | Yes (app-changes) |
-| `leads` | Consult queue / leads pipeline. Whitelist-filtered on write per Patch R. | Disabled | Yes (app-changes) |
-| `member_contacts` | Quick / Substantive / Educational contact log per trainer. | Disabled | Yes (app-changes) |
-| `admin_items` | Admin time entries (Program Creation, Training, Community Event, Other, custom). | Disabled | Yes (app-changes) |
-| `referrals` | PT referrals between trainers and clients. | Disabled | Yes (app-changes) |
-| `closures` | Facility closure dates (holidays, maintenance). | Disabled | Yes (app-changes) |
-| `trainers` | Trainer roster with role, role_tier, PIN, soft-delete. | Disabled | Yes (app-changes) |
-| `schedule_versions` | GX schedule history. Flat columns plus `data` JSONB holding the class list. | Disabled | Yes (app-changes) |
+| `clients` | Core PT client records. JSONB-heavy: packages, sessions, audit_log all embedded. | Disabled | No |
+| `classes` | Group exercise class definitions and per-occurrence attendance / sub assignments. | Disabled | No |
+| `wros` | Wellness Recovery Outcomes intake forms. 5 flat columns plus `data` JSONB. | Disabled | No |
+| `leads` | Consult queue / leads pipeline. Whitelist-filtered on write per Patch R. | Disabled | No |
+| `member_contacts` | Quick / Substantive / Educational contact log per trainer. | Disabled | No |
+| `admin_items` | Admin time entries (Program Creation, Training, Community Event, Other, custom). | Disabled | No |
+| `referrals` | PT referrals between trainers and clients. | Disabled | No |
+| `closures` | Facility closure dates (holidays, maintenance). | Disabled | No |
+| `trainers` | Trainer roster with role, role_tier, PIN, soft-delete. | Disabled | No |
+| `schedule_versions` | GX schedule history. Flat columns plus `data` JSONB holding the class list. | Disabled | No |
 | `trainer_time_off` | Per-trainer absence requests with approval workflow. | Disabled | Yes (app-changes) |
-| `announcement_banners` | Short-lived ops broadcasts to the trainer surface. | Disabled | Yes (app-changes) |
+| `announcement_banners` | Short-lived ops broadcasts to the trainer surface. | Disabled | No |
 | `notifications` | Trainer-targeted server-authored messages. Per-trainer subscription. | Disabled | Yes (per-trainer channel) |
 | `settings` | Key-value store. Currently holds `admin_pin` row. | Disabled | No |
 <!-- AUTOGEN:table-inventory END -->
@@ -76,29 +76,30 @@ the primary target of ADR-0002 / ADR-0003 normalization work.
 |---|---|---|
 | `id` | uuid | PK. Generated app-side via `freshUuid()` on insert. |
 | `name` | text | Required at write-time per CLAUDE.md validation rules. |
-| `email` | text | Required if phone absent. Format-validated. |
-| `phone` | text | Required if email absent. 10+ digits when stripped. |
-| `location` | text | "CMRC" or "Baca". |
-| `date_purchased` | date | Date of first purchase (legacy seed shape). |
-| `payment_type` | text | "Card" / etc. |
-| `team_member` | text | RecTrac member status field. |
-| `membership_verified` | boolean | Whether membership was checked at intake. |
-| `membership_type` | text | "Member" / "Non-Member" / etc. |
-| `membership_end` | text or date | Membership expiration date. |
 | `trainer_name` | text | Assigned PT trainer (denormalized; cascade-updated on rename). |
-| `referral_source` | text | How they found us. |
-| `par_q` | jsonb | Health screening answers. Passthrough (no field map). |
-| `from_queue_id` | text | Lead ID this client converted from (soft FK to `leads.id`). |
-| `last_package_added_at` | timestamptz | Stamped by `addPackageToClient`. |
 | `packages` | jsonb | Array of package records. See "JSONB shapes" below. |
 | `sessions` | jsonb | Array of session records. See "JSONB shapes" below. |
-| `audit_log` | jsonb | Append-only audit array, capped at 100 entries. |
-| `rectrac_member_id` | text | RecTrac primary key. Used as highest-confidence match key on import. |
-| `created_by` | text | Sign-in name of creator. |
+| `notes` | text | Free-text client notes. |
+| `is_active` | boolean | Active-client flag. Soft-deactivation without removing the record. |
 | `created_at` | timestamptz | DB-controlled (translator drops `createdAt` on write). |
 | `updated_at` | timestamptz | Stamped on every write. |
+| `email` | text | Required if phone absent. Format-validated. |
+| `phone` | text | Required if email absent. 10+ digits when stripped. |
+| `date_purchased` | text | Date of first purchase (legacy seed shape). |
+| `from_queue_id` | uuid | Lead ID this client converted from (soft FK to `leads.id`). |
+| `location` | text | "CMRC" or "Baca". |
+| `membership_end` | text | Membership expiration date. |
+| `membership_type` | text | "Member" / "Non-Member" / etc. |
+| `membership_verified` | boolean | Whether membership was checked at intake. |
+| `payment_type` | text | "Card" / etc. |
+| `team_member` | text | RecTrac member status field. |
+| `referral_source` | text | How they found us. |
+| `par_q` | jsonb | Health screening answers. Passthrough (no field map). |
+| `last_package_added_at` | timestamptz | Stamped by `addPackageToClient`. |
+| `audit_log` | jsonb | Append-only audit array, capped at 100 entries. |
 | `deleted_at` | timestamptz | Soft-delete timestamp. |
 | `deleted_by` | text | Soft-delete actor. |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:clients END -->
 
 **Translator mapping** (`translate.clients`): camelCase in-memory →
@@ -121,26 +122,31 @@ attendance and sub coverage state inside JSONB columns.
 |---|---|---|
 | `id` | uuid | PK. |
 | `name` | text | Class name (e.g. "CM HIIT", "Aqua Fit"). |
-| `location` | text | "CMRC" or "Baca". |
-| `instructor` | text | Primary instructor (cascade-updated on rename). |
+| `instructor_name` | text | Legacy / unwired. No code path reads or writes this column - the live instructor column is `instructor` (below). Duplicate-column drift; flagged for cleanup. |
 | `day_of_week` | text | Full name ("Monday", etc). Legacy 2-letter codes normalized at read. |
 | `start_time` | text | "HH:MM" 24h. |
-| `end_time` | text | "HH:MM" 24h. |
 | `duration_minutes` | integer | Auto-derived in places, explicit in others. |
-| `room` | text | Where it meets. |
-| `capacity` | integer | Soft-warn only today (no hard block). |
-| `class_type` | text | "Strength & Conditioning", "Cycle", etc. |
-| `is_premium` | boolean | Premium class flag. |
-| `sub_assignments` | jsonb | Array. See "JSONB shapes" below. |
+| `location` | text | "CMRC" or "Baca". |
+| `is_active` | boolean | Active-class flag. Filtered on load. |
 | `attendance` | jsonb | Array. Per-occurrence attendance records. |
-| `season_start` | date | Schedule window start. |
-| `season_end` | date | Schedule window end. |
-| `schedule_version_id` | uuid | Soft FK to `schedule_versions.id`. |
-| `audit_log` | jsonb | Append-only. |
+| `cancellations` | jsonb | Array of cancelled-occurrence records. |
+| `sub_assignments` | jsonb | Array. See "JSONB shapes" below. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+| `capacity` | integer | Soft-warn only today (no hard block). |
+| `season_start` | text | Schedule window start. |
+| `season_end` | text | Schedule window end. |
+| `time` | text | Legacy. Read only as a fallback (`c.startTime \|\| c.time`) for older rows that predate the `start_time` / `end_time` split; never written by current code (translator maps `startTime` / `endTime` only, no `time`). Possible legacy column; flagged for cleanup. |
+| `instructor` | text | Live instructor column (cascade-updated on rename). Written as passthrough; the active read/write path everywhere in the app. See `instructor_name` above for the unwired duplicate. |
+| `room` | text | Where it meets. |
+| `class_type` | text | "Strength & Conditioning", "Cycle", etc. |
+| `is_premium` | boolean | Premium class flag. |
+| `end_time` | text | "HH:MM" 24h. |
+| `schedule_version_id` | uuid | Soft FK to `schedule_versions.id`. |
+| `audit_log` | jsonb | Append-only. |
 | `deleted_at` | timestamptz | Soft-delete. |
 | `deleted_by` | text | Soft-delete actor. |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:classes END -->
 
 **Translator mapping** (`translate.classes`).
@@ -156,12 +162,13 @@ are promoted to flat columns, everything else lives in `data`.
 | `id` | uuid | PK. |
 | `trainer_name` | text | Promoted from `data.post.specialistName`. |
 | `client_name` | text | Promoted from in-memory `participantName`. |
-| `date` | date | Intake date. |
+| `date` | text | Intake date. |
 | `notes` | text | Promoted from `data.post.postNotes`. |
 | `signature_data` | text | Base64 signature payload. |
-| `data` | jsonb | Everything else (pre-form goals, post-form claim state, conversion lifecycle). |
 | `created_at` | timestamptz | |
+| `data` | jsonb | Everything else (pre-form goals, post-form claim state, conversion lifecycle). |
 | `updated_at` | timestamptz | |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:wros END -->
 
 **Translator mapping** (`translate.wros`, custom). The flat columns are
@@ -188,8 +195,10 @@ in the allowed list is dropped at the wire.
 | `status_history` | jsonb | Array. See "JSONB shapes" below. |
 | `assigned_to` | text | Trainer name (cascade-updated on rename). |
 | `notes` | text | Free text. |
-| `consult_date` | date | Scheduled consultation date. |
-| `converted_at` | timestamptz | When status flipped to converted. |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
+| `consult_date` | text | Scheduled consultation date. |
+| `converted_at` | text | When status flipped to converted. |
 | `converted_to_client_id` | uuid | Soft FK to `clients.id`. |
 | `source_tag` | text | Marketing channel tag. |
 | `added_by` | text | Sign-in name of creator. |
@@ -199,8 +208,6 @@ in the allowed list is dropped at the wire.
 | `from_wro_id` | uuid | Soft FK to `wros.id` (WRO-originated leads). |
 | `audit_log` | jsonb | Append-only. |
 | `created_by` | text | Sign-in name of creator. |
-| `created_at` | timestamptz | |
-| `updated_at` | timestamptz | |
 <!-- AUTOGEN:columns:leads END -->
 
 **Translator mapping** (`translate.leads`).
@@ -222,12 +229,15 @@ capped at 4 hr per period.
 |---|---|---|
 | `id` | uuid | PK. |
 | `trainer_name` | text | Logger (cascade-updated on rename). |
-| `member_name` | text | Member contacted. |
+| `date` | text | Date the contact was logged (YYYY-MM-DD). |
 | `type` | text | "quick" / "substantive" / "educational". |
+| `topic` | text | Contact topic / subject. |
 | `notes` | text | Free text. |
-| `logged_at` | timestamptz | When the contact happened. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+| `logged_at` | timestamptz | When the contact happened. |
+| `note` | text | Free text. Singular column (distinct from any `notes`). |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:member_contacts END -->
 
 **Translator mapping** (`translate.contacts`).
@@ -247,19 +257,19 @@ slated for cleanup in a future migration sprint.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
+| `date` | text | The day the admin time is logged against (YYYY-MM-DD). |
+| `hours` | numeric | Derived from `time_in` / `time_out` at write time via `hoursFromTimes`; cached on the row so read paths don't recompute. |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
+| `source_session_id` | uuid | Set on service recovery rows; points to the session that triggered the recovery. |
+| `assignees` | text[] | Trainer names. Flat text[] with `DEFAULT ARRAY[]`. NOT JSONB. |
 | `title` | text | Required at write-time. Free-text label (e.g. "Q3 program planning"). |
 | `type` | text | One of the canonical `ITEM_TYPES` or "Other". |
 | `custom_type` | text | Free-text label when `type === 'Other'`. |
-| `date` | date | The day the admin time is logged against (YYYY-MM-DD). |
 | `time_in` | text | "HH:MM" 24h start. Stored as text, not timestamptz - the value is wall-clock time without a date component (the date lives in `date`). |
 | `time_out` | text | "HH:MM" 24h end. Same text-not-timestamptz reasoning as `time_in`. |
-| `hours` | numeric | Derived from `time_in` / `time_out` at write time via `hoursFromTimes`; cached on the row so read paths don't recompute. |
-| `assignees` | text[] | Trainer names. Flat text[] with `DEFAULT ARRAY[]`. NOT JSONB. |
 | `note` | text | Free text. Singular column name (not `notes`). |
-| `source_session_id` | uuid | Set on service recovery rows; points to the session that triggered the recovery. |
 | `created_by` | text | Sign-in name of creator. |
-| `created_at` | timestamptz | |
-| `updated_at` | timestamptz | |
 <!-- AUTOGEN:columns:admin_items END -->
 
 **Translator mapping** (`translate.adminItems`). The translator covers only
@@ -290,12 +300,14 @@ PT referrals between trainers.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
-| `client_id` | uuid | Soft FK to `clients.id`. |
-| `client_name` | text | Denormalized client name at referral time. |
 | `referred_by` | text | Source trainer (cascade-updated on rename). |
+| `client_name` | text | Denormalized client name at referral time. |
+| `date` | text | Referral date. |
 | `notes` | text | Free text. |
+| `status` | text | One of `REFERRAL_STATUSES`: "pending" / "contacted" / "completed" / "declined". Defaults to "pending" on create. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:referrals END -->
 
 **Translator mapping** (`translate.referrals`).
@@ -308,13 +320,16 @@ Facility closure dates.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
-| `date` | date | Closure date. |
+| `date` | text | Closure date. |
 | `reason` | text | Free text. |
-| `facility` | text | "CMRC", "Baca", or "all". |
-| `created_by` | text | Sign-in name of creator. |
+| `is_holiday` | boolean | Whether the closure is a holiday vs. maintenance/other. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 | `audit_log` | jsonb | Append-only. |
+| `deleted_at` | timestamptz | Soft-delete timestamp. |
+| `deleted_by` | text | Soft-delete actor. |
+| `facility` | text | "CMRC", "Baca", or "all". |
+| `created_by` | text | Sign-in name of creator. |
 <!-- AUTOGEN:columns:closures END -->
 
 **Translator mapping** (`translate.closures`).
@@ -331,15 +346,15 @@ to false (no DELETE).
 | `id` | uuid | PK. DB-generated for new rows added via the admin UI. |
 | `name` | text | Unique. The on-conflict target for upserts. |
 | `role` | text | Legacy column kept in sync with `role_tier` for older read paths. |
-| `role_tier` | text | "trainer" / "lead" / "admin". |
-| `pin` | text | Plaintext for now, hash before APC per CLAUDE.md. |
 | `is_active` | boolean | Soft-delete via `false`. Filtered on load. |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
 | `previous_names` | jsonb | Rename history: `[{name, renamed_at}, ...]`. |
+| `pin` | text | Plaintext for now, hash before APC per CLAUDE.md. |
+| `role_tier` | text | "trainer" / "lead" / "admin". |
 | `audit_log` | jsonb | Append-only. |
 | `deleted_at` | timestamptz | Hard soft-delete (distinct from `is_active`). |
 | `deleted_by` | text | Soft-delete actor. |
-| `created_at` | timestamptz | |
-| `updated_at` | timestamptz | |
 <!-- AUTOGEN:columns:trainers END -->
 
 **Translator** (`translate.trainers`, custom): not field-pair-based;
@@ -359,14 +374,14 @@ a `data` JSONB carrying the class list snapshot for that version.
 |---|---|---|
 | `id` | uuid | PK. |
 | `label` | text | Display name. In-memory field is `name`. |
-| `effective_date` | date | When the version goes live. In-memory `startDate`. |
-| `is_active` | boolean | Derived from `activatedAt`. |
 | `created_by` | text | Sign-in name of creator. |
+| `data` | jsonb | `{endDate, activatedAt, classes[]}`. |
 | `created_at` | timestamptz | |
+| `effective_date` | text | When the version goes live. In-memory `startDate`. |
+| `is_active` | boolean | Derived from `activatedAt`. |
 | `updated_at` | timestamptz | |
 | `deleted_at` | timestamptz | |
 | `deleted_by` | text | |
-| `data` | jsonb | `{endDate, activatedAt, classes[]}`. |
 <!-- AUTOGEN:columns:schedule_versions END -->
 
 **Translator** (`translate.scheduleVersions`, custom).
@@ -380,20 +395,21 @@ Per-trainer absence requests with approval workflow.
 |---|---|---|
 | `id` | uuid | PK. |
 | `trainer_id` | uuid | Soft FK to `trainers.id`. |
-| `kind` | text | "sick" / "vacation" / "personal" / etc. Passthrough (no field map). |
-| `status` | text | "pending" / "approved" / "denied". Defaults to "approved" on the DB side for legacy rows. |
 | `start_at` | timestamptz | |
 | `end_at` | timestamptz | |
 | `all_day` | boolean | |
-| `decided_by` | uuid | Lead/admin who decided the request. |
-| `decided_at` | timestamptz | |
-| `decision_note` | text | |
-| `audit_log` | jsonb | Append-only. Lives as snake_case in-memory (intentional - see translator note). |
+| `kind` | text | "sick" / "vacation" / "personal" / etc. Passthrough (no field map). |
+| `reason` | text | Free-text reason for the absence request. |
 | `created_by` | text | |
-| `created_at` | timestamptz | |
-| `updated_at` | timestamptz | |
+| `audit_log` | jsonb | Append-only. Lives as snake_case in-memory (intentional - see translator note). |
 | `deleted_at` | timestamptz | |
 | `deleted_by` | text | |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | |
+| `status` | text | "pending" / "approved" / "denied". Defaults to "approved" on the DB side for legacy rows. |
+| `decided_by` | text | Lead/admin who decided the request. |
+| `decided_at` | timestamptz | |
+| `decision_note` | text | |
 <!-- AUTOGEN:columns:trainer_time_off END -->
 
 **Translator mapping** (`translate.timeOff`).
@@ -406,8 +422,7 @@ Short-lived ops broadcasts.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
-| `message` | text | Banner text. |
-| `facility` | text | Scope (passthrough). |
+| `body` | text | Banner text. Replaced the old `message` column; the active read path is `b.body`. |
 | `starts_at` | timestamptz | |
 | `ends_at` | timestamptz | "Stop now" sets this to current time. |
 | `created_by` | text | Sign-in name of creator. |
@@ -451,8 +466,9 @@ migrations.
 <!-- AUTOGEN:columns:settings START -->
 | Column | Type | Notes |
 |---|---|---|
+| `id` | uuid | uuid surrogate. Upserts target `key`, not `id` (`makeSettingsRow` writes `key` / `value` / `updated_at` only and never stamps `id`). |
 | `key` | text | PK. The on-conflict target. |
-| `value` | jsonb | Arbitrary payload. |
+| `value` | text | Arbitrary payload. |
 | `updated_at` | timestamptz | |
 <!-- AUTOGEN:columns:settings END -->
 

@@ -233,6 +233,19 @@ tags, no release notes in the tag, no signing. Just `git tag vX.Y`.
 Tracked across all sessions. Address in a dedicated cleanup commit
 when convenient.
 
+- Duplicate/legacy column drift on `classes` (Pattern-A-class -
+  duplicate/legacy columns that cause silent translator rejections).
+  Surfaced during the v4.32 SCHEMA.md NEW-flag fill. Do NOT touch app
+  code; future cleanup pass only:
+    * `classes.instructor` vs `classes.instructor_name`. The live
+      column is `instructor` (written as passthrough, read everywhere).
+      `instructor_name` has zero code refs - unwired duplicate.
+      Resolution: drop `instructor_name` in a future migration.
+    * `classes.time` vs `start_time` / `end_time`. `time` is never
+      written (translate.classes maps startTime/endTime only) and is
+      read only as a legacy fallback (`c.startTime || c.time`) for
+      pre-split rows. Possible legacy column to drop once no live row
+      relies on the fallback.
 - Trainers replace-all on save: every save sends the full profile
   array. Diff-based save would only send changed rows. Add only if
   Supabase rate limits surface.
