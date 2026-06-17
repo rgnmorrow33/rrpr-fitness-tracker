@@ -26,11 +26,14 @@ commit message.
 
 ## Table inventory
 
+<!-- AUTOGEN:table-count START -->
 The `public` schema contains **17 tables**: 14 active tables wired
 to the codebase (listed below), plus 3 orphan tables (empty, no code
 refs, no FK constraints) documented in the "Orphan tables" section
 following the per-table detail.
+<!-- AUTOGEN:table-count END -->
 
+<!-- AUTOGEN:table-inventory START -->
 | Table | Purpose | RLS | Realtime |
 |---|---|---|---|
 | `clients` | Core PT client records. JSONB-heavy: packages, sessions, audit_log all embedded. | Disabled | Yes (app-changes) |
@@ -47,6 +50,7 @@ following the per-table detail.
 | `announcement_banners` | Short-lived ops broadcasts to the trainer surface. | Disabled | Yes (app-changes) |
 | `notifications` | Trainer-targeted server-authored messages. Per-trainer subscription. | Disabled | Yes (per-trainer channel) |
 | `settings` | Key-value store. Currently holds `admin_pin` row. | Disabled | No |
+<!-- AUTOGEN:table-inventory END -->
 
 RLS state per CLAUDE.md ("Anon RLS allowing read/write on all tables.
 Acceptable for prototype. Tighten before APC opens (April 2027) or
@@ -67,6 +71,7 @@ per-trainer `notifications-<trainerId>` channel is built in
 Core PT client record. The most JSONB-heavy table in the schema and
 the primary target of ADR-0002 / ADR-0003 normalization work.
 
+<!-- AUTOGEN:columns:clients START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. Generated app-side via `freshUuid()` on insert. |
@@ -94,6 +99,7 @@ the primary target of ADR-0002 / ADR-0003 normalization work.
 | `updated_at` | timestamptz | Stamped on every write. |
 | `deleted_at` | timestamptz | Soft-delete timestamp. |
 | `deleted_by` | text | Soft-delete actor. |
+<!-- AUTOGEN:columns:clients END -->
 
 **Translator mapping** (`translate.clients`): camelCase in-memory →
 snake_case at DB for the 13 pairs in the `makeFieldTranslator` map.
@@ -110,6 +116,7 @@ Unmapped keys pass through unchanged.
 Group exercise definitions. Each row carries occurrence-level
 attendance and sub coverage state inside JSONB columns.
 
+<!-- AUTOGEN:columns:classes START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -134,6 +141,7 @@ attendance and sub coverage state inside JSONB columns.
 | `updated_at` | timestamptz | |
 | `deleted_at` | timestamptz | Soft-delete. |
 | `deleted_by` | text | Soft-delete actor. |
+<!-- AUTOGEN:columns:classes END -->
 
 **Translator mapping** (`translate.classes`).
 
@@ -142,6 +150,7 @@ attendance and sub coverage state inside JSONB columns.
 WRO intake form. JSONB-split pattern: the 5 most-queried fields
 are promoted to flat columns, everything else lives in `data`.
 
+<!-- AUTOGEN:columns:wros START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -153,6 +162,7 @@ are promoted to flat columns, everything else lives in `data`.
 | `data` | jsonb | Everything else (pre-form goals, post-form claim state, conversion lifecycle). |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:wros END -->
 
 **Translator mapping** (`translate.wros`, custom). The flat columns are
 the ones the audit / time-card queries filter or count by; the rest
@@ -165,6 +175,7 @@ information_schema query (preserved in code as `LEADS_ALLOWED_COLUMNS`).
 Writes are whitelist-filtered before upsert per Patch R - any key not
 in the allowed list is dropped at the wire.
 
+<!-- AUTOGEN:columns:leads START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -190,6 +201,7 @@ in the allowed list is dropped at the wire.
 | `created_by` | text | Sign-in name of creator. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:leads END -->
 
 **Translator mapping** (`translate.leads`).
 
@@ -205,6 +217,7 @@ Quick / Substantive / Educational contact log per trainer. CLAUDE.md
 hours math: Quick = 2 min, Substantive = 6 min, Educational = 15 min,
 capped at 4 hr per period.
 
+<!-- AUTOGEN:columns:member_contacts START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -215,6 +228,7 @@ capped at 4 hr per period.
 | `logged_at` | timestamptz | When the contact happened. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:member_contacts END -->
 
 **Translator mapping** (`translate.contacts`).
 
@@ -229,6 +243,7 @@ shape that the current code no longer reads or writes. They are
 documented in a separate sub-table below for completeness and are
 slated for cleanup in a future migration sprint.
 
+<!-- AUTOGEN:columns:admin_items START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -245,6 +260,7 @@ slated for cleanup in a future migration sprint.
 | `created_by` | text | Sign-in name of creator. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:admin_items END -->
 
 **Translator mapping** (`translate.adminItems`). The translator covers only
 the snake/camel field pairs; columns whose camel and snake forms
@@ -270,6 +286,7 @@ not rely on their values on existing rows.
 
 PT referrals between trainers.
 
+<!-- AUTOGEN:columns:referrals START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -279,6 +296,7 @@ PT referrals between trainers.
 | `notes` | text | Free text. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:referrals END -->
 
 **Translator mapping** (`translate.referrals`).
 
@@ -286,6 +304,7 @@ PT referrals between trainers.
 
 Facility closure dates.
 
+<!-- AUTOGEN:columns:closures START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -296,6 +315,7 @@ Facility closure dates.
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 | `audit_log` | jsonb | Append-only. |
+<!-- AUTOGEN:columns:closures END -->
 
 **Translator mapping** (`translate.closures`).
 
@@ -305,6 +325,7 @@ Trainer roster. The only entity that uses upsert-by-name on save
 (instead of upsert-by-id) and soft-deletes by toggling `is_active`
 to false (no DELETE).
 
+<!-- AUTOGEN:columns:trainers START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. DB-generated for new rows added via the admin UI. |
@@ -319,6 +340,7 @@ to false (no DELETE).
 | `deleted_by` | text | Soft-delete actor. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:trainers END -->
 
 **Translator** (`translate.trainers`, custom): not field-pair-based;
 the `toSupabase` / `fromSupabase` functions hard-code the shape.
@@ -332,6 +354,7 @@ the upsert-by-name save pattern (`onConflict: 'name'` in
 GX schedule history. Flat columns for filtering / soft-delete, plus
 a `data` JSONB carrying the class list snapshot for that version.
 
+<!-- AUTOGEN:columns:schedule_versions START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -344,6 +367,7 @@ a `data` JSONB carrying the class list snapshot for that version.
 | `deleted_at` | timestamptz | |
 | `deleted_by` | text | |
 | `data` | jsonb | `{endDate, activatedAt, classes[]}`. |
+<!-- AUTOGEN:columns:schedule_versions END -->
 
 **Translator** (`translate.scheduleVersions`, custom).
 
@@ -351,6 +375,7 @@ a `data` JSONB carrying the class list snapshot for that version.
 
 Per-trainer absence requests with approval workflow.
 
+<!-- AUTOGEN:columns:trainer_time_off START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -369,6 +394,7 @@ Per-trainer absence requests with approval workflow.
 | `updated_at` | timestamptz | |
 | `deleted_at` | timestamptz | |
 | `deleted_by` | text | |
+<!-- AUTOGEN:columns:trainer_time_off END -->
 
 **Translator mapping** (`translate.timeOff`).
 
@@ -376,6 +402,7 @@ Per-trainer absence requests with approval workflow.
 
 Short-lived ops broadcasts.
 
+<!-- AUTOGEN:columns:announcement_banners START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -386,6 +413,7 @@ Short-lived ops broadcasts.
 | `created_by` | text | Sign-in name of creator. |
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:announcement_banners END -->
 
 **Translator mapping** (`translate.announcementBanners`).
 
@@ -398,6 +426,7 @@ Trainer-targeted server-authored messages. Distinct subscription
 pattern: per-trainer filtered channel rather than the shared
 `app-changes` channel.
 
+<!-- AUTOGEN:columns:notifications START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK. |
@@ -406,6 +435,7 @@ pattern: per-trainer filtered channel rather than the shared
 | `payload` | jsonb | Type-specific. Convention: `dedup_key` for sweep-style triggers. |
 | `read_at` | timestamptz | Null until the trainer marks read. |
 | `created_at` | timestamptz | |
+<!-- AUTOGEN:columns:notifications END -->
 
 No `updated_at` column. The translator (`translate.notifications`,
 custom) is shaped specifically to avoid auto-stamping one - the
@@ -418,11 +448,13 @@ Key-value store. Today this holds one row keyed `admin_pin` with the
 Front Desk PIN as the value. Future config rows can land here without
 migrations.
 
+<!-- AUTOGEN:columns:settings START -->
 | Column | Type | Notes |
 |---|---|---|
 | `key` | text | PK. The on-conflict target. |
 | `value` | jsonb | Arbitrary payload. |
 | `updated_at` | timestamptz | |
+<!-- AUTOGEN:columns:settings END -->
 
 Used via the `makeSettingsRow` factory. Not in any realtime
 publication - settings are read on demand.
@@ -442,11 +474,13 @@ Column-level detail is intentionally omitted; if anyone needs the
 live shape, run `\d <table_name>` against the Supabase DB - that is
 the runtime source of truth for tables not driven by the app.
 
+<!-- AUTOGEN:orphans START -->
 | Table | Notes |
 |---|---|
 | `package_participants` | Empty, no code refs, no FK constraints. Pre-dates ADR-0002 planning for `client_package_participants`. Slated for cleanup (rename or drop) as part of Phase 2C execution. See ADR-0002 Notes addendum. |
 | `packages` | Empty, no code refs. The active packages data model lives as `clients.packages` JSONB (see "JSONB shapes" below). Slated for cleanup. |
 | `queue` | Empty, no code refs. The "queue" UI mode in code is a tab/view-state string, not a backing table; lead/consult queue data lives in the `leads` table. Slated for cleanup. |
+<!-- AUTOGEN:orphans END -->
 
 ---
 
