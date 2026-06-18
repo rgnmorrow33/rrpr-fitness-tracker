@@ -7845,6 +7845,16 @@
        diff + audit on update, soft-delete with audit. Reuses the
        appendAuditEntry pattern from clients/classes. */
     function upsertTimeOff(t){
+      /* v4.34: same union-NULL guard as clients.is_active (upsertClient) and
+         classes.is_active (upsertClass). trainer_time_off.status is NOT NULL
+         with a DB default, but the bulk-array save (storage.timeOff.save)
+         unions columns across rows - existing rows carry status, so an absent
+         status on this new row is sent as explicit NULL (defaultToNull) instead
+         of DEFAULT and trips the constraint. Default 'approved': this is the
+         admin/lead DIRECT-ENTRY path, so the entry is already authorized and
+         must NOT land as 'pending' (the approval queue counts status==='pending').
+         Only the absent case defaults - edits keep their existing status. */
+      if (t && t.status === undefined) t = Object.assign({}, t, { status: 'approved' });
       var hadId = !!(t && t.id);
       var withId = hadId ? t : Object.assign({ id: uid() }, t);
       var before = hadId ? (timeOff || []).find(function(x){ return x.id === withId.id; }) : null;
