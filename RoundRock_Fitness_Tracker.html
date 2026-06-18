@@ -6601,6 +6601,12 @@
         });
         if (anyDown) setSyncStatus('disconnected');
       }
+      /* v4.34: collect each table's reload() so the wake handlers can fire a
+         catch-up refetch of every entity on wake (see onVisible/onOnline/
+         onPageShow below). Resubscribe alone reopens the socket for FUTURE
+         events but does not replay rows changed while an iOS socket was dead;
+         this mirrors the notifications loadNotifications-on-wake refetch. */
+      var reloaders = [];
       var unsubscribers = subs.map(function(sub){
         var table = sub[0]; var setter = sub[1]; var entity = sub[2];
         /* Patch X: 100ms trailing-edge debounce per entity. A burst of inserts
@@ -6612,6 +6618,7 @@
             console.error('Subscription reload failed for ' + table + ':', err);
           });
         }, 100);
+        reloaders.push(reload);
         /* Builder re-runs on every reconnect (channels can't be re-subscribed
            once CLOSED), re-attaching the single binding to a fresh channel. */
         function buildTableChannel(client){
@@ -6642,13 +6649,24 @@
       /* Patch C: wake/online sweep. iPad sleep, wifi roam, brief
          offline blips - any of these can leave channels stuck in a
          non-SUBSCRIBED state. visibilitychange:visible and the global
-         online event both trigger an idempotent sweep. */
-      function onVisible(){ if (document.visibilityState === 'visible') sweepReconnectChannels('visible'); }
-      function onOnline(){ sweepReconnectChannels('online'); }
+         online event both trigger an idempotent sweep.
+
+         v4.34: each wake event ALSO fires a catch-up refetch of every
+         entity table. sweepReconnectChannels reopens the sockets for
+         FUTURE events, but postgres_changes does not replay rows that
+         changed while an iOS socket was dead (sleep/background) - so
+         without this the iPad never converges to changes made during
+         sleep. Mirrors the notifications loadNotifications-on-wake path:
+         reconnect restores the channel, this restores the DATA missed
+         during the dead window. Each reload is the per-entity debounced
+         full-replace load, so a wake reload-all converges cheaply. */
+      function wakeCatchUp(){ reloaders.forEach(function(r){ try { r(); } catch(_){} }); }
+      function onVisible(){ if (document.visibilityState === 'visible') { sweepReconnectChannels('visible'); wakeCatchUp(); } }
+      function onOnline(){ sweepReconnectChannels('online'); wakeCatchUp(); }
       /* Patch K: pageshow as a backup wake signal. iOS Safari fires
          pageshow when restoring from BFCache (deep sleep recovery)
          where visibilitychange may not fire reliably. */
-      function onPageShow(){ sweepReconnectChannels('pageshow'); }
+      function onPageShow(){ sweepReconnectChannels('pageshow'); wakeCatchUp(); }
       window.addEventListener('online', onOnline);
       document.addEventListener('visibilitychange', onVisible);
       window.addEventListener('pageshow', onPageShow);
