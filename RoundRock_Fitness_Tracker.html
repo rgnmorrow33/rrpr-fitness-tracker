@@ -4052,6 +4052,70 @@
     }
     return [];
   }
+  /* ===== Functional Movement Screen (FMS) helpers =====
+     Assessment rows live in clients.assessments[] (JSONB), type:"FMS". The
+     composite is computed once at save and stored on the row - never
+     recomputed on read - so a historical screen keeps the score it was
+     graded under even if the protocol (version field) is later revised. */
+  var FMS_TEST_LABELS = {
+    deep_squat: 'Deep Squat',
+    hurdle_step: 'Hurdle Step',
+    inline_lunge: 'Inline Lunge',
+    shoulder_mobility: 'Shoulder Mobility',
+    aslr: 'ASLR',
+    trunk_stability: 'Trunk Stability',
+    rotary_stability: 'Rotary Stability'
+  };
+  /* The 5 bilateral tests carry {l, r}; the lower side contributes to the
+     composite. The 2 remaining tests (deep_squat, trunk_stability) are single
+     scalars. Order here is the display / iteration order. */
+  var FMS_BILATERAL = ['hurdle_step', 'inline_lunge', 'shoulder_mobility', 'aslr', 'rotary_stability'];
+  var FMS_SOURCE_LABEL = { intake: 'Intake', reassessment: 'Reassessment', post_pt_discharge: 'Post-PT Discharge' };
+  function fmsBilateralLow(pair){
+    if (!pair) return 0;
+    var l = Number(pair.l) || 0;
+    var r = Number(pair.r) || 0;
+    return Math.min(l, r);
+  }
+  /* Composite = sum of 7 contributing scores, max 21. For bilateral tests the
+     lower of L/R contributes. A positive clearing test (pain present) forces
+     its paired screen to 0. Any test scored 0 already contributes 0. */
+  function computeFMSComposite(tests, clearing){
+    tests = tests || {};
+    clearing = clearing || {};
+    var deepSquat       = Number(tests.deep_squat) || 0;
+    var hurdleStep      = fmsBilateralLow(tests.hurdle_step);
+    var inlineLunge     = fmsBilateralLow(tests.inline_lunge);
+    var shoulderMob     = fmsBilateralLow(tests.shoulder_mobility);
+    var aslr            = fmsBilateralLow(tests.aslr);
+    var trunkStability  = Number(tests.trunk_stability) || 0;
+    var rotaryStability = fmsBilateralLow(tests.rotary_stability);
+    /* Clearing overrides: pain (positive) zeroes the paired screen.
+       shoulder_impingement -> shoulder_mobility
+       spinal_extension     -> trunk_stability (push-up)
+       spinal_flexion       -> rotary_stability */
+    if (clearing.shoulder_impingement) shoulderMob = 0;
+    if (clearing.spinal_extension)     trunkStability = 0;
+    if (clearing.spinal_flexion)       rotaryStability = 0;
+    return deepSquat + hurdleStep + inlineLunge + shoulderMob +
+           aslr + trunkStability + rotaryStability;
+  }
+  /* Which tests were scored a raw 0 (either side, for bilateral). A 0 is a
+     clinical flag surfaced as a red brick in ClientDetail - not hidden.
+     Clearing-forced zeroes are composite math, not raw 0-scores, so they are
+     not bricked here (the clearing flag itself is shown separately). */
+  function fmsZeroFlags(assessment){
+    var tests = (assessment && assessment.tests) || {};
+    var out = [];
+    Object.keys(FMS_TEST_LABELS).forEach(function(k){
+      var v = tests[k];
+      var isZero = FMS_BILATERAL.indexOf(k) !== -1
+        ? (Number(v && v.l) === 0 || Number(v && v.r) === 0)
+        : (Number(v) === 0);
+      if (isZero) out.push(FMS_TEST_LABELS[k]);
+    });
+    return out;
+  }
   function totalSessionsPurchased(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
   }
@@ -13087,6 +13151,10 @@
     var addPkgOpen = addPkgOpenTuple[0];
     var setAddPkgOpen = addPkgOpenTuple[1];
 
+    var fmsOpenTuple = useState(false);
+    var fmsOpen = fmsOpenTuple[0];
+    var setFmsOpen = fmsOpenTuple[1];
+
     /* Holds the package being edited in EditPackageModal, or null. */
     var editPkgTargetTuple = useState(null);
     var editPkgTarget = editPkgTargetTuple[0];
@@ -13379,6 +13447,84 @@
             )
           );
         })(),
+        /* ===== Movement Screen (FMS) ===== Trainer-entered functional
+           movement screens with reassessment history and composite delta.
+           Rows live in c.assessments[] (type:"FMS"). Composite is read
+           straight off the stored row, never recomputed here. A screen under
+           14/21 and any raw-0 test flag as clinical (red). */
+        (function(){
+          var screens = (c.assessments || []).filter(function(a){ return a && a.type === 'FMS'; });
+          var sorted = screens.slice().sort(function(a, b){ return (a.date || '') < (b.date || '') ? 1 : -1; });
+          var latest = sorted[0] || null;
+          var prior = sorted[1] || null;
+          var delta = (latest && prior) ? (latest.composite - prior.composite) : null;
+          return e('div', { style: { marginTop: '18px' } },
+            e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' } },
+              e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
+                e('h3', { style: { fontSize: '20px', margin: 0 } }, 'Movement Screen (FMS)'),
+                latest && e('span', { style: { fontSize: '16px', fontWeight: 700, color: latest.composite < 14 ? 'var(--red)' : 'var(--navy)' } },
+                  latest.composite + '/21'),
+                delta != null && e('span', {
+                  style: { fontSize: '12px', fontWeight: 700, color: delta > 0 ? 'var(--green)' : (delta < 0 ? 'var(--red)' : 'var(--slate)') }
+                }, (delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '± ')) + delta + ' vs prior')
+              ),
+              e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setFmsOpen(true); } }, '+ New Screen')
+            ),
+            screens.length === 0
+              ? e('div', { className: 'empty', style: { marginTop: '8px' } },
+                  e('div', { className: 'icon' }, '🏃'),
+                  e('div', null, 'No movement screens on file.')
+                )
+              : e('div', { className: 'log-table', style: { marginTop: '8px' } },
+                  e('div', { className: 'log-row header' },
+                    e('div', null, 'Date'),
+                    e('div', null, 'Type'),
+                    e('div', null, 'Composite'),
+                    e('div', null, 'Flags'),
+                    e('div', null, 'Screened by')
+                  ),
+                  sorted.map(function(a){
+                    var flags = fmsZeroFlags(a);
+                    var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion);
+                    return e('div', { key: a.id, className: 'log-row' },
+                      e('div', null,
+                        a.date ? formatDate(a.date) : '—',
+                        a.source && e('div', { style: { fontSize: '10px', color: 'var(--slate)' } }, FMS_SOURCE_LABEL[a.source] || a.source)
+                      ),
+                      e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.type || 'FMS'),
+                      e('div', { style: { fontWeight: 700, color: a.composite < 14 ? 'var(--red)' : 'var(--navy)' } }, a.composite + '/21'),
+                      e('div', null,
+                        (flags.length === 0 && !clearingOn)
+                          ? e('span', { style: { fontSize: '11px', color: 'var(--slate-soft)' } }, '—')
+                          : e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
+                              flags.map(function(f){
+                                return e('span', {
+                                  key: f,
+                                  title: f + ' scored 0 - clinical flag',
+                                  style: {
+                                    display: 'inline-block', background: 'var(--red)', color: '#fff',
+                                    padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
+                                  }
+                                }, f);
+                              }),
+                              clearingOn && e('span', {
+                                title: 'Positive clearing test (pain present)',
+                                style: {
+                                  display: 'inline-block', background: 'var(--amber)', color: '#3a2c00',
+                                  padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
+                                }
+                              }, 'CLEARING')
+                            )
+                      ),
+                      e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.screened_by || '—')
+                    );
+                  })
+                ),
+            latest && latest.notes && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginTop: '6px', fontStyle: 'italic' } },
+              'Latest note: ' + latest.notes
+            )
+          );
+        })(),
         e('h3', { style: { fontSize: '20px', marginTop: '18px', marginBottom: '4px' } }, 'Session Log'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
           (c.sessions || []).length + ' logged'),
@@ -13657,6 +13803,26 @@
             ctx.toast('Package added \u2713');
           }
         }),
+        fmsOpen && e(FMSAssessmentModal, {
+          ctx: ctx,
+          client: c,
+          onClose: function(){ setFmsOpen(false); },
+          onSave: function(updated, assessment){
+            /* Persist mirrors AddPackageModal: fire-and-forget through
+               auditedUpsertClient, generic 'assessment_added' action so
+               future assessment types share one history filter. type lives
+               in the payload. The green toast fires optimistically here; a
+               background save failure surfaces via the _saveIfDirty red
+               toast (green-then-red Pattern B - see Deferred). */
+            ctx.auditedUpsertClient(updated, 'assessment_added', {
+              target_id: assessment && assessment.id,
+              before: null,
+              after: assessment
+            });
+            setFmsOpen(false);
+            ctx.toast('Movement screen saved \u2713');
+          }
+        }),
         editPkgTarget && e(EditPackageModal, {
           ctx: ctx,
           client: c,
@@ -13675,6 +13841,228 @@
             onClick: doHardDelete,
             title: 'Delete forever - irreversible'
           }, 'Delete forever')
+        )
+      )
+    );
+  }
+
+  /* ============ MOVEMENT SCREEN (FMS) MODAL ============
+     Trainer-entered functional movement screen. 7 tests (5 bilateral L/R, 2
+     single), 3 clearing checkboxes, notes. The composite is computed live for
+     the preview and stamped onto the row at save via computeFMSComposite, so
+     the stored value is authoritative and survives protocol revisions (the
+     version field records which protocol produced it). Persist mirrors
+     AddPackageModal: build the updated client, hand it to props.onSave, which
+     wraps it in ctx.auditedUpsertClient. */
+  function FMSAssessmentModal(props){
+    var ctx = props.ctx;
+    useBodyScrollLock();
+    var c = props.client;
+    var isFirst = ((c.assessments || []).filter(function(a){ return a && a.type === 'FMS'; })).length === 0;
+
+    var dateTuple = useState(todayStr());
+    var date = dateTuple[0]; var setDate = dateTuple[1];
+
+    /* First screen defaults to intake; subsequent default to reassessment.
+       post_pt_discharge is selectable but wires no clinic logic this round. */
+    var sourceTuple = useState(isFirst ? 'intake' : 'reassessment');
+    var source = sourceTuple[0]; var setSource = sourceTuple[1];
+
+    /* Bilateral tests carry {l, r}; single tests carry a scalar. '' = not yet
+       scored, kept distinct from a scored 0 (a clinical flag) until submit
+       validation forces every field to be scored. */
+    var testsTuple = useState({
+      deep_squat: '', trunk_stability: '',
+      hurdle_step: { l: '', r: '' },
+      inline_lunge: { l: '', r: '' },
+      shoulder_mobility: { l: '', r: '' },
+      aslr: { l: '', r: '' },
+      rotary_stability: { l: '', r: '' }
+    });
+    var tests = testsTuple[0]; var setTests = testsTuple[1];
+
+    var clearingTuple = useState({ shoulder_impingement: false, spinal_extension: false, spinal_flexion: false });
+    var clearing = clearingTuple[0]; var setClearing = clearingTuple[1];
+
+    var notesTuple = useState('');
+    var notes = notesTuple[0]; var setNotes = notesTuple[1];
+
+    function setSingle(key, val){
+      setTests(function(t){ var n = Object.assign({}, t); n[key] = val; return n; });
+    }
+    function setSide(key, side, val){
+      setTests(function(t){
+        var n = Object.assign({}, t);
+        n[key] = Object.assign({}, t[key]);
+        n[key][side] = val;
+        return n;
+      });
+    }
+    function toggleClearing(key){
+      setClearing(function(cl){ var n = Object.assign({}, cl); n[key] = !n[key]; return n; });
+    }
+
+    /* Coerce the form's string inputs to numbers for both the live preview and
+       the stored row so the two always agree. '' -> 0 (matches the composite's
+       missing-is-0 rule); after validation every field is a real 0-3. */
+    function coerceTests(){
+      return {
+        deep_squat: Number(tests.deep_squat) || 0,
+        hurdle_step: { l: Number(tests.hurdle_step.l) || 0, r: Number(tests.hurdle_step.r) || 0 },
+        inline_lunge: { l: Number(tests.inline_lunge.l) || 0, r: Number(tests.inline_lunge.r) || 0 },
+        shoulder_mobility: { l: Number(tests.shoulder_mobility.l) || 0, r: Number(tests.shoulder_mobility.r) || 0 },
+        aslr: { l: Number(tests.aslr.l) || 0, r: Number(tests.aslr.r) || 0 },
+        trunk_stability: Number(tests.trunk_stability) || 0,
+        rotary_stability: { l: Number(tests.rotary_stability.l) || 0, r: Number(tests.rotary_stability.r) || 0 }
+      };
+    }
+
+    var previewComposite = computeFMSComposite(coerceTests(), clearing);
+
+    /* Every test (both sides where bilateral) must be scored 0-3. A blank must
+       not silently coerce to 0 and read as a clinical flag. */
+    function allScored(){
+      function ok(v){ return String(v) !== '' && v != null; }
+      if (!ok(tests.deep_squat) || !ok(tests.trunk_stability)) return false;
+      for (var i = 0; i < FMS_BILATERAL.length; i++) {
+        var pair = tests[FMS_BILATERAL[i]];
+        if (!ok(pair.l) || !ok(pair.r)) return false;
+      }
+      return true;
+    }
+
+    function submit(){
+      if (!allScored()) { ctx.toast('Score all seven tests 0-3 (both sides where noted)', 'error'); return; }
+      var coerced = coerceTests();
+      var assessment = {
+        id: uid(),
+        type: 'FMS',
+        version: 'FMS-v1',
+        source: source,
+        date: date,
+        screened_by: ctx.currentUserName() || 'unknown',
+        tests: coerced,
+        clearing: {
+          shoulder_impingement: !!clearing.shoulder_impingement,
+          spinal_extension: !!clearing.spinal_extension,
+          spinal_flexion: !!clearing.spinal_flexion
+        },
+        composite: computeFMSComposite(coerced, clearing),
+        notes: (notes || '').trim()
+      };
+      var updated = Object.assign({}, c, { assessments: (c.assessments || []).concat([assessment]) });
+      props.onSave(updated, assessment);
+    }
+
+    function scoreSelect(value, onChange){
+      return e('select', {
+        value: value,
+        onChange: function(ev){ onChange(ev.target.value); },
+        style: { padding: '8px 10px', fontSize: '14px', borderRadius: '6px', border: '1.5px solid var(--rule)', background: '#fff', minWidth: '58px' }
+      },
+        e('option', { value: '' }, '–'),
+        [0, 1, 2, 3].map(function(n){ return e('option', { key: n, value: n }, n); })
+      );
+    }
+    function testRow(key){
+      var bilateral = FMS_BILATERAL.indexOf(key) !== -1;
+      return e('div', {
+        key: key,
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 0', borderBottom: '1px solid var(--cream-2)' }
+      },
+        e('div', { style: { fontSize: '14px', fontWeight: 600, color: 'var(--navy)' } }, FMS_TEST_LABELS[key]),
+        bilateral
+          ? e('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+              e('span', { style: { fontSize: '11px', color: 'var(--slate)', fontWeight: 700 } }, 'L'),
+              scoreSelect(tests[key].l, function(v){ setSide(key, 'l', v); }),
+              e('span', { style: { fontSize: '11px', color: 'var(--slate)', fontWeight: 700 } }, 'R'),
+              scoreSelect(tests[key].r, function(v){ setSide(key, 'r', v); })
+            )
+          : scoreSelect(tests[key], function(v){ setSingle(key, v); })
+      );
+    }
+    /* Each clearing test is paired with the screen its positive result zeroes. */
+    var CLEARING_ROWS = [
+      { key: 'shoulder_impingement', label: 'Shoulder impingement', affects: 'zeroes Shoulder Mobility' },
+      { key: 'spinal_extension', label: 'Spinal extension', affects: 'zeroes Trunk Stability' },
+      { key: 'spinal_flexion', label: 'Spinal flexion', affects: 'zeroes Rotary Stability' }
+    ];
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Movement Screen (FMS)'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Screening ', e('b', null, c.name), '. Score each test 0-3. A 0 means pain or inability during the movement and is a clinical flag.'
+          ),
+          e('div', { className: 'row2' },
+            e('div', { className: 'field' },
+              e('label', null, 'Date'),
+              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
+            ),
+            e('div', { className: 'field' },
+              e('label', null, 'Type'),
+              e('select', { value: source, onChange: function(ev){ setSource(ev.target.value); } },
+                e('option', { value: 'intake' }, 'Intake'),
+                e('option', { value: 'reassessment' }, 'Reassessment'),
+                e('option', { value: 'post_pt_discharge' }, 'Post-PT Discharge')
+              )
+            )
+          ),
+          e('div', { style: { marginTop: '6px' } },
+            e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '4px' } },
+              'Tests (lower of L/R scores each bilateral test)'
+            ),
+            Object.keys(FMS_TEST_LABELS).map(testRow)
+          ),
+          e('div', { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--rule)' } },
+            e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '4px' } },
+              'Clearing tests'
+            ),
+            e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '8px', lineHeight: 1.4 } },
+              'Check when pain is present (positive). A positive clearing test forces its paired screen to 0.'
+            ),
+            CLEARING_ROWS.map(function(row){
+              return e('label', {
+                key: row.key,
+                style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' }
+              },
+                e('input', { type: 'checkbox', checked: !!clearing[row.key], onChange: function(){ toggleClearing(row.key); } }),
+                e('span', null, row.label,
+                  e('span', { style: { fontSize: '11px', color: 'var(--slate)', marginLeft: '6px' } }, '(' + row.affects + ')')
+                )
+              );
+            })
+          ),
+          e('div', { className: 'field', style: { marginTop: '14px' } },
+            e('label', null, 'Notes'),
+            e('textarea', {
+              value: notes,
+              onChange: function(ev){ setNotes(ev.target.value); },
+              rows: 3,
+              placeholder: 'Compensations, asymmetries, observations',
+              style: { width: '100%', padding: '10px 12px', fontSize: '14px', borderRadius: '6px', border: '1.5px solid var(--rule)', background: '#fff', resize: 'vertical' }
+            })
+          ),
+          e('div', {
+            style: {
+              marginTop: '14px', padding: '12px 14px', borderRadius: '8px',
+              background: 'var(--paper-2)', border: '1px solid var(--rule)',
+              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between'
+            }
+          },
+            e('span', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--slate)' } }, 'Composite (live)'),
+            e('span', { style: { fontSize: '22px', fontWeight: 700, fontFamily: 'DM Serif Display', color: previewComposite < 14 ? 'var(--red)' : 'var(--navy)' } },
+              previewComposite + '/21'
+            )
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-teal', onClick: submit }, 'Save Screen')
         )
       )
     );
