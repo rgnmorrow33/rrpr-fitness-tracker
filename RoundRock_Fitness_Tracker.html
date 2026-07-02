@@ -4116,6 +4116,14 @@
     });
     return out;
   }
+  /* Shared FMS composite color: brick <14, ochre 14-16, moss 17+. The 14
+     cutoff maps to FMS injury-risk literature. Single source of truth so the
+     modal live preview and the saved history rows never diverge. */
+  function fmsCompositeColor(score){
+    if (score < 14) return 'var(--red)';
+    if (score < 17) return 'var(--amber)';
+    return 'var(--green)';
+  }
   function totalSessionsPurchased(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
   }
@@ -13155,6 +13163,13 @@
     var fmsOpen = fmsOpenTuple[0];
     var setFmsOpen = fmsOpenTuple[1];
 
+    /* Movement Screen history accordion: id of the currently expanded screen,
+       or null. Single-open (tapping another row swaps; tapping the open row
+       collapses). */
+    var expandedFmsIdTuple = useState(null);
+    var expandedFmsId = expandedFmsIdTuple[0];
+    var setExpandedFmsId = expandedFmsIdTuple[1];
+
     /* Holds the package being edited in EditPackageModal, or null. */
     var editPkgTargetTuple = useState(null);
     var editPkgTarget = editPkgTargetTuple[0];
@@ -13462,7 +13477,7 @@
             e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' } },
               e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
                 e('h3', { style: { fontSize: '20px', margin: 0 } }, 'Movement Screen (FMS)'),
-                latest && e('span', { style: { fontSize: '16px', fontWeight: 700, color: latest.composite < 14 ? 'var(--red)' : 'var(--navy)' } },
+                latest && e('span', { style: { fontSize: '16px', fontWeight: 700, color: fmsCompositeColor(latest.composite) } },
                   latest.composite + '/21'),
                 delta != null && e('span', {
                   style: { fontSize: '12px', fontWeight: 700, color: delta > 0 ? 'var(--green)' : (delta < 0 ? 'var(--red)' : 'var(--slate)') }
@@ -13486,37 +13501,95 @@
                   sorted.map(function(a){
                     var flags = fmsZeroFlags(a);
                     var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion);
-                    return e('div', { key: a.id, className: 'log-row' },
-                      e('div', null,
-                        a.date ? formatDate(a.date) : '—',
-                        a.source && e('div', { style: { fontSize: '10px', color: 'var(--slate)' } }, FMS_SOURCE_LABEL[a.source] || a.source)
-                      ),
-                      e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.type || 'FMS'),
-                      e('div', { style: { fontWeight: 700, color: a.composite < 14 ? 'var(--red)' : 'var(--navy)' } }, a.composite + '/21'),
-                      e('div', null,
-                        (flags.length === 0 && !clearingOn)
-                          ? e('span', { style: { fontSize: '11px', color: 'var(--slate-soft)' } }, '—')
-                          : e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
-                              flags.map(function(f){
-                                return e('span', {
-                                  key: f,
-                                  title: f + ' scored 0 - clinical flag',
+                    var isExpanded = expandedFmsId === a.id;
+                    /* Wrapper groups the tappable row with its inline breakdown.
+                       Full-row onClick + cursor is the tap target; the chevron on
+                       the right edge signals expandability (v1 had no affordance).
+                       Chevron folds into the Screened-by cell - no 6th grid column. */
+                    return e('div', { key: a.id },
+                      e('div', {
+                        className: 'log-row',
+                        onClick: function(){ setExpandedFmsId(isExpanded ? null : a.id); },
+                        style: { cursor: 'pointer' }
+                      },
+                        e('div', null,
+                          a.date ? formatDate(a.date) : '—',
+                          a.source && e('div', { style: { fontSize: '10px', color: 'var(--slate)' } }, FMS_SOURCE_LABEL[a.source] || a.source)
+                        ),
+                        e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.type || 'FMS'),
+                        e('div', { style: { fontWeight: 700, color: fmsCompositeColor(a.composite) } }, a.composite + '/21'),
+                        e('div', null,
+                          (flags.length === 0 && !clearingOn)
+                            ? e('span', { style: { fontSize: '11px', color: 'var(--slate-soft)' } }, '—')
+                            : e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
+                                flags.map(function(f){
+                                  return e('span', {
+                                    key: f,
+                                    title: f + ' scored 0 - clinical flag',
+                                    style: {
+                                      display: 'inline-block', background: 'var(--red)', color: '#fff',
+                                      padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
+                                    }
+                                  }, f);
+                                }),
+                                clearingOn && e('span', {
+                                  title: 'Positive clearing test (pain present)',
                                   style: {
-                                    display: 'inline-block', background: 'var(--red)', color: '#fff',
+                                    display: 'inline-block', background: 'var(--amber)', color: '#3a2c00',
                                     padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
                                   }
-                                }, f);
-                              }),
-                              clearingOn && e('span', {
-                                title: 'Positive clearing test (pain present)',
-                                style: {
-                                  display: 'inline-block', background: 'var(--amber)', color: '#3a2c00',
-                                  padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
-                                }
-                              }, 'CLEARING')
-                            )
+                                }, 'CLEARING')
+                              )
+                        ),
+                        e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' } },
+                          e('span', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.screened_by || '—'),
+                          e('span', { style: { fontSize: '14px', color: 'var(--moss)', fontWeight: 700 }, 'aria-hidden': 'true' }, isExpanded ? '▾' : '▸')
+                        )
                       ),
-                      e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.screened_by || '—')
+                      isExpanded && e('div', {
+                        style: { padding: '12px 14px 16px', borderBottom: '1px solid var(--border)', background: 'var(--paper-2)', fontSize: '13px' }
+                      },
+                        e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '6px' } },
+                          'Test scores (0-3; bilateral scored on the lower side)'
+                        ),
+                        e('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px 18px' } },
+                          Object.keys(FMS_TEST_LABELS).map(function(k){
+                            var bilateral = FMS_BILATERAL.indexOf(k) !== -1;
+                            var v = a.tests ? a.tests[k] : undefined;
+                            var display, zero;
+                            if (bilateral) {
+                              var l = (v && v.l != null) ? v.l : '—';
+                              var r = (v && v.r != null) ? v.r : '—';
+                              display = 'L ' + l + ' / R ' + r;
+                              zero = (Number(v && v.l) === 0 || Number(v && v.r) === 0);
+                            } else {
+                              display = (v != null ? v : '—');
+                              zero = (Number(v) === 0);
+                            }
+                            return e('div', { key: k, style: { display: 'flex', justifyContent: 'space-between', gap: '10px' } },
+                              e('span', { style: { color: 'var(--slate)' } }, FMS_TEST_LABELS[k]),
+                              e('span', { style: { fontWeight: 700, color: zero ? 'var(--red)' : 'var(--navy)' } }, display)
+                            );
+                          })
+                        ),
+                        e('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--cream-2)' } },
+                          e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '4px' } }, 'Clearing tests'),
+                          [
+                            { key: 'shoulder_impingement', label: 'Shoulder impingement' },
+                            { key: 'spinal_extension', label: 'Spinal extension' },
+                            { key: 'spinal_flexion', label: 'Spinal flexion' }
+                          ].map(function(row){
+                            var pos = !!(a.clearing && a.clearing[row.key]);
+                            return e('div', { key: row.key, style: { display: 'flex', justifyContent: 'space-between' } },
+                              e('span', { style: { color: 'var(--slate)' } }, row.label),
+                              e('span', { style: { fontWeight: 700, color: pos ? 'var(--red)' : 'var(--green)' } }, pos ? 'Positive (pain)' : 'Negative')
+                            );
+                          })
+                        ),
+                        a.notes && e('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--cream-2)', fontStyle: 'italic', color: 'var(--slate)' } },
+                          'Notes: ' + a.notes
+                        )
+                      )
                     );
                   })
                 ),
@@ -13958,7 +14031,7 @@
       return e('select', {
         value: value,
         onChange: function(ev){ onChange(ev.target.value); },
-        style: { padding: '8px 10px', fontSize: '14px', borderRadius: '6px', border: '1.5px solid var(--rule)', background: '#fff', minWidth: '58px' }
+        style: { padding: '8px 10px', fontSize: '14px', borderRadius: '6px', border: '1.5px solid var(--rule)', background: '#fff', width: '64px', flex: '0 0 auto' }
       },
         e('option', { value: '' }, '–'),
         [0, 1, 2, 3].map(function(n){ return e('option', { key: n, value: n }, n); })
@@ -14049,13 +14122,13 @@
           ),
           e('div', {
             style: {
-              marginTop: '14px', padding: '12px 14px', borderRadius: '8px',
+              marginTop: '20px', marginBottom: '4px', padding: '16px 18px', borderRadius: '10px',
               background: 'var(--paper-2)', border: '1px solid var(--rule)',
-              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between'
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between'
             }
           },
-            e('span', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--slate)' } }, 'Composite (live)'),
-            e('span', { style: { fontSize: '22px', fontWeight: 700, fontFamily: 'DM Serif Display', color: previewComposite < 14 ? 'var(--red)' : 'var(--navy)' } },
+            e('span', { style: { fontSize: '13px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)' } }, 'Composite (live)'),
+            e('span', { style: { fontSize: '30px', fontWeight: 700, fontFamily: 'DM Serif Display', color: fmsCompositeColor(previewComposite) } },
               previewComposite + '/21'
             )
           )
