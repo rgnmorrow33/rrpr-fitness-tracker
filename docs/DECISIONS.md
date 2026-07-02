@@ -605,6 +605,98 @@ Cross-references:
 
 ---
 
+## ADR-0006: Assessment data as JSONB layer on clients
+
+- **Status:** Proposed
+- **Date:** 2026-07-02
+
+### Context
+
+The PT program rebuild (Section 3 of the program-purpose doc) requires a
+standardized, repeatable assessment protocol. The first concrete instance is a
+Functional Movement Screen (FMS) module on the PT client profile, trainer-entered
+at intake with reassessment history and delta (v4.35). Today the app has no
+assessment data primitive of any kind - the proof-of-concept FMS screen that
+transitioned a discharged PT patient to Carlos happened through direct
+coordination, not through the system.
+
+Two forces shape where assessment data should live:
+
+1. The current architecture keeps packages, sessions, and audit_log as JSONB
+   fields on the clients table (ADR-0004, JSONB-over-tables). Adding a new
+   normalized `assessments` table would cut against that posture and incur the
+   RLS-verify and orphan-table risks that posture was chosen to avoid.
+
+2. APC (April 2027) will introduce VALD objective assessment (ForceDecks,
+   DynaMo). That data is continuous force-time series - a genuinely different and
+   higher-volume data class than FMS's discrete 0-3 scores. It will want its own
+   relational table regardless of what FMS does. FMS and VALD are the
+   community-tier and performance-tier assessment surfaces respectively
+   (Section 4), and a client may accrue history in both.
+
+The open pull-factor against JSONB is the pending IT security review, whose
+central finding will be the project-wide RLS-disabled posture. If IT mandates
+normalization, this decision may need revisiting.
+
+### Decision
+
+Assessment data is stored as a JSONB array `assessments[]` on the clients table,
+consistent with ADR-0004. Each element carries a `type` discriminator ("FMS"
+now, "VALD" or others later), a nullable `source` field ("intake" |
+"reassessment" | "post_pt_discharge"), and a `version` string ("FMS-v1")
+declaring the scoring protocol used.
+
+FMS scores persist as a small stable shape (7 tests, 3 clearing tests, a stored
+composite, notes) - the ideal JSONB payload, not the high-volume relational data
+that makes JSONB hurt. The composite is computed and frozen at save, not
+recomputed on read.
+
+VALD and any high-volume force-plate data is explicitly OUT of scope for this
+JSONB layer. When APC lands, VALD data gets its own relational table; the
+`assessments[]` array holds a typed pointer/summary row so a client's FMS history
+(CMRC) and VALD history (APC) coexist in one timeline without schema churn.
+This is the "scale to APC without a second rebuild" requirement (Section 1)
+expressed at the data layer.
+
+Audit action is generic (`assessment_added`) with `type` in the payload, so a
+single query returns full assessment history across all future types.
+
+### Consequences
+
+- FMS module ships on the current architecture with no new table, no RLS-verify
+  dance, no orphan-table risk.
+- The `source` field is the seam for PT-clinic integration (Section 5): it lets
+  the later post-discharge-handoff and PT-approved-trainer-criteria work attach
+  without a schema migration. Field is present now; clinic logic is not wired
+  this round.
+- The `type` discriminator lets FMS and VALD coexist on one client profile,
+  keeping the CMRC/community tier and APC/performance tier on one data model.
+- The `version` field lets a 2027 reassessment be honestly compared against a
+  2026 baseline, or flagged non-comparable if Carlos revises the protocol.
+- Every audited client write now carries the assessments array in its before/
+  after audit snapshots, inflating audit-log payload size. Bounded by the
+  existing 100-entry audit trim; no logic breaks.
+- Requires a one-time SQL column add (`ALTER TABLE clients ADD COLUMN
+  assessments jsonb DEFAULT '[]'`) plus PostgREST cache reload before first save.
+
+### Notes
+
+Status moves to Accepted after Carlos reviews and signs off on the FMS field
+mapping - specifically the left/right bilateral scoring convention and whether
+any raw measurements should be captured alongside the 0-3 scores. Carlos owns
+assessment protocol design (Section 3); the field mapping is not canonical until
+he confirms it. This mirrors the Selisa-QA gate on other work.
+
+If the IT security review mandates normalization of client-nested JSONB, this
+ADR is revisited and the assessments layer becomes the migration candidate
+alongside the Phase 2C sessions normalization. Until then, JSONB-over-tables
+(ADR-0004) governs.
+
+Related: ADR-0004 (JSONB-over-tables), ADR-0002 (pairs architecture, same
+JSONB-on-clients pattern), Phase 2C (normalization horizon).
+
+---
+
 ## Backlog of proposed ADRs
 
 The following decisions are foundational to the system as it stands
