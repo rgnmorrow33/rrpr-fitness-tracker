@@ -607,8 +607,11 @@ Cross-references:
 
 ## ADR-0006: Assessment data as JSONB layer on clients
 
-- **Status:** Proposed
-- **Date:** 2026-07-02
+- **Status:** Accepted (was Proposed; drafted v4.35 on 2026-07-02, accepted
+  2026-07-07 after Carlos Vega field-mapping review)
+- **Date:** 2026-07-02 drafted / 2026-07-07 accepted
+- **Reviewer:** Carlos Vega, Head Strength & Conditioning Coach, assessment
+  protocol owner
 
 ### Context
 
@@ -643,13 +646,28 @@ normalization, this decision may need revisiting.
 Assessment data is stored as a JSONB array `assessments[]` on the clients table,
 consistent with ADR-0004. Each element carries a `type` discriminator ("FMS"
 now, "VALD" or others later), a nullable `source` field ("intake" |
-"reassessment" | "post_pt_discharge"), and a `version` string ("FMS-v1")
-declaring the scoring protocol used.
+"reassessment" | "post_pt_discharge"), and a `version` string ("FMS-v1",
+"FMS-v2") declaring the scoring protocol used.
 
-FMS scores persist as a small stable shape (7 tests, 3 clearing tests, a stored
+FMS scores persist as a small stable shape (7 tests, 4 clearing tests, a stored
 composite, notes) - the ideal JSONB payload, not the high-volume relational data
 that makes JSONB hurt. The composite is computed and frozen at save, not
 recomputed on read.
+
+Field mapping, ratified by Carlos Vega (2026-07-07):
+
+- Bilateral scoring: the lower of L/R counts on the 5 bilateral tests (standard
+  FMS) - hurdle step, inline lunge, shoulder mobility, ASLR, rotary stability.
+- Clearing tests: 4 pain-provocation tests, each forcing its paired screen to 0 -
+  shoulder impingement -> shoulder mobility, spinal extension -> trunk stability,
+  spinal flexion -> rotary stability, ankle clearing -> inline lunge. Ankle
+  clearing was added in v4.38 to match the current official FMS standard; screens
+  scored before it stamp FMS-v1 (3 clearing tests), screens after stamp FMS-v2 (4).
+- Raw measurements: 0-3 scores only for now; raw measurement fields are editable
+  and addable later under the version discriminator without a rebuild (Carlos,
+  2026-07-07).
+- Composite: sum of the 7 tests, 21-point cap, frozen at save (not recomputed on
+  read) so history stays honest across protocol changes.
 
 VALD and any high-volume force-plate data is explicitly OUT of scope for this
 JSONB layer. When APC lands, VALD data gets its own relational table; the
@@ -672,7 +690,9 @@ single query returns full assessment history across all future types.
 - The `type` discriminator lets FMS and VALD coexist on one client profile,
   keeping the CMRC/community tier and APC/performance tier on one data model.
 - The `version` field lets a 2027 reassessment be honestly compared against a
-  2026 baseline, or flagged non-comparable if Carlos revises the protocol.
+  2026 baseline, or flagged non-comparable if Carlos revises the protocol. It is
+  already load-bearing: a 3-clearing-test screen (FMS-v1) is distinguishable from
+  a 4-clearing-test screen (FMS-v2, ankle clearing added v4.38).
 - Every audited client write now carries the assessments array in its before/
   after audit snapshots, inflating audit-log payload size. Bounded by the
   existing 100-entry audit trim; no logic breaks.
@@ -681,11 +701,12 @@ single query returns full assessment history across all future types.
 
 ### Notes
 
-Status moves to Accepted after Carlos reviews and signs off on the FMS field
-mapping - specifically the left/right bilateral scoring convention and whether
-any raw measurements should be captured alongside the 0-3 scores. Carlos owns
-assessment protocol design (Section 3); the field mapping is not canonical until
-he confirms it. This mirrors the Selisa-QA gate on other work.
+Status moved to Accepted on 2026-07-07 after Carlos Vega signed off on the FMS
+field mapping - the left/right bilateral scoring convention and the raw-measurement
+question (resolved: 0-3 scores only for now, raw fields editable and addable later
+under the version discriminator). Carlos owns assessment protocol design
+(Section 3); the field mapping is now canonical. This mirrored the Selisa-QA gate
+on other work.
 
 If the IT security review mandates normalization of client-nested JSONB, this
 ADR is revisited and the assessments layer becomes the migration candidate
@@ -699,10 +720,10 @@ JSONB-on-clients pattern), Phase 2C (normalization horizon).
 
 **2026-07-07 - post-discharge integration seam.**
 
-Status: ADR-0006 remains Proposed pending Carlos field-mapping review (bilateral
-L/R convention + raw-measurement question). This amendment does not change that
-status; it records a bounded future deliverable that builds on the assessments[]
-layer.
+Status: ADR-0006 was accepted 2026-07-07 (Carlos Vega field-mapping review). This
+amendment was drafted the same day and records a bounded future deliverable that
+builds on the assessments[] layer; the acceptance does not change its deferred
+scope.
 
 Context: v4.36 wired `assessments[].source === 'post_pt_discharge'` from a
 decoration-only dropdown value into a provenance signal: a PT DISCHARGE badge on
