@@ -13525,7 +13525,7 @@
                       e('div', {
                         className: 'log-row',
                         onClick: function(){ setExpandedFmsId(isExpanded ? null : a.id); },
-                        style: { cursor: 'pointer', borderBottom: isLastScreen ? 'none' : '1px solid var(--border)' }
+                        style: { cursor: 'pointer', borderBottom: (isLastScreen || isExpanded) ? 'none' : '1px solid var(--border)' }
                       },
                         e('div', null,
                           a.date ? formatDate(a.date) : '—',
@@ -14094,10 +14094,10 @@
           e('div', { style: { fontSize: '14px', color: 'var(--slate)', marginBottom: '14px' } },
             'Screening ', e('b', null, c.name), '. Score each test 0-3. A 0 means pain or inability during the movement and is a clinical flag.'
           ),
-          e('div', { className: 'row2' },
+          e('div', { style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px' } },
             e('div', { className: 'field' },
               e('label', null, 'Date'),
-              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); } })
+              e('input', { type: 'date', value: date, onChange: function(ev){ setDate(ev.target.value); }, style: { width: 'auto' } })
             ),
             e('div', { className: 'field' },
               e('label', null, 'Type'),
