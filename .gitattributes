@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Git hooks must stay LF: a CRLF shebang (#!/bin/sh\r) breaks the POSIX sh
+# interpreter on checkout. Applies on every machine that checks out the repo.
+githooks/** text eol=lf

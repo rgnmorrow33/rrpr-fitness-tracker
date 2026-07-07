@@ -1,0 +1,15 @@
+#!/bin/sh
+# Repo-tracked pre-push gate. Runs the SAME checks as the Claude Code hooks
+# (.claude/settings.json), so a manual `git push` from any terminal gets the
+# same protection as a push made through Claude Code. No logic lives here -
+# both scripts are shared with the Claude hooks via their --git mode.
+#
+# One-time activation per clone/machine (core.hooksPath is local config, not
+# versioned):
+#     git config core.hooksPath githooks
+#
+# Each script exits nonzero to block the push (git aborts on any nonzero
+# hook exit) and fails OPEN (exit 0) on an unexpected internal error.
+node scripts/hooks/pre-push-syntax-check.js --git || exit 1
+node scripts/hooks/pre-push-tag-check.js --git || exit 1
+exit 0

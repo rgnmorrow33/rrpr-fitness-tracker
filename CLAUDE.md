@@ -131,40 +131,21 @@ network writes on unchanged data.
 
 ## Real-time subscriptions
 
-Two layers, and they do NOT match. Know the gap before relying on
-live sync.
+CRITICAL GOTCHA - most tables do NOT sync live. The app attaches
+postgres_changes listeners for 12 entity tables on the 'app-changes'
+channel, but the supabase_realtime publication contains only 2 tables
+(notifications and trainer_time_off, verified June 17). A listener
+receives nothing unless its table is in the publication. Net effect:
+only trainer_time_off syncs live on app-changes; notifications syncs
+live on its own per-trainer channel; every other entity converges only
+on reload (navigation / mount-fetch / wake sweep), not live push. To
+make a table sync live you must ADD IT TO the publication - attaching a
+client listener alone does nothing. Do not design a feature assuming a
+table pushes live without confirming it is in the publication.
 
-Client side: the app opens one channel ('app-changes') and attaches
-postgres_changes listeners for 12 entity tables (clients, classes,
-wros, leads, member_contacts, admin_items, referrals, closures,
-trainers, schedule_versions, trainer_time_off, announcement_banners -
-the `subs` array in the realtime useEffect). On a change event the
-affected entity reloads via storage.X.load() and its setter fires
-(100ms per-entity debounce). Notifications use a SEPARATE per-trainer
-channel ('notifications-<trainerId>'), not app-changes.
-
-Publication side: the live supabase_realtime publication contains
-exactly 2 tables - notifications and trainer_time_off (verified
-June 17 against the Supabase publications screen). Only tables in the
-publication actually broadcast change events.
-
-Net effect: of the 12 listeners attached to app-changes, only
-trainer_time_off ever fires - the other 11 are attached but receive
-nothing because their tables are not in the publication. notifications
-fires live on its own dedicated channel. Every other entity converges
-only on reload (navigation / mount-fetch / wake sweep), not live push.
-To make a table sync live, ADD IT TO the supabase_realtime
-publication; attaching a client listener alone does nothing. (Note:
-some app-code comments still claim "convergence comes free via the
-app-changes channel (clients table)" - that is stale; clients is not
-in the publication. Left untouched here as this is a docs-only pass.)
-
-Sync indicator (small green/amber dot bottom-right) shows channel
-state.
-
-Self-write echoes are tolerated for now (write happens, subscription
-fires back at us, dirty-check on save catches the no-op). If
-pathological behavior surfaces, an originator filter can be added.
+Full mechanics (reload chain, self-write echo tolerance, reconnect,
+wake sweeps, notifications channel, sync indicator) live in
+ARCHITECTURE.md section 6. Load it before touching realtime code.
 
 ## Permission model
 
@@ -220,6 +201,15 @@ Workflow:
 5. Netlify auto-deploys in ~30 seconds
 6. Selisa verifies on production iPad
 
+Pre-push gates. Two checks run before every push and block it on failure:
+node --check on the embedded JS, and the tag-before-push check. They run
+two ways - through Claude Code automatically (.claude/settings.json), and
+as a native git pre-push hook for manual terminal pushes. The git hook is
+tracked in githooks/ but core.hooksPath is local config, so each clone
+enables it ONCE:
+
+    git config core.hooksPath githooks
+
 Do NOT rename the tracker file. The netlify.toml redirect handles
 serving RoundRock_Fitness_Tracker.html at the root URL.
 
@@ -228,9 +218,16 @@ Git's .git folder.
 
 ## Version tagging (tag on release)
 
-Every shipped version gets a lightweight git tag at release: `git tag v4.32`
-then `git push origin v4.32`. Tag AFTER the version's commits are pushed to main,
-not before. The tag marks the exact commit that went live as that version.
+Every shipped version gets a lightweight git tag at release. Tag BEFORE
+pushing the version's commits, then push the branch, then push the tag:
+
+    git tag v4.32
+    git push
+    git push origin v4.32
+
+Tag-before-push is enforced: the pre-push hook (see Deployment pipeline)
+blocks any push whose commits reference a `vX.Y` that has no matching tag.
+The tag still marks the exact commit that goes live as that version.
 
 Why: versions otherwise live only as inline comments and in the update-log docx,
 which makes version-to-version history archaeology (this caused the v4.30/v4.31

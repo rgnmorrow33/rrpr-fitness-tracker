@@ -1,24 +1,24 @@
 #!/usr/bin/env node
 /*
- * pre-push-syntax-check.js - Claude Code PreToolUse hook.
+ * pre-push-syntax-check.js - pre-push syntax gate.
  *
- * Blocks any `git push` issued through Claude Code if the embedded JS in
- * RoundRock_Fitness_Tracker.html (as of HEAD - the content the push would
- * ship) fails `node --check`. Closes the gap where CI (smoke.yml) only runs
- * post-deploy, so a syntax error would otherwise reach production iPads
- * before anything automated notices.
+ * Blocks a push if the embedded JS in RoundRock_Fitness_Tracker.html (as of
+ * HEAD - the content the push would ship) fails `node --check`. Closes the
+ * gap where CI (smoke.yml) only runs post-deploy, so a syntax error would
+ * otherwise reach production iPads before anything automated notices.
  *
- * Contract (Claude Code hooks):
- *   stdin: JSON {tool_name, tool_input: {command, ...}, ...}
- *   exit 0 = allow, exit 2 = BLOCK (stderr is fed back to Claude),
- *   exit 1 = non-blocking error (stderr shown to user only).
+ * Two invocation modes, same check:
+ *   (default) Claude Code PreToolUse hook. Reads a tool-call JSON on stdin,
+ *     acts only when the command is a `git ... push`. exit 0 = allow,
+ *     exit 2 = BLOCK (stderr fed back to Claude), exit 1 = non-blocking error.
+ *   (--git)   Native git pre-push hook (githooks/pre-push). git guarantees a
+ *     push is happening, so stdin and the isGitPush gate are skipped. git
+ *     treats ANY nonzero exit as a block, so a detected problem exits 1 and
+ *     an unexpected internal error fails OPEN with exit 0 (never freeze a
+ *     push on a guard bug). No logic is duplicated between the two modes.
  *
- * Scope: only acts when the command being run contains a `git ... push`.
  * Checks HEAD of the current branch; refspec parsing is deliberately not
  * attempted (pushing a ref other than HEAD is not this repo's flow).
- *
- * Fail-open on its own unexpected errors (exit 1): a bug in this guard must
- * not freeze all pushes.
  */
 
 'use strict';
@@ -29,6 +29,11 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const HTML_FILE = 'RoundRock_Fitness_Tracker.html';
+
+// --git = native git pre-push hook; default = Claude Code PreToolUse hook.
+const GIT_MODE = process.argv.includes('--git');
+// git blocks on any nonzero, so block=1 there; Claude hooks block on 2.
+const BLOCK = GIT_MODE ? 1 : 2;
 
 function readStdin() {
   try {
@@ -51,14 +56,17 @@ function isGitPush(command) {
 }
 
 function main() {
-  let input = {};
-  try {
-    input = JSON.parse(readStdin() || '{}');
-  } catch (e) {
-    process.exit(0); // unparseable stdin - not a tool call we understand
+  // In git mode the push is already happening; skip the stdin/command gate.
+  if (!GIT_MODE) {
+    let input = {};
+    try {
+      input = JSON.parse(readStdin() || '{}');
+    } catch (e) {
+      process.exit(0); // unparseable stdin - not a tool call we understand
+    }
+    const command = (input.tool_input && input.tool_input.command) || '';
+    if (!isGitPush(command)) process.exit(0);
   }
-  const command = (input.tool_input && input.tool_input.command) || '';
-  if (!isGitPush(command)) process.exit(0);
 
   const root = projectRoot();
 
@@ -74,7 +82,7 @@ function main() {
       `renamed or removed (netlify.toml serves it at the root URL). If this is ` +
       `intentional, bypass by disabling the pre-push-syntax-check hook.\n`
     );
-    process.exit(2);
+    process.exit(BLOCK);
   }
 
   // Extract every inline <script> block (no src attribute). Pad with newlines
@@ -93,7 +101,7 @@ function main() {
       `BLOCKED: no inline <script> block found in ${HTML_FILE} at HEAD. ` +
       `The app's embedded JS is missing - refusing to push.\n`
     );
-    process.exit(2);
+    process.exit(BLOCK);
   }
 
   const failures = [];
@@ -116,7 +124,7 @@ function main() {
       `Fix the syntax error and amend/re-commit before pushing. Line numbers ` +
       `below match the HTML file.\n\n` + failures.join('\n') + '\n'
     );
-    process.exit(2);
+    process.exit(BLOCK);
   }
   process.exit(0);
 }
@@ -124,6 +132,8 @@ function main() {
 try {
   main();
 } catch (e) {
+  // Fail OPEN so a guard bug never freezes pushes. git mode: nonzero would
+  // block, so exit 0; Claude mode: exit 1 is the non-blocking-error code.
   process.stderr.write(`pre-push-syntax-check hook error (push NOT blocked): ${e.message}\n`);
-  process.exit(1);
+  process.exit(GIT_MODE ? 0 : 1);
 }

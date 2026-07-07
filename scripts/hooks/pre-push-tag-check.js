@@ -1,31 +1,41 @@
 #!/usr/bin/env node
 /*
- * pre-push-tag-check.js - Claude Code PreToolUse hook.
+ * pre-push-tag-check.js - pre-push tag gate.
  *
- * Blocks any `git push` issued through Claude Code when a commit about to be
- * pushed references a version (vX.Y) that has no matching git tag. This is
- * the enforcement for CLAUDE.md's "a version is not done until it is tagged"
- * rule, which failed silently for v4.35 (shipped untagged for days).
+ * Blocks a push when a commit about to be pushed references a version (vX.Y)
+ * that has no matching git tag. This is the enforcement for CLAUDE.md's "a
+ * version is not done until it is tagged" rule, which failed silently for
+ * v4.35 (shipped untagged for days).
  *
- * NOTE: this shifts the tagging convention from tag-AFTER-push to
- * tag-BEFORE-push: create the local tag first (`git tag vX.Y`), push the
- * branch, then push the tag (`git push origin vX.Y`). The tag still marks the
- * exact commit that goes live.
+ * NOTE: this enforces tag-BEFORE-push: create the local tag first
+ * (`git tag vX.Y`), push the branch, then push the tag
+ * (`git push origin vX.Y`). The tag still marks the exact commit that goes
+ * live.
  *
- * Contract (Claude Code hooks):
- *   stdin: JSON {tool_name, tool_input: {command, ...}, ...}
- *   exit 0 = allow, exit 2 = BLOCK (stderr fed back to Claude),
- *   exit 1 = non-blocking error (stderr shown to user only).
+ * Two invocation modes, same check:
+ *   (default) Claude Code PreToolUse hook. Reads a tool-call JSON on stdin,
+ *     acts only when the command is a `git ... push`. exit 0 = allow,
+ *     exit 2 = BLOCK (stderr fed back to Claude), exit 1 = non-blocking error.
+ *   (--git)   Native git pre-push hook (githooks/pre-push). git guarantees a
+ *     push is happening, so stdin and the isGitPush gate are skipped (the git
+ *     pre-push refspec lines on stdin are intentionally ignored - the range
+ *     logic below is reused instead). git treats ANY nonzero exit as a block,
+ *     so a detected problem exits 1 and an unexpected internal error fails
+ *     OPEN with exit 0. No logic is duplicated between the two modes.
  *
  * Range checked: upstream (origin/<branch> if it exists, else origin/main)
- * ..HEAD - i.e. the commits this push would publish. Fail-open on unexpected
- * errors.
+ * ..HEAD - i.e. the commits this push would publish.
  */
 
 'use strict';
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+
+// --git = native git pre-push hook; default = Claude Code PreToolUse hook.
+const GIT_MODE = process.argv.includes('--git');
+// git blocks on any nonzero, so block=1 there; Claude hooks block on 2.
+const BLOCK = GIT_MODE ? 1 : 2;
 
 function readStdin() {
   try {
@@ -51,14 +61,17 @@ function isGitPush(command) {
 }
 
 function main() {
-  let input = {};
-  try {
-    input = JSON.parse(readStdin() || '{}');
-  } catch (e) {
-    process.exit(0);
+  // In git mode the push is already happening; skip the stdin/command gate.
+  if (!GIT_MODE) {
+    let input = {};
+    try {
+      input = JSON.parse(readStdin() || '{}');
+    } catch (e) {
+      process.exit(0);
+    }
+    const command = (input.tool_input && input.tool_input.command) || '';
+    if (!isGitPush(command)) process.exit(0);
   }
-  const command = (input.tool_input && input.tool_input.command) || '';
-  if (!isGitPush(command)) process.exit(0);
 
   const root = projectRoot();
 
@@ -102,7 +115,7 @@ function main() {
       `  git push\n` +
       untagged.map((v) => `  git push origin ${v}`).join('\n') + '\n'
     );
-    process.exit(2);
+    process.exit(BLOCK);
   }
   process.exit(0);
 }
@@ -110,6 +123,8 @@ function main() {
 try {
   main();
 } catch (e) {
+  // Fail OPEN so a guard bug never freezes pushes. git mode: nonzero would
+  // block, so exit 0; Claude mode: exit 1 is the non-blocking-error code.
   process.stderr.write(`pre-push-tag-check hook error (push NOT blocked): ${e.message}\n`);
-  process.exit(1);
+  process.exit(GIT_MODE ? 0 : 1);
 }
