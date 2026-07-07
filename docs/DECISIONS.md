@@ -663,9 +663,11 @@ Field mapping, ratified by Carlos Vega (2026-07-07):
   spinal flexion -> rotary stability, ankle clearing -> inline lunge. Ankle
   clearing was added in v4.38 to match the current official FMS standard; screens
   scored before it stamp FMS-v1 (3 clearing tests), screens after stamp FMS-v2 (4).
-- Raw measurements: 0-3 scores only for now; raw measurement fields are editable
-  and addable later under the version discriminator without a rebuild (Carlos,
-  2026-07-07).
+- Raw measurements: raw measurement values will be captured alongside the 0-3
+  scores and are editable after save. Not yet implemented (the module currently
+  captures scores only); tracked as the named "raw measurements build"
+  deliverable. Raw values are additive per-test reference fields and do not alter
+  the frozen-at-save composite, which stays score-derived.
 - Composite: sum of the 7 tests, 21-point cap, frozen at save (not recomputed on
   read) so history stays honest across protocol changes.
 
@@ -698,13 +700,17 @@ single query returns full assessment history across all future types.
   existing 100-entry audit trim; no logic breaks.
 - Requires a one-time SQL column add (`ALTER TABLE clients ADD COLUMN
   assessments jsonb DEFAULT '[]'`) plus PostgREST cache reload before first save.
+- Pending implementation: the raw-measurements build is ratified in the data
+  shape but not yet coded. It is the trigger for the FMS_TESTS
+  single-source-of-truth refactor, to be done in the same pass.
 
 ### Notes
 
 Status moved to Accepted on 2026-07-07 after Carlos Vega signed off on the FMS
 field mapping - the left/right bilateral scoring convention and the raw-measurement
-question (resolved: 0-3 scores only for now, raw fields editable and addable later
-under the version discriminator). Carlos owns assessment protocol design
+question (resolved: raw values captured alongside the 0-3 scores, editable after
+save; deferred to the named raw-measurements build, composite stays score-derived).
+Carlos owns assessment protocol design
 (Section 3); the field mapping is now canonical. This mirrored the Selisa-QA gate
 on other work.
 
