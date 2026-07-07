@@ -259,7 +259,10 @@ in docs/BACKLOG.md, load on demand.
 
 RLS is DISABLED across all 17 public tables (verified June 17). Reads
 and writes go through the committed anon key with no RLS gating -
-access is open at the DB layer. Acceptable for prototype. Tighten
+access is open at the DB layer. Access control is enforced
+client-side in the app via ctx.can('<permission>') - the DB layer is
+open; ctx.can is what actually gates who can do what. Acceptable for
+prototype. Tighten
 (enable RLS, add policies) before APC opens (April 2027) or before any
 clinical PHI flows through the system, whichever first.
 
