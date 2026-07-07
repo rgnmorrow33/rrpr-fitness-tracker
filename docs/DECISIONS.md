@@ -695,6 +695,45 @@ alongside the Phase 2C sessions normalization. Until then, JSONB-over-tables
 Related: ADR-0004 (JSONB-over-tables), ADR-0002 (pairs architecture, same
 JSONB-on-clients pattern), Phase 2C (normalization horizon).
 
+### Amendments
+
+**2026-07-07 - post-discharge integration seam.**
+
+Status: ADR-0006 remains Proposed pending Carlos field-mapping review (bilateral
+L/R convention + raw-measurement question). This amendment does not change that
+status; it records a bounded future deliverable that builds on the assessments[]
+layer.
+
+Context: v4.36 wired `assessments[].source === 'post_pt_discharge'` from a
+decoration-only dropdown value into a provenance signal: a PT DISCHARGE badge on
+the client profile and a From PT Discharge count/filter in AdminAllClients. This
+is the NARROW read of the seam - visibility and queryability only.
+
+Deferred (broad read), gated on the Section 5 PT-infrastructure review. The
+following are explicitly NOT built and must not be assumed forward until the
+existing PT integration artifacts (referral form, transition summary,
+approved-trainer criteria, transition tracker, workflow map) are reviewed against
+the rebuilt program structure:
+
+1. A handoff queue that surfaces discharge-sourced clients to admin/lead for
+   trainer assignment (analogous to the Pairs to Confirm queue).
+2. Pulling the PT transition summary into the trainer-facing view at handoff, with
+   the scope boundary enforced (trainer sees what they need, not the full clinical
+   record).
+3. Gating discharge-client visibility/assignment by the PT-approved-trainer
+   criteria.
+4. Stamping source from the handoff flow itself rather than trainer self-selection
+   in the modal (removes self-reported provenance).
+
+Rationale for holding: the transition-summary format and approved-trainer criteria
+predate the rebuild and are under review. Building the FMS module to consume them
+now risks building on a format about to change. The type/source/version
+discriminators shipped in v4.35 are the seam; they cost nothing to hold open.
+
+Trigger to revisit: completion of the Section 5 infrastructure review, OR the first
+real post-discharge handoff that needs to run through the system rather than direct
+coordination - whichever comes first.
+
 ---
 
 ## Backlog of proposed ADRs
