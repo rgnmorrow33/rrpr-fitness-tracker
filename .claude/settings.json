@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/pre-push-syntax-check.js"
+          },
+          {
+            "type": "command",
+            "command": "node scripts/hooks/pre-push-tag-check.js"
+          }
+        ]
+      }
+    ]
+  }
+}

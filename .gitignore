@@ -1,4 +1,7 @@
-.claude/
+# Device-local Claude Code files stay ignored; the shared hook config
+# (.claude/settings.json) is tracked so enforcement survives this machine.
+.claude/*
+!.claude/settings.json
 *.csv
 supabase/
 
