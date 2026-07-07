@@ -4077,30 +4077,44 @@
     var r = Number(pair.r) || 0;
     return Math.min(l, r);
   }
+  /* Single source of truth for the FMS clearing tests. Feeds all consumers -
+     the modal checkbox rows, the history-row breakdown, the composite zeroing,
+     the CLEARING badge trigger, and the modal's initial/saved clearing object.
+     Add a test here and every consumer picks it up; no four-site drift.
+     `affects` is the human label; `zeroesField` names the test a positive
+     (pain) result forces to 0. FMS-v1 screens predate ankle_clearing and read
+     "Not assessed" for it via the history-breakdown key-absent guard. */
+  var CLEARING_TESTS = [
+    { key: 'shoulder_impingement', label: 'Shoulder impingement', affects: 'zeroes Shoulder Mobility', zeroesField: 'shoulder_mobility' },
+    { key: 'spinal_extension',     label: 'Spinal extension',     affects: 'zeroes Trunk Stability',   zeroesField: 'trunk_stability' },
+    { key: 'spinal_flexion',       label: 'Spinal flexion',       affects: 'zeroes Rotary Stability',  zeroesField: 'rotary_stability' },
+    { key: 'ankle_clearing',       label: 'Ankle clearing',       affects: 'zeroes Inline Lunge',      zeroesField: 'inline_lunge' }
+  ];
   /* Composite = sum of 7 contributing scores, max 21. For bilateral tests the
      lower of L/R contributes. A positive clearing test (pain present) forces
      its paired screen to 0. Any test scored 0 already contributes 0. */
   function computeFMSComposite(tests, clearing){
     tests = tests || {};
     clearing = clearing || {};
-    var deepSquat       = Number(tests.deep_squat) || 0;
-    var hurdleStep      = fmsBilateralLow(tests.hurdle_step);
-    var inlineLunge     = fmsBilateralLow(tests.inline_lunge);
-    var shoulderMob     = fmsBilateralLow(tests.shoulder_mobility);
-    var aslr            = fmsBilateralLow(tests.aslr);
-    var trunkStability  = Number(tests.trunk_stability) || 0;
-    var rotaryStability = fmsBilateralLow(tests.rotary_stability);
-    /* Clearing overrides: pain (positive) zeroes the paired screen.
-       shoulder_impingement -> shoulder_mobility
-       spinal_extension     -> trunk_stability (push-up)
-       spinal_flexion       -> rotary_stability
-       ankle_clearing       -> inline_lunge (FMS-v2, absent on FMS-v1 screens) */
-    if (clearing.shoulder_impingement) shoulderMob = 0;
-    if (clearing.spinal_extension)     trunkStability = 0;
-    if (clearing.spinal_flexion)       rotaryStability = 0;
-    if (clearing.ankle_clearing)       inlineLunge = 0;
-    return deepSquat + hurdleStep + inlineLunge + shoulderMob +
-           aslr + trunkStability + rotaryStability;
+    /* Per-test contribution, keyed by test name. Bilateral tests take the lower
+       of L/R; deep_squat and trunk_stability are scalars. */
+    var scores = {
+      deep_squat:        Number(tests.deep_squat) || 0,
+      hurdle_step:       fmsBilateralLow(tests.hurdle_step),
+      inline_lunge:      fmsBilateralLow(tests.inline_lunge),
+      shoulder_mobility: fmsBilateralLow(tests.shoulder_mobility),
+      aslr:              fmsBilateralLow(tests.aslr),
+      trunk_stability:   Number(tests.trunk_stability) || 0,
+      rotary_stability:  fmsBilateralLow(tests.rotary_stability)
+    };
+    /* Clearing overrides: a positive (pain) clearing test zeroes its paired
+       screen. Driven by CLEARING_TESTS so the mapping never drifts. */
+    CLEARING_TESTS.forEach(function(ct){
+      if (clearing[ct.key]) scores[ct.zeroesField] = 0;
+    });
+    var total = 0;
+    Object.keys(scores).forEach(function(k){ total += scores[k]; });
+    return total;
   }
   /* Which tests were scored a raw 0 (either side, for bilateral). A 0 is a
      clinical flag surfaced as a red brick in ClientDetail - not hidden.
@@ -13510,7 +13524,7 @@
                   ),
                   sorted.map(function(a, i){
                     var flags = fmsZeroFlags(a);
-                    var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion || a.clearing.ankle_clearing);
+                    var clearingOn = a.clearing && CLEARING_TESTS.some(function(ct){ return a.clearing[ct.key]; });
                     var isExpanded = expandedFmsId === a.id;
                     var isLastScreen = i === sorted.length - 1;
                     /* Wrapper groups the tappable row with its inline breakdown.
@@ -13599,12 +13613,7 @@
                         ),
                         e('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--cream-2)' } },
                           e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '4px' } }, 'Clearing tests'),
-                          [
-                            { key: 'shoulder_impingement', label: 'Shoulder impingement' },
-                            { key: 'spinal_extension', label: 'Spinal extension' },
-                            { key: 'spinal_flexion', label: 'Spinal flexion' },
-                            { key: 'ankle_clearing', label: 'Ankle clearing' }
-                          ].map(function(row){
+                          CLEARING_TESTS.map(function(row){
                             /* Key-absent (FMS-v1 screens lack ankle_clearing) reads
                                "Not assessed" - never default to false/Negative. */
                             var assessed = !!(a.clearing && row.key in a.clearing);
@@ -13983,7 +13992,7 @@
     });
     var tests = testsTuple[0]; var setTests = testsTuple[1];
 
-    var clearingTuple = useState({ shoulder_impingement: false, spinal_extension: false, spinal_flexion: false, ankle_clearing: false });
+    var clearingTuple = useState(CLEARING_TESTS.reduce(function(o, ct){ o[ct.key] = false; return o; }, {}));
     var clearing = clearingTuple[0]; var setClearing = clearingTuple[1];
 
     var notesTuple = useState('');
@@ -14044,12 +14053,7 @@
         date: date,
         screened_by: ctx.currentUserName() || 'unknown',
         tests: coerced,
-        clearing: {
-          shoulder_impingement: !!clearing.shoulder_impingement,
-          spinal_extension: !!clearing.spinal_extension,
-          spinal_flexion: !!clearing.spinal_flexion,
-          ankle_clearing: !!clearing.ankle_clearing
-        },
+        clearing: CLEARING_TESTS.reduce(function(o, ct){ o[ct.key] = !!clearing[ct.key]; return o; }, {}),
         composite: computeFMSComposite(coerced, clearing),
         notes: (notes || '').trim()
       };
@@ -14084,14 +14088,6 @@
           : scoreSelect(tests[key], function(v){ setSingle(key, v); })
       );
     }
-    /* Each clearing test is paired with the screen its positive result zeroes. */
-    var CLEARING_ROWS = [
-      { key: 'shoulder_impingement', label: 'Shoulder impingement', affects: 'zeroes Shoulder Mobility' },
-      { key: 'spinal_extension', label: 'Spinal extension', affects: 'zeroes Trunk Stability' },
-      { key: 'spinal_flexion', label: 'Spinal flexion', affects: 'zeroes Rotary Stability' },
-      { key: 'ankle_clearing', label: 'Ankle clearing', affects: 'zeroes Inline Lunge' }
-    ];
-
     return e('div', { className: 'modal-overlay' },
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
@@ -14129,7 +14125,7 @@
             e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginBottom: '8px', lineHeight: 1.4 } },
               'Check when pain is present (positive). A positive clearing test forces its paired screen to 0.'
             ),
-            CLEARING_ROWS.map(function(row){
+            CLEARING_TESTS.map(function(row){
               return e('label', {
                 key: row.key,
                 style: { display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '6px 0', fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' }
