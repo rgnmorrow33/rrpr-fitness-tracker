@@ -13481,7 +13481,15 @@
                   latest.composite + '/21'),
                 delta != null && e('span', {
                   style: { fontSize: '12px', fontWeight: 700, color: delta > 0 ? 'var(--green)' : (delta < 0 ? 'var(--red)' : 'var(--slate)') }
-                }, (delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '± ')) + delta + ' vs prior')
+                }, (delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '± ')) + delta + ' vs prior'),
+                latest && latest.source === 'post_pt_discharge' && e('span', {
+                  title: 'Latest screen logged at PT discharge',
+                  style: {
+                    display: 'inline-block', background: 'var(--navy)', color: '#fff',
+                    padding: '2px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 700,
+                    letterSpacing: '0.04em', marginLeft: '2px'
+                  }
+                }, 'PT DISCHARGE')
               ),
               e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setFmsOpen(true); } }, '+ New Screen')
             ),
@@ -13514,14 +13522,22 @@
                       },
                         e('div', null,
                           a.date ? formatDate(a.date) : '—',
-                          a.source && e('div', { style: { fontSize: '10px', color: 'var(--slate)' } }, FMS_SOURCE_LABEL[a.source] || a.source)
+                          a.source && a.source !== 'post_pt_discharge' && e('div', { style: { fontSize: '10px', color: 'var(--slate)' } }, FMS_SOURCE_LABEL[a.source] || a.source)
                         ),
                         e('div', { style: { fontSize: '12px', color: 'var(--slate)' } }, a.type || 'FMS'),
                         e('div', { style: { fontWeight: 700, color: fmsCompositeColor(a.composite) } }, a.composite + '/21'),
                         e('div', null,
-                          (flags.length === 0 && !clearingOn)
+                          (flags.length === 0 && !clearingOn && a.source !== 'post_pt_discharge')
                             ? e('span', { style: { fontSize: '11px', color: 'var(--slate-soft)' } }, '—')
                             : e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
+                                a.source === 'post_pt_discharge' && e('span', {
+                                  key: 'discharge',
+                                  title: 'Screen logged at PT discharge',
+                                  style: {
+                                    display: 'inline-block', background: 'var(--navy)', color: '#fff',
+                                    padding: '2px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700
+                                  }
+                                }, 'PT DISCHARGE'),
                                 flags.map(function(f){
                                   return e('span', {
                                     key: f,
@@ -14101,9 +14117,9 @@
             CLEARING_ROWS.map(function(row){
               return e('label', {
                 key: row.key,
-                style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' }
+                style: { display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '6px 0', fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' }
               },
-                e('input', { type: 'checkbox', checked: !!clearing[row.key], onChange: function(){ toggleClearing(row.key); } }),
+                e('input', { type: 'checkbox', checked: !!clearing[row.key], onChange: function(){ toggleClearing(row.key); }, style: { flex: '0 0 16px', width: '16px', marginTop: '2px' } }),
                 e('span', null, row.label,
                   e('span', { style: { fontSize: '11px', color: 'var(--slate)', marginLeft: '6px' } }, '(' + row.affects + ')')
                 )
@@ -24066,15 +24082,22 @@
     var canRestoreDeleted = ctx.can('canRestoreDeleted');
     var canBulkImport = ctx.can('canBulkImport');
 
+    /* v4.36: a client is in the PT-discharge pipeline if any FMS screen was
+       logged at discharge. Guards undefined assessments (pre-v4.35 clients). */
+    function hasDischargeAssessment(c){
+      return (c.assessments || []).some(function(a){ return a && a.source === 'post_pt_discharge'; });
+    }
+
     /* Counts for the alert chips (computed against full client set) */
     var alertCounts = (function(){
-      var ls = 0, st = 0;
+      var ls = 0, st = 0, dc = 0;
       ctx.clients.forEach(function(c){
         var f = clientPackageFlags(c);
         if (f.lastSessionFlag) ls++;
         if (f.staleFlag) st++;
+        if (hasDischargeAssessment(c)) dc++;
       });
-      return { last_session: ls, stale: st };
+      return { last_session: ls, stale: st, pt_discharge: dc };
     })();
     var deletedCount = (ctx.allClients || []).filter(function(c){ return !!c.deleted_at; }).length;
 
@@ -24088,6 +24111,7 @@
         var f = clientPackageFlags(c);
         if (alertFilter === 'last_session' && !f.lastSessionFlag) return false;
         if (alertFilter === 'stale' && !f.staleFlag) return false;
+        if (alertFilter === 'pt_discharge' && !hasDischargeAssessment(c)) return false;
       }
       return true;
     }).sort(function(a,b){ return a.name.localeCompare(b.name); });
@@ -24220,7 +24244,8 @@
         [
           { id: '', label: 'All clients', count: ctx.clients.length },
           { id: 'last_session', label: 'On last session', count: alertCounts.last_session, color: 'var(--amber)' },
-          { id: 'stale', label: 'Stale (' + STALE_DAYS_THRESHOLD + 'd+)', count: alertCounts.stale, color: 'var(--slate)' }
+          { id: 'stale', label: 'Stale (' + STALE_DAYS_THRESHOLD + 'd+)', count: alertCounts.stale, color: 'var(--slate)' },
+          { id: 'pt_discharge', label: 'From PT Discharge', count: alertCounts.pt_discharge, color: 'var(--gold)' }
         ].map(function(opt){
           var active = alertFilter === opt.id;
           var color = opt.color || 'var(--navy)';
