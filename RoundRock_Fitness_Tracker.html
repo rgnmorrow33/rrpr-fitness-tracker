@@ -4093,10 +4093,12 @@
     /* Clearing overrides: pain (positive) zeroes the paired screen.
        shoulder_impingement -> shoulder_mobility
        spinal_extension     -> trunk_stability (push-up)
-       spinal_flexion       -> rotary_stability */
+       spinal_flexion       -> rotary_stability
+       ankle_clearing       -> inline_lunge (FMS-v2, absent on FMS-v1 screens) */
     if (clearing.shoulder_impingement) shoulderMob = 0;
     if (clearing.spinal_extension)     trunkStability = 0;
     if (clearing.spinal_flexion)       rotaryStability = 0;
+    if (clearing.ankle_clearing)       inlineLunge = 0;
     return deepSquat + hurdleStep + inlineLunge + shoulderMob +
            aslr + trunkStability + rotaryStability;
   }
@@ -13508,7 +13510,7 @@
                   ),
                   sorted.map(function(a, i){
                     var flags = fmsZeroFlags(a);
-                    var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion);
+                    var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion || a.clearing.ankle_clearing);
                     var isExpanded = expandedFmsId === a.id;
                     var isLastScreen = i === sorted.length - 1;
                     /* Wrapper groups the tappable row with its inline breakdown.
@@ -13600,12 +13602,16 @@
                           [
                             { key: 'shoulder_impingement', label: 'Shoulder impingement' },
                             { key: 'spinal_extension', label: 'Spinal extension' },
-                            { key: 'spinal_flexion', label: 'Spinal flexion' }
+                            { key: 'spinal_flexion', label: 'Spinal flexion' },
+                            { key: 'ankle_clearing', label: 'Ankle clearing' }
                           ].map(function(row){
-                            var pos = !!(a.clearing && a.clearing[row.key]);
+                            /* Key-absent (FMS-v1 screens lack ankle_clearing) reads
+                               "Not assessed" - never default to false/Negative. */
+                            var assessed = !!(a.clearing && row.key in a.clearing);
+                            var pos = assessed && !!a.clearing[row.key];
                             return e('div', { key: row.key, style: { display: 'flex', justifyContent: 'space-between' } },
                               e('span', { style: { color: 'var(--slate)' } }, row.label),
-                              e('span', { style: { fontWeight: 700, color: pos ? 'var(--red)' : 'var(--green)' } }, pos ? 'Positive (pain)' : 'Negative')
+                              e('span', { style: { fontWeight: 700, color: !assessed ? 'var(--slate-soft)' : (pos ? 'var(--red)' : 'var(--green)') } }, !assessed ? 'Not assessed' : (pos ? 'Positive (pain)' : 'Negative'))
                             );
                           })
                         ),
@@ -13977,7 +13983,7 @@
     });
     var tests = testsTuple[0]; var setTests = testsTuple[1];
 
-    var clearingTuple = useState({ shoulder_impingement: false, spinal_extension: false, spinal_flexion: false });
+    var clearingTuple = useState({ shoulder_impingement: false, spinal_extension: false, spinal_flexion: false, ankle_clearing: false });
     var clearing = clearingTuple[0]; var setClearing = clearingTuple[1];
 
     var notesTuple = useState('');
@@ -14033,7 +14039,7 @@
       var assessment = {
         id: uid(),
         type: 'FMS',
-        version: 'FMS-v1',
+        version: 'FMS-v2',
         source: source,
         date: date,
         screened_by: ctx.currentUserName() || 'unknown',
@@ -14041,7 +14047,8 @@
         clearing: {
           shoulder_impingement: !!clearing.shoulder_impingement,
           spinal_extension: !!clearing.spinal_extension,
-          spinal_flexion: !!clearing.spinal_flexion
+          spinal_flexion: !!clearing.spinal_flexion,
+          ankle_clearing: !!clearing.ankle_clearing
         },
         composite: computeFMSComposite(coerced, clearing),
         notes: (notes || '').trim()
@@ -14081,7 +14088,8 @@
     var CLEARING_ROWS = [
       { key: 'shoulder_impingement', label: 'Shoulder impingement', affects: 'zeroes Shoulder Mobility' },
       { key: 'spinal_extension', label: 'Spinal extension', affects: 'zeroes Trunk Stability' },
-      { key: 'spinal_flexion', label: 'Spinal flexion', affects: 'zeroes Rotary Stability' }
+      { key: 'spinal_flexion', label: 'Spinal flexion', affects: 'zeroes Rotary Stability' },
+      { key: 'ankle_clearing', label: 'Ankle clearing', affects: 'zeroes Inline Lunge' }
     ];
 
     return e('div', { className: 'modal-overlay' },
