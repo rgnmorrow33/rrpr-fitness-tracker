@@ -13506,19 +13506,26 @@
                     e('div', null, 'Flags'),
                     e('div', null, 'Screened by')
                   ),
-                  sorted.map(function(a){
+                  sorted.map(function(a, i){
                     var flags = fmsZeroFlags(a);
                     var clearingOn = a.clearing && (a.clearing.shoulder_impingement || a.clearing.spinal_extension || a.clearing.spinal_flexion);
                     var isExpanded = expandedFmsId === a.id;
+                    var isLastScreen = i === sorted.length - 1;
                     /* Wrapper groups the tappable row with its inline breakdown.
                        Full-row onClick + cursor is the tap target; the chevron on
                        the right edge signals expandability (v1 had no affordance).
-                       Chevron folds into the Screened-by cell - no 6th grid column. */
+                       Chevron folds into the Screened-by cell - no 6th grid column.
+                       FMS is the ONLY inline-expand log-table (attendance/day rows
+                       navigate away via setOccurrenceDetailDate, they don't expand).
+                       Each row's own unclassed wrapper makes the shared
+                       .log-row:last-child rule misfire (every collapsed row is its
+                       wrapper's only child), so row + breakdown bottom borders are
+                       driven off isLastScreen here, not through the shared CSS. */
                     return e('div', { key: a.id },
                       e('div', {
                         className: 'log-row',
                         onClick: function(){ setExpandedFmsId(isExpanded ? null : a.id); },
-                        style: { cursor: 'pointer' }
+                        style: { cursor: 'pointer', borderBottom: isLastScreen ? 'none' : '1px solid var(--border)' }
                       },
                         e('div', null,
                           a.date ? formatDate(a.date) : '—',
@@ -13563,7 +13570,7 @@
                         )
                       ),
                       isExpanded && e('div', {
-                        style: { padding: '12px 14px 16px', borderBottom: '1px solid var(--border)', background: 'var(--paper-2)', fontSize: '13px' }
+                        style: { padding: '12px 14px 16px', borderBottom: isLastScreen ? 'none' : '1px solid var(--border)', background: 'var(--paper-2)', fontSize: '13px' }
                       },
                         e('div', { style: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--slate)', marginBottom: '6px' } },
                           'Test scores (0-3; bilateral scored on the lower side)'
