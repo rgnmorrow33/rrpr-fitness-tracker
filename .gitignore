@@ -17,3 +17,16 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /results.json
+
+# Python bytecode - rectrac-import tooling is tracked, its bytecode is not
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor cruft
+.DS_Store
+
+# Stray root copy of the embedded-JS syntax check (hook writes to os.tmpdir)
+# and generic temp files
+.embedded-check.js
+*.tmp
