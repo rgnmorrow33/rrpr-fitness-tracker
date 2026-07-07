@@ -328,13 +328,46 @@ pre-allocated).
 
 ## 6. Realtime model
 
-**Supabase realtime via `postgres_changes`.** Twelve entity tables
-publish to a single shared channel named `app-changes`. The
-subscription map is built inside the `buildAppChanges` closure of
-the main realtime `useEffect`. Each entity registers a
-`(table, setter, entity)` triple; the channel listener for
-`event: '*'` calls a per-entity debounced reload that fetches fresh
-data and dispatches the setter.
+> **Read this first: live sync is mostly not live.** The client attaches
+> 12 `postgres_changes` listeners to the `app-changes` channel, but the
+> Supabase `supabase_realtime` publication contains exactly **2** tables.
+> Only those 2 broadcast. The other 10 listeners are attached and receive
+> nothing - those entities converge on reload, not live push. Do not design
+> a feature that assumes a table syncs live without first confirming that
+> table is in the publication. Details below.
+
+**Supabase realtime via `postgres_changes`.** The client opens a single
+shared channel named `app-changes` and attaches listeners for 12 entity
+tables (`clients`, `classes`, `wros`, `leads`, `member_contacts`,
+`admin_items`, `referrals`, `closures`, `trainers`, `schedule_versions`,
+`trainer_time_off`, `announcement_banners`). The subscription map is built
+inside the `buildAppChanges` closure of the main realtime `useEffect`;
+each entity registers a `(table, setter, entity)` triple, and the channel
+listener for `event: '*'` calls a per-entity debounced reload that fetches
+fresh data and dispatches the setter.
+
+**Publication gap - only 2 tables actually broadcast.** Attaching a client
+listener does nothing on its own: a table only emits change events if it is
+a member of the Postgres `supabase_realtime` publication. As verified on
+June 17 against the Supabase publications screen, that publication contains
+exactly two tables: `notifications` and `trainer_time_off`. Net effect:
+
+- Of the 12 listeners on `app-changes`, only `trainer_time_off` ever fires.
+  The other 11 are attached but never receive an event, because their tables
+  are not in the publication.
+- `notifications` broadcasts live, but on its own dedicated per-trainer
+  channel (see the Notifications channel note below), not on `app-changes`.
+- Every other entity - `clients`, `classes`, `leads`, everything else -
+  converges only on a reload (navigation, mount-fetch, or the wake/online/
+  pageshow sweep below), never on live push.
+
+**To make a table sync live, add it to the publication.** The client-side
+listener already exists for all 12; the missing half is the DB-side
+publication membership. `ALTER PUBLICATION supabase_realtime ADD TABLE
+<table>` is what actually turns on live sync for an entity. (Heads-up for
+readers of the app code: some inline comments still claim convergence "comes
+free via the app-changes channel (clients table)" - that is stale; `clients`
+is not in the publication.)
 
 **`storage.X.load()` chain pattern.** Realtime events trigger a full
 entity reload rather than incremental patches. The handler is
@@ -553,94 +586,22 @@ connected to this app), email/SMS infrastructure.
 
 ## 9. Known refactor targets
 
-This is the list of things we know need to change but haven't
-prioritized into a sprint yet. Surfaces them deliberately so they
-don't get rediscovered in a crisis.
+The full backlog - known refactor targets, the deferred cleanup pile,
+and unbuilt features - lives in a single consolidated list at
+**docs/BACKLOG.md**. It was split across this section and CLAUDE.md until
+the 2026-07-07 consolidation; keeping one list avoids the two-lists-that-
+drift problem. Load it on demand.
 
-**Major architectural.**
+Highlights that shape architecture decisions (see BACKLOG.md for the rest):
 
-- **JSONB sessions to normalized table.** Per ADR-0002, sequenced
-  via ADR-0003 Phase 2C. The largest single architectural shift
-  queued. ~8 to 12 weeks of work, gated on Phase 2B foundation
-  completing.
-- **Single-file decomposition.** Posture and decomposition criteria
-  captured in ADR-0005; execution sequenced via ADR-0003 Phase 2B.
-  Extract storage adapter, translators, and at least one major view
-  into separate files served via Netlify. ~4 to 6 weeks. Doesn't
-  need to finish in Phase 2B, but needs to start with a coherent
-  pattern.
-- **Schema migration discipline.** Version-controlled SQL in
-  `/sql/migrations/` with timestamped names. Today the only file in
-  `/sql` is `wipe_pre_alpha_clients.sql`, a one-time data wipe.
-  Phase 2B blocker.
-- **Backup / restore drill.** Documented runbook, tested at least
-  once. Phase 2B blocker.
-- **Smoke test harness.** At minimum a suite that catches the green-
-  then-red toast/persist class of bug for the most-trafficked
-  entities. Phase 2B blocker.
-
-**Operational documentation gap.** Operational documentation currently
-lives in Reagan's project context (the Update Log .docx file and the
-Sprint Status doc). Migration of these into `/docs` as committed
-artifacts is queued. Until that happens, the canonical version-by-
-version history and the live sprint backlog are not visible to anyone
-who doesn't have direct access to Reagan's files.
-
-**Security hardening (deadline-bound).**
-
-- **Anon RLS posture.** Per *anon RLS prototype posture* (proposed).
-  Tighten before APC opens (April 2027) or before any clinical PHI
-  flows through the system, whichever comes first.
-- **PIN hashing.** Per *PIN storage as plaintext* (proposed).
-  Plaintext today. Hash before APC.
-
-**Deferred cleanup pile (from CLAUDE.md).**
-
-- **Trainers replace-all on save.** Every save sends the full profile
-  array. Diff-based save would only send changed rows. Add only if
-  Supabase rate limits surface.
-- **Self-write originator filter for sub events.** Subscription
-  echoes our own writes back. Existing dirty-check filter handles
-  the no-op; a true originator id would be cleaner.
-- **Channel auto-reconnect on subscription drop.** If subs actually
-  drop in production it's a P1 to investigate, not cleanup.
-- **Lead expanded perms** (`canEditAnyAttendance`,
-  `canEditAnySession`) are unscoped. Future work: scope to a
-  reporting tree once we have one.
-- **Phantom `claimed` sub_assignments.** If sub_request flow ever
-  leaves orphaned claimed entries, write a one-time cleanup query.
-- **Pattern B audit (Patch G2 scope).** Most ctx mutators are fire-
-  and-forget setX with the global `_saveIfDirty` useEffect handling
-  async persistence. Their callers fire green toasts before the save
-  resolves, so a translator/schema mismatch on any of them surfaces
-  as Reagan's "green then red" bug pattern. G2 should sweep them with
-  the `requestTimeOff` / `createQueueEntry` persist-then-toast shape.
-- **`fmtRange` duplicated in two places.** TimeOffManagerModal local
-  and TimeCardView local. Lift to module scope on a future cleanup
-  pass.
-- **`.pill-btn` CSS rule scoped to `.audit-controls`** when used
-  outside that context renders with browser defaults plus inline
-  overrides. Resolution options: unscope or wrap all usages
-  consistently. Deferred pending a shared-CSS sprint.
-- **Sprint P Tier C2-aligned strays.** Redundant inline modal
-  maxWidth overrides, foldLinks fontSize inconsistencies,
-  NewQueueEntryModal validation borderColor `var(--red)` usages,
-  ConsultQueueView aged-row `var(--red)` instances. Mechanical
-  sweep, ~10 line edits total. Bundle in a future admin-polish
-  cleanup commit.
-
-**Notification UX followups.**
-
-- Tier-specific notification behaviors (filter chips, dedicated full-
-  list view, time bucketing, grouping rollups).
-- Front Desk admin notification scope: either give Front Desk a
-  synthetic trainer_id row in `trainers`, or route Front Desk into
-  a separate notification queue. See section 4 for the gap.
-
-**Subscription performance.**
-
-- Per-entity debounce is set at 100ms. Tuning may be needed if
-  multi-trainer activity bursts surface stale-state windows.
+- **JSONB sessions to normalized table** (ADR-0002, sequenced via ADR-0003
+  Phase 2C) - the largest architectural shift queued.
+- **Single-file decomposition** (ADR-0005, sequenced via ADR-0003 Phase 2B).
+- **Schema migration discipline** - version-controlled SQL in
+  `/sql/migrations/`. Phase 2B blocker.
+- **Security hardening (deadline-bound)** - anon RLS posture and PIN
+  hashing, both due before APC opens (April 2027) or before any clinical
+  PHI flows, whichever first.
 
 ---
 

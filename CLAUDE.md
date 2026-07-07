@@ -48,11 +48,10 @@ Spotted an adjacent code smell during a fix? Flag it, don't fix it
 in the same commit. Cleanups go in a dedicated commit later.
 
 ### No line-number references in docs
-Docs in `/docs` (SCHEMA.md, ARCHITECTURE.md, DECISIONS.md) reference
-code in `RoundRock_Fitness_Tracker.html` by function name or section
-anchor, never by line number. The single-file app drifts; line refs
-go stale within days. Existing line refs are tracked for sweep
-under "Deferred cleanup pile."
+Docs in `/docs` (SCHEMA.md, ARCHITECTURE.md, DECISIONS.md, BACKLOG.md)
+reference code in `RoundRock_Fitness_Tracker.html` by function name or
+section anchor, never by line number. The single-file app drifts; line
+refs go stale within days.
 
 ## Writing conventions in user-facing code
 
@@ -80,9 +79,10 @@ dedicated commit. Do not ship inside a feature batch.
 
 ## Storage architecture
 
-The app uses a storage adapter (top of script, around line ~1300)
-that wraps all reads/writes. Two modes: 'localStorage' and 'supabase'.
-Currently in 'supabase' mode.
+The app uses a storage adapter (the `storage` object near the top of
+the embedded script, just after the config constants) that wraps all
+reads/writes. Two modes: 'localStorage' and 'supabase'. Currently in
+'supabase' mode.
 
 Supabase project: ofezaezijafglyjmisgz.supabase.co
 Anon key is committed in the file (designed-public). RLS is disabled
@@ -253,129 +253,10 @@ tags, no release notes in the tag, no signing. Just `git tag vX.Y`.
 - Phone must have at least 10 digits when stripped
 - Existing records grandfathered
 
-## Deferred cleanup pile
+## Deferred work
 
-Tracked across all sessions. Address in a dedicated cleanup commit
-when convenient.
-
-- Duplicate/legacy column drift on `classes` (Pattern-A-class -
-  duplicate/legacy columns that cause silent translator rejections).
-  Surfaced during the v4.32 SCHEMA.md NEW-flag fill. Do NOT touch app
-  code; future cleanup pass only:
-    * `classes.instructor` vs `classes.instructor_name`. The live
-      column is `instructor` (written as passthrough, read everywhere).
-      `instructor_name` has zero code refs - unwired duplicate.
-      Resolution: drop `instructor_name` in a future migration.
-    * `classes.time` vs `start_time` / `end_time`. `time` is never
-      written (translate.classes maps startTime/endTime only) and is
-      read only as a legacy fallback (`c.startTime || c.time`) for
-      pre-split rows. Possible legacy column to drop once no live row
-      relies on the fallback.
-- Trainers replace-all on save: every save sends the full profile
-  array. Diff-based save would only send changed rows. Add only if
-  Supabase rate limits surface.
-- Self-write originator filter for sub events: subscription echoes
-  our own writes back. Existing dirty-check filter handles the
-  no-op, but a true originator id would be cleaner.
-- Channel auto-reconnect on subscription drop. If subs actually
-  drop in production it's a P1 to investigate, not cleanup.
-- Lead expanded perms (canEditAnyAttendance, canEditAnySession)
-  are unscoped. Future work: scope to a reporting tree once we
-  have one.
-- Phantom 'claimed' sub_assignments: if sub_request flow ever
-  leaves orphaned claimed entries, write a one-time cleanup
-  query.
-- Pattern B audit (Patch G2 scope). Most ctx mutators are
-  fire-and-forget setX with the global _saveIfDirty useEffect
-  handling async persistence: upsertClient/auditedUpsertClient,
-  upsertClass/auditedUpsertClass, addSession, addAttendance,
-  addCancellation, addSubAssignment, upsertContact, upsertReferral,
-  upsertWRO, addClosure, etc. Their callers fire green toasts
-  before the save resolves, so a translator/schema mismatch on
-  any of them surfaces as Reagan's "green then red" bug pattern
-  (the one Patch P just fixed for leads). G2 should sweep them
-  with the requestTimeOff / createQueueEntry persist-then-toast
-  shape.
-- fmtRange duplicated in two places: TimeOffManagerModal local
-  (line ~25661) and TimeCardView local from Sprint O Phase 2
-  (line ~16889). Lift to module scope on a future cleanup pass.
-- .pill-btn CSS rule (lines 701-714) is selector-scoped to
-  .audit-controls; usage at AuditView 26354/26733 and any future
-  site outside .audit-controls renders with browser defaults +
-  inline overrides. Sprint P Tier C1 deferred the
-  ConsultQueueView filter-pill normalization here. Resolution
-  options: (a) unscope the .pill-btn selector - touches shared
-  CSS, Section D risk, or (b) wrap all .pill-btn usages in
-  .audit-controls consistently. Defer until a Phase 2-style
-  sprint can opt into shared-CSS work.
-- SCHEMA.md and ARCHITECTURE.md line-number drift. Both docs
-  reference specific line numbers in RoundRock_Fitness_Tracker.html
-  that go stale as the single-file app changes. Already drifting
-  ~22-34 lines at 3 days post-commit. Two known instances surfaced
-  in ADR-0004 Phase 1 diagnostic: SCHEMA.md says createRecurringSessions
-  line 6629 (actual 6607); SCHEMA.md says rescheduleSeriesFromHere
-  line 6695 (actual 6661). Fix: sweep both docs and convert line-number
-  references to function-name or section anchors. ARCHITECTURE.md
-  has more refs than SCHEMA.md, plan accordingly. Going-forward
-  convention is captured under "Working conventions" so the sweep
-  is one-time, not recurring.
-- SCHEMA.md clients.packages[] field-shape drift. The documented
-  shape lists fields that aren't actually stamped on package rows.
-  Two classes of drift, both surfaced by the Phase 2A Phase 1
-  diagnostic:
-    * Template-only fields documented as row fields: location,
-      is_pairs, is_consult, is_intro, validDays. Actual: these
-      live on PT_PACKAGES_BY_FACILITY entries only; AddPackageModal
-      and the bulk import don't copy them onto the row.
-      getPackageMeta(p.type) is the operative read path for any
-      consumer that needs them (no runtime consumer reads is_pairs
-      today; the v4.19 migrate_package_participants migration is
-      the first reader, and it reads from the template, not the
-      row).
-    * camelCase vs snake_case soft-delete fields. Docs say
-      deletedAt / deletedBy / restoredAt / restoredBy in
-      camelCase. Actual stamping uses deleted_at / deleted_by in
-      snake_case (softDeletePackage / hardDeletePackage). restoredAt
-      and restoredBy are never stamped - restorePackage just nulls
-      the deleted_at / deleted_by pair.
-  Fix: rewrite the SCHEMA.md clients.packages[] field list to match
-  the actually-stamped shape. Move template-derived fields to a
-  separate "derived from template via getPackageMeta()" note.
-  Correct the soft-delete fields to snake_case and remove the
-  never-stamped restoredAt / restoredBy entries. Use function-name
-  anchors per the "No line-number references in docs" convention.
-- Sprint P Tier C2-aligned strays surfaced during execution:
-    * Two more redundant inline maxWidth: '560px' modal
-      overrides at ~21459 and ~21476 (siblings to the one
-      removed from LeadDetailModal in Tier A). .modal CSS
-      default is already 560px.
-    * Two sibling foldLinks at ~17512 and ~20919 still use
-      fontSize: '12px'; Tier C bumped the ConsultQueueView
-      one (~18832) to 13px to match .section-head .meta.
-      Same role, identical markup, three views.
-    * NewQueueEntryModal validation errors at 16239 and 16248
-      (errors.phone, errors.email) still use var(--red); Tier
-      B only spec'd 16229 (errors.name). The borderColor
-      counterparts at 16227, 16237, 16246 are the same pattern.
-    * ConsultQueueView aged-row var(--red) at 19072 (border
-      ternary) and 19103 (AGED badge bg) still use --red; Tier
-      B spec did not include them.
-  Mechanical sweep, ~10 line edits total. Bundle in a future
-  admin-polish cleanup commit.
-
-## Deferred features
-
-Not built; not a priority right now.
-
-- Goal tracking for PT clients (high-value, ties to council-email pipeline)
-- Discharge questionnaire automation
-- Recurring class series enrollment for planned programs
-- PAR-Q / health screening gate
-- Class capacity hard-block (currently soft-warn only)
-- Trainer-to-trainer messaging/notes
-- Admin role-based PIN access
-- PDF reporting (CSV only for now)
-- Email/SMS notifications
+Deferred work (cleanup pile, refactor targets, unbuilt features) lives
+in docs/BACKLOG.md, load on demand.
 
 ## Security posture
 
