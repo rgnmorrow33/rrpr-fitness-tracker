@@ -4140,6 +4140,14 @@
     if (score < 17) return 'var(--amber)';
     return 'var(--green)';
   }
+  /* v4.39: PT Discharge status -> pill color. Local map on existing palette
+     tokens (NOT fmsCompositeColor - that's score-tiered, unrelated). */
+  var PT_DISCHARGE_STATUSES = ['Active', 'Completed', 'Returned to PT'];
+  var PT_DISCHARGE_STATUS_COLOR = {
+    'Active': 'var(--ochre)',
+    'Completed': 'var(--moss)',
+    'Returned to PT': 'var(--brick)'
+  };
   function totalSessionsPurchased(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
   }
@@ -13179,6 +13187,11 @@
     var fmsOpen = fmsOpenTuple[0];
     var setFmsOpen = fmsOpenTuple[1];
 
+    /* v4.39: PT Discharge create/edit modal open state. */
+    var ptDischargeOpenTuple = useState(false);
+    var ptDischargeOpen = ptDischargeOpenTuple[0];
+    var setPtDischargeOpen = ptDischargeOpenTuple[1];
+
     /* Movement Screen history accordion: id of the currently expanded screen,
        or null. Single-open (tapping another row swaps; tapping the open row
        collapses). */
@@ -13636,6 +13649,60 @@
             )
           );
         })(),
+        /* ===== PT Discharge ===== v4.39 workflow/provenance metadata for
+           clients who transitioned from the PT clinic. Single object on
+           c.pt_discharge (NOT an array). Admin/lead (canEditClient) create
+           and edit; trainers read-only. Section hidden entirely for trainers
+           when no record exists. Deliberately NO free-text/notes field -
+           clinical content stays in Teams. Every read is (c.pt_discharge ||
+           null)-guarded for pre-v4.39 clients. */
+        (function(){
+          var pd = c.pt_discharge || null;
+          if (!pd && !canEditClient) return null;
+          var statusColor = (pd && PT_DISCHARGE_STATUS_COLOR[pd.status]) || 'var(--slate)';
+          function boolPill(val){
+            return e('span', {
+              style: {
+                display: 'inline-block', background: val ? 'var(--moss)' : 'var(--slate-soft)',
+                color: '#fff', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 700
+              }
+            }, val ? 'Yes' : 'No');
+          }
+          function fieldRow(label, val){
+            return e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '7px 0', borderBottom: '1px solid var(--cream-2)' } },
+              e('span', { style: { color: 'var(--slate)' } }, label),
+              e('span', { style: { fontWeight: 600, color: 'var(--navy)' } }, val)
+            );
+          }
+          return e('div', { style: { marginTop: '18px' } },
+            e('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' } },
+              e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap' } },
+                e('h3', { style: { fontSize: '20px', margin: 0 } }, 'PT Discharge'),
+                pd && e('span', {
+                  style: {
+                    display: 'inline-block', background: statusColor, color: '#fff',
+                    padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
+                  }
+                }, (pd.status || 'Active').toUpperCase()),
+                pd && pd.discharged_date && e('span', { style: { fontSize: '12px', color: 'var(--slate)' } }, 'Discharged ' + formatDate(pd.discharged_date))
+              ),
+              canEditClient && e('button', { className: 'btn btn-teal btn-sm', onClick: function(){ setPtDischargeOpen(true); } }, pd ? 'Edit' : '+ Set PT Discharge')
+            ),
+            !pd
+              ? e('div', { className: 'empty', style: { marginTop: '8px' } },
+                  e('div', { className: 'icon' }, '🩺'),
+                  e('div', null, 'No PT discharge on file.')
+                )
+              : e('div', { style: { marginTop: '8px' } },
+                  fieldRow('PT completing', pd.pt_completing || '—'),
+                  fieldRow('Assigned trainer', pd.assigned_trainer || '—'),
+                  fieldRow('Summary reviewed', boolPill(pd.summary_reviewed)),
+                  fieldRow('First session', pd.first_session_date ? formatDate(pd.first_session_date) : '—'),
+                  fieldRow('30-day follow-up', pd.follow_up_date ? formatDate(pd.follow_up_date) : '—'),
+                  fieldRow('Follow-up completed', boolPill(pd.follow_up_completed))
+                )
+          );
+        })(),
         e('h3', { style: { fontSize: '20px', marginTop: '18px', marginBottom: '4px' } }, 'Session Log'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '8px' } },
           (c.sessions || []).length + ' logged'),
@@ -13934,6 +14001,21 @@
             ctx.toast('Movement screen saved \u2713');
           }
         }),
+        ptDischargeOpen && e(PTDischargeModal, {
+          ctx: ctx,
+          client: c,
+          onClose: function(){ setPtDischargeOpen(false); },
+          onSave: function(updated, pd){
+            /* Persist mirrors FMS: fire-and-forget through auditedUpsertClient
+               (Pattern B). Audit snapshot carries status + discharged_date
+               only - no clinical content in the payload. */
+            ctx.auditedUpsertClient(updated, 'pt_discharge_set', {
+              payload: { status: pd.status, discharged_date: pd.discharged_date }
+            });
+            setPtDischargeOpen(false);
+            ctx.toast('PT discharge saved \u2713');
+          }
+        }),
         editPkgTarget && e(EditPackageModal, {
           ctx: ctx,
           client: c,
@@ -14163,6 +14245,109 @@
         e('div', { className: 'modal-footer' },
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
           e('button', { className: 'btn btn-teal', onClick: submit }, 'Save Screen')
+        )
+      )
+    );
+  }
+
+  /* ============ PT DISCHARGE MODAL ============
+     v4.39. Admin/lead create-or-edit of the single clients.pt_discharge
+     workflow object. Mirrors FMSAssessmentModal scaffolding. Provenance +
+     workflow state ONLY - deliberately no free-text/notes field (that's the
+     clinical-leakage vector on an RLS-disabled surface). Seeds from an
+     existing record when present; otherwise Active-status defaults. Parent
+     onSave wraps the updated client in ctx.auditedUpsertClient. */
+  function PTDischargeModal(props){
+    var ctx = props.ctx;
+    useBodyScrollLock();
+    var c = props.client;
+    var existing = c.pt_discharge || null;
+
+    var dischargedTuple = useState((existing && existing.discharged_date) || todayStr());
+    var dischargedDate = dischargedTuple[0]; var setDischargedDate = dischargedTuple[1];
+    var ptCompletingTuple = useState((existing && existing.pt_completing) || '');
+    var ptCompleting = ptCompletingTuple[0]; var setPtCompleting = ptCompletingTuple[1];
+    var assignedTrainerTuple = useState((existing && existing.assigned_trainer) || '');
+    var assignedTrainer = assignedTrainerTuple[0]; var setAssignedTrainer = assignedTrainerTuple[1];
+    var summaryReviewedTuple = useState(!!(existing && existing.summary_reviewed));
+    var summaryReviewed = summaryReviewedTuple[0]; var setSummaryReviewed = summaryReviewedTuple[1];
+    var firstSessionTuple = useState((existing && existing.first_session_date) || '');
+    var firstSessionDate = firstSessionTuple[0]; var setFirstSessionDate = firstSessionTuple[1];
+    var followUpTuple = useState((existing && existing.follow_up_date) || '');
+    var followUpDate = followUpTuple[0]; var setFollowUpDate = followUpTuple[1];
+    var followUpCompletedTuple = useState(!!(existing && existing.follow_up_completed));
+    var followUpCompleted = followUpCompletedTuple[0]; var setFollowUpCompleted = followUpCompletedTuple[1];
+    var statusTuple = useState((existing && existing.status) || 'Active');
+    var status = statusTuple[0]; var setStatus = statusTuple[1];
+
+    function submit(){
+      if (!dischargedDate) { ctx.toast('Discharge date is required', 'error'); return; }
+      var pd = {
+        discharged_date: dischargedDate,
+        pt_completing: (ptCompleting || '').trim(),
+        assigned_trainer: (assignedTrainer || '').trim(),
+        summary_reviewed: !!summaryReviewed,
+        first_session_date: firstSessionDate || null,
+        follow_up_date: followUpDate || null,
+        follow_up_completed: !!followUpCompleted,
+        status: status
+      };
+      props.onSave(Object.assign({}, c, { pt_discharge: pd }), pd);
+    }
+
+    function dateField(label, val, setter){
+      return e('div', { className: 'field' },
+        e('label', null, label),
+        e('input', { type: 'date', value: val, onChange: function(ev){ setter(ev.target.value); }, style: { width: 'auto' } })
+      );
+    }
+    function textField(label, val, setter, placeholder){
+      return e('div', { className: 'field' },
+        e('label', null, label),
+        e('input', { type: 'text', value: val, onChange: function(ev){ setter(ev.target.value); }, placeholder: placeholder,
+          style: { width: '100%', padding: '8px 10px', fontSize: '14px', borderRadius: '6px', border: '1.5px solid var(--rule)', background: '#fff' } })
+      );
+    }
+    function checkField(label, val, setter){
+      return e('label', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 0', fontSize: '14px', color: 'var(--navy)', cursor: 'pointer' } },
+        e('input', { type: 'checkbox', checked: !!val, onChange: function(){ setter(!val); }, style: { width: '16px', flex: '0 0 16px' } }),
+        e('span', null, label)
+      );
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, existing ? 'Edit PT Discharge' : 'Set PT Discharge'),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' },
+          e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px' } },
+            'Workflow tracking for ', e('b', null, c.name), "'s transition from PT. Provenance and follow-up only - keep clinical notes in Teams."
+          ),
+          e('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+            dateField('Discharge date', dischargedDate, setDischargedDate),
+            e('div', { className: 'field' },
+              e('label', null, 'Status'),
+              e('select', { value: status, onChange: function(ev){ setStatus(ev.target.value); } },
+                PT_DISCHARGE_STATUSES.map(function(s){ return e('option', { key: s, value: s }, s); })
+              )
+            )
+          ),
+          textField('PT completing', ptCompleting, setPtCompleting, 'Name of discharging PT'),
+          textField('Assigned trainer', assignedTrainer, setAssignedTrainer, 'Name of receiving trainer'),
+          e('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+            dateField('First session date', firstSessionDate, setFirstSessionDate),
+            dateField('30-day follow-up date', followUpDate, setFollowUpDate)
+          ),
+          e('div', { style: { marginTop: '6px', paddingTop: '8px', borderTop: '1px solid var(--rule)' } },
+            checkField('Transition summary reviewed', summaryReviewed, setSummaryReviewed),
+            checkField('30-day follow-up completed', followUpCompleted, setFollowUpCompleted)
+          )
+        ),
+        e('div', { className: 'modal-footer' },
+          e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+          e('button', { className: 'btn btn-teal', onClick: submit }, existing ? 'Save Changes' : 'Save Discharge')
         )
       )
     );
@@ -24094,9 +24279,14 @@
     var canBulkImport = ctx.can('canBulkImport');
 
     /* v4.36: a client is in the PT-discharge pipeline if any FMS screen was
-       logged at discharge. Guards undefined assessments (pre-v4.35 clients). */
+       logged at discharge. Guards undefined assessments (pre-v4.35 clients).
+       v4.39: also counts clients carrying a pt_discharge workflow object -
+       the two signals stay independent everywhere else (no FMS-source wiring),
+       but for this discovery chip a discharge record is the stronger signal,
+       so the predicate ORs them. */
     function hasDischargeAssessment(c){
-      return (c.assessments || []).some(function(a){ return a && a.source === 'post_pt_discharge'; });
+      return (c.pt_discharge != null) ||
+        (c.assessments || []).some(function(a){ return a && a.source === 'post_pt_discharge'; });
     }
 
     /* Counts for the alert chips (computed against full client set) */
