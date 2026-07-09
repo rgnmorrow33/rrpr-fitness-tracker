@@ -17,6 +17,11 @@ strings.
 Not built; not a priority right now.
 
 - Goal tracking for PT clients (high-value, ties to council-email pipeline)
+- Microsoft Forms -> Supabase intake ingestion. Writes the
+  `clients.intake_paperwork` JSONB object that the v4.40 read-only render
+  (`INTAKE_SECTIONS` in ClientDetail) displays. Until built, intake packets
+  land via import/SQL only. Flagged as an unresolved gap during the Section 5
+  PT-clinic integration review; separate build, do not fold into a render fix.
 - Discharge questionnaire automation
 - Recurring class series enrollment for planned programs
 - PAR-Q / health screening gate
