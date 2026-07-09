@@ -189,8 +189,15 @@ time card.
 
 - Repo: github.com/rgnmorrow33/rrpr-fitness-tracker (PUBLIC)
 - Hosting: Netlify with auto-deploy from main
-- Production site: pardfitnesstracker (Selisa's iPads)
-- Test site: pardfitnesstracker2 / candid-cendol-66c876
+- Production site: pardfitnesstracker2.netlify.app (Selisa's iPads).
+  Backend: Supabase project ofezaezijafglyjmisgz. This is the LIVE site -
+  a push to main auto-deploys straight to the production iPads. There is no
+  separate staging URL right now, so treat every push as production.
+- Stale/abandoned: pardfitnesstracker.netlify.app is an old v2.x
+  localStorage-only build with no Supabase backend (do not use or push to it).
+  candid-cendol-66c876 is dead (404). (Verified July 9 2026 by reading each
+  deployed site's served HTML - the prior "pardfitnesstracker = prod,
+  pardfitnesstracker2 = test" labels were inverted and dangerous.)
 - Local repo: C:\Docs\rrpr-fitness-tracker
 
 Workflow:
