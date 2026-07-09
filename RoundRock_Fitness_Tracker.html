@@ -6745,6 +6745,15 @@
         ['trainer_time_off',  setTimeOff,           'timeOff',          timeOffRef],
         ['announcement_banners', setAnnouncementBanners, 'announcementBanners', announcementBannersRef]
       ];
+      /* Fix C (v4.42): these are the only tables in the ofezaezijafglyjmisgz
+         supabase_realtime publication (verified 2026-07-09), so they are the
+         only ones that can deliver a postgres_changes event. We open a live
+         channel ONLY for these. The other 8 entities stay in `subs` for the
+         wake catch-up refetch below (their only cross-device convergence path),
+         but get no channel - a channel on an unpublished table receives nothing
+         and only adds subscribe/sweep/reconnect traffic. To make an unpublished
+         table sync live, ADD IT TO the publication; do not just add a channel. */
+      var PUBLISHED_TABLES = { clients: 1, classes: 1, leads: 1, trainer_time_off: 1 };
       /* v4.33: PER-TABLE channels. The prior single 'app-changes' channel
          stacked all 12 postgres_changes bindings and delivered ZERO events to
          any of them - confirmed by the two-window test plus Phase 1
@@ -6770,9 +6779,13 @@
          not multiply echoes. */
       var channelStatus = {};
       function recomputeSyncDot(){
-        var allSubscribed = subs.every(function(s){ return channelStatus[s[0]] === 'SUBSCRIBED'; });
+        /* Only the published (actually-subscribed) tables report a status;
+           the unpublished ones never get a channel, so exclude them or the dot
+           would never reach 'connected'. */
+        var live = subs.filter(function(s){ return PUBLISHED_TABLES[s[0]]; });
+        var allSubscribed = live.every(function(s){ return channelStatus[s[0]] === 'SUBSCRIBED'; });
         if (allSubscribed) { setSyncStatus('connected'); return; }
-        var anyDown = subs.some(function(s){
+        var anyDown = live.some(function(s){
           var st = channelStatus[s[0]];
           return st === 'CHANNEL_ERROR' || st === 'TIMED_OUT' || st === 'CLOSED';
         });
@@ -6784,7 +6797,8 @@
          events but does not replay rows changed while an iOS socket was dead;
          this mirrors the notifications loadNotifications-on-wake refetch. */
       var reloaders = [];
-      var unsubscribers = subs.map(function(sub){
+      var unsubscribers = [];
+      subs.forEach(function(sub){
         var table = sub[0]; var setter = sub[1]; var entity = sub[2]; var ref = sub[3];
         /* Patch X: 100ms trailing-edge debounce per entity. A burst of inserts
            on one table coalesces into one reload (preserved per-channel). */
@@ -6806,6 +6820,11 @@
           });
         }, 100);
         reloaders.push(reload);
+        /* Fix C (v4.42): unpublished tables receive zero events, so open no
+           live channel for them - they still converge cross-device via the wake
+           catch-up (reloaders) above. This drops 8 idle subscriptions that only
+           added sweep/reconnect traffic. */
+        if (!PUBLISHED_TABLES[table]) return;
         /* Builder re-runs on every reconnect (channels can't be re-subscribed
            once CLOSED), re-attaching the single binding to a fresh channel. */
         function buildTableChannel(client){
@@ -6827,10 +6846,10 @@
             });
           return channel;
         }
-        return subscribeWithReconnect('table-changes-' + table, buildTableChannel, function(status){
+        unsubscribers.push(subscribeWithReconnect('table-changes-' + table, buildTableChannel, function(status){
           channelStatus[table] = status;
           recomputeSyncDot();
-        });
+        }));
       });
 
       /* Patch C: wake/online sweep. iPad sleep, wifi roam, brief
