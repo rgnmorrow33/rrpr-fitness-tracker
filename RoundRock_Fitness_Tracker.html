@@ -2151,6 +2151,12 @@
   var _activeChannels = new Map();
   var BACKOFF_INITIAL_MS = 1000;
   var BACKOFF_MAX_MS = 30000;
+  /* Fix B (v4.41): coalesce wake sweeps. One device wake commonly fires
+     visibilitychange + pageshow (+ online) within a few ms of each other;
+     each would otherwise force-reconnect all channels, multiplying subscribe
+     traffic. Sweeps inside this window collapse to one. */
+  var SWEEP_DEBOUNCE_MS = 2000;
+  var _lastSweepAt = 0;
 
   function _scheduleReconnect(key){
     var entry = _activeChannels.get(key);
@@ -2265,6 +2271,17 @@
      change; the benefit is guaranteed liveness. */
   function sweepReconnectChannels(reason){
     if (STORAGE_MODE !== 'supabase' || !supabaseClient) return;
+    /* Fix B: debounce back-to-back wake events into a single sweep. We KEEP
+       the Patch K behavior of force-reconnecting every channel inside the
+       sweep - iOS can sever the socket while lastStatus still reads SUBSCRIBED,
+       so a "skip healthy channels" check would silently leave dead channels
+       unrecovered. This only reduces sweep FREQUENCY, never per-sweep coverage. */
+    var now = Date.now();
+    if (now - _lastSweepAt < SWEEP_DEBOUNCE_MS) {
+      console.info('[realtime] sweep (' + reason + ') coalesced - within ' + SWEEP_DEBOUNCE_MS + 'ms of prior');
+      return;
+    }
+    _lastSweepAt = now;
     _activeChannels.forEach(function(entry, key){
       console.info('[realtime] sweep (' + reason + ') resubscribing ' + key + ' (was: ' + (entry.lastStatus || 'unknown') + ')');
       if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
@@ -6711,19 +6728,22 @@
     useEffect(function(){
       if (STORAGE_MODE !== 'supabase') return;
       if (!supabaseClient) return;
+      /* 4th tuple slot is the entity's dirty-check ref. reload() hydrates it
+         before setState so a realtime reload does not re-trigger the entity's
+         save useEffect (Fix A - see reload() below). */
       var subs = [
-        ['clients',           setClients,           'clients'],
-        ['classes',           setClasses,           'classes'],
-        ['wros',              setWros,              'wros'],
-        ['leads',             setQueue,             'leads'],
-        ['member_contacts',   setContacts,          'contacts'],
-        ['admin_items',       setItems,             'adminItems'],
-        ['referrals',         setReferrals,         'referrals'],
-        ['closures',          setClosures,          'closures'],
-        ['trainers',          setTrainerProfiles,   'trainers'],
-        ['schedule_versions', setScheduleVersions,  'scheduleVersions'],
-        ['trainer_time_off',  setTimeOff,           'timeOff'],
-        ['announcement_banners', setAnnouncementBanners, 'announcementBanners']
+        ['clients',           setClients,           'clients',          clientsRef],
+        ['classes',           setClasses,           'classes',          classesRef],
+        ['wros',              setWros,              'wros',             wrosRef],
+        ['leads',             setQueue,             'leads',            queueRef],
+        ['member_contacts',   setContacts,          'contacts',         contactsRef],
+        ['admin_items',       setItems,             'adminItems',       itemsRef],
+        ['referrals',         setReferrals,         'referrals',        referralsRef],
+        ['closures',          setClosures,          'closures',         closuresRef],
+        ['trainers',          setTrainerProfiles,   'trainers',         trainerProfilesRef],
+        ['schedule_versions', setScheduleVersions,  'scheduleVersions', schedVersionsRef],
+        ['trainer_time_off',  setTimeOff,           'timeOff',          timeOffRef],
+        ['announcement_banners', setAnnouncementBanners, 'announcementBanners', announcementBannersRef]
       ];
       /* v4.33: PER-TABLE channels. The prior single 'app-changes' channel
          stacked all 12 postgres_changes bindings and delivered ZERO events to
@@ -6765,12 +6785,22 @@
          this mirrors the notifications loadNotifications-on-wake refetch. */
       var reloaders = [];
       var unsubscribers = subs.map(function(sub){
-        var table = sub[0]; var setter = sub[1]; var entity = sub[2];
+        var table = sub[0]; var setter = sub[1]; var entity = sub[2]; var ref = sub[3];
         /* Patch X: 100ms trailing-edge debounce per entity. A burst of inserts
            on one table coalesces into one reload (preserved per-channel). */
         var reload = debounce(function(){
           storage[entity].load().then(function(fresh){
-            if (fresh != null) setter(fresh);
+            if (fresh == null) return;
+            /* Fix A (v4.41): hydrate the dirty-check ref BEFORE setState so the
+               entity's save useEffect sees ref === state and skips a redundant
+               save. loadAll() already does this on initial load; the realtime
+               reload path previously omitted it, so every reload re-triggered a
+               save. For a published table that write echoes back as a fresh
+               change event -> reload -> save: a self-sustaining loop that pulled
+               the whole table on every cycle (the egress/message runaway). One
+               reference assignment breaks it for every entity. */
+            if (ref) ref.current = fresh;
+            setter(fresh);
           }).catch(function(err){
             console.error('Subscription reload failed for ' + table + ':', err);
           });
