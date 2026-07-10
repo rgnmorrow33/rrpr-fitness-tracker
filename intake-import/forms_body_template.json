@@ -1,0 +1,54 @@
+{
+  "version": "intake-v2",
+  "source": "ms_forms",
+  "response_id": "@{triggerOutputs()?['body/resourceData/responseId']}",
+  "completed_date": "@{formatDateTime(outputs('Get_response_details')?['body/submitDate'], 'yyyy-MM-dd')}",
+  "participant": {
+    "name": "@{outputs('Get_response_details')?['body/rdf70e86726ee42948e7699f8c7924642']}",
+    "dob": "@{outputs('Get_response_details')?['body/rf9f4f318d1d54617ba564dd9c8458c71']}",
+    "phone": "@{outputs('Get_response_details')?['body/rec575091723f4ec1848b468f78ba851a']}",
+    "email": "@{coalesce(outputs('Get_response_details')?['body/r11ddee87871443cfad0236b0e6e1cc4e'], if(equals(toLower(coalesce(outputs('Get_response_details')?['body/responder'], '')), 'anonymous'), '', outputs('Get_response_details')?['body/responder']))}",
+    "emergency_contact": "@{outputs('Get_response_details')?['body/rb0ef16f80fa34beba62558c6b20beeaa']}",
+    "facility": "@{outputs('Get_response_details')?['body/r001df43ccaef4b4184c35bd238ea9ba3']}",
+    "consent": "@{outputs('Get_response_details')?['body/r3aff6fab36324ce293ac52b25ffde583']}"
+  },
+  "health_screen": {
+    "heart_condition_bp": "@{outputs('Get_response_details')?['body/r057bb53e0d4e4bf588b973d2ce6bb052']}",
+    "chest_pain_activity": "@{outputs('Get_response_details')?['body/r6f33b3d1df194a99afbc614671a1afc4']}",
+    "chest_pain_rest": "@{outputs('Get_response_details')?['body/rc2c1ac9cf3924e958a8f4895a3b32f1e']}",
+    "dizziness_balance": "@{outputs('Get_response_details')?['body/rbd38bf95e4da4aa89b10b9c216c6f144']}",
+    "bone_joint_problem": "@{outputs('Get_response_details')?['body/rf665ae0309c342d38866b333fd424413']}",
+    "bp_heart_medication": "@{outputs('Get_response_details')?['body/rf3b9f3ab157f47e1ae283820f60ea665']}",
+    "pregnant_postpartum": "@{outputs('Get_response_details')?['body/rd5a3aab258034a138e7ee9b9e44995f0']}",
+    "breathing_issues": "@{outputs('Get_response_details')?['body/r7561eb9d016648fba5834247fcc0ab2a']}",
+    "surgery_last_year": "@{outputs('Get_response_details')?['body/recbd07eb457e44cdbd4b92e4d9488505']}",
+    "surgery_detail": "@{outputs('Get_response_details')?['body/r9a3eddeeac974c6eb2a3e0094db1b0e8']}",
+    "diabetes_cholesterol": "@{outputs('Get_response_details')?['body/r6956a9de85974a54ae137083fd839340']}",
+    "other_contraindication": "@{outputs('Get_response_details')?['body/rfd9cf94b157d4e03b0742835c0a8b33a']}",
+    "details": "@{outputs('Get_response_details')?['body/r3ef78767bbd94160a2fb1de7771ffed1']}",
+    "medications": "@{outputs('Get_response_details')?['body/r45a8bb61b0f54fdd9da2da133eb3dc53']}"
+  },
+  "exercise_history": {
+    "current_routine": "@{outputs('Get_response_details')?['body/r427cc3e0a0944b16bf71ed1fe24a9ce0']}",
+    "trainer_experience": "@{outputs('Get_response_details')?['body/r69cd45f999b644f79e7a20778d530c20']}",
+    "likes_dislikes": "@{outputs('Get_response_details')?['body/rae279d5c334b404ba413f923696e4988']}",
+    "why_now": "@{outputs('Get_response_details')?['body/r78fd0107b5aa40d692b21fa1435a076c']}",
+    "past_attempts": "@{outputs('Get_response_details')?['body/rfb2e362be220447e8b378ca004ea8b3b']}",
+    "obstacles": "@{outputs('Get_response_details')?['body/red0732112f56431ab5d956008b700530']}"
+  },
+  "goals": {
+    "short_term": "@{outputs('Get_response_details')?['body/r87ff1d57c7694740b402aa04ad4b900a']}",
+    "long_term": "@{outputs('Get_response_details')?['body/r8e885d4486e3418dbc3be46401004926']}"
+  },
+  "lifestyle": {
+    "nutrition_rating": "@{outputs('Get_response_details')?['body/r45001a42f0a3405ea25adc5f90e42406']}",
+    "meals_per_day": "@{outputs('Get_response_details')?['body/ra786a061a97541ccb84a83cd6fa12ddc']}",
+    "sleep_hours": "@{outputs('Get_response_details')?['body/r1129d2608fa54dd88773af9ca5e240df']}",
+    "stress_level": "@{outputs('Get_response_details')?['body/r3f95b33181a14096b1e986367f82d2c3']}",
+    "nicotine": "@{outputs('Get_response_details')?['body/r9f8cf9217b0344b7ac399c854bbeb52f']}",
+    "nicotine_frequency": "@{outputs('Get_response_details')?['body/r97a0067e4e9b4894a13bfa12820bdfbd']}",
+    "alcohol": "@{outputs('Get_response_details')?['body/re9a3955feafb44ef8f6f11d93c093576']}",
+    "alcohol_frequency": "@{outputs('Get_response_details')?['body/r98eceda711634f26a09858cf1da75397']}",
+    "anything_else": "@{outputs('Get_response_details')?['body/r3a32682b000f47d496a28732b4c3a81e']}"
+  }
+}

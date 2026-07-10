@@ -3,35 +3,39 @@
 Intake packet processor for the Round Rock Fitness Tracker.
 
 Consumes the JSON files Power Automate drops in the OneDrive intake dropbox
-(one file per Microsoft Forms Pre-Assessment response), matches each response
-to a client in Supabase, and emits a reviewed SQL file that sets
-clients.intake_paperwork (intake-v2 shape, rendered read-only in ClientDetail
-since v4.43).
+(one file per Microsoft Forms Pre-Assessment response) and lands each one as
+a client in Supabase (intake-v2 shape in clients.intake_paperwork, rendered
+read-only in ClientDetail since v4.43).
 
-DESIGN POSTURE (same as rectrac_import.py - read before changing):
-  This script does NOT write to Supabase. Matching uses a READ-ONLY GET
-  against the REST API with the anon key. The actual UPDATE stays in
-  Reagan's lane: review the emitted .sql file, paste it in the Supabase SQL
-  editor. Promote to auto-write only after the credential/RLS question is
-  resolved (intake_paperwork carries health-screening data - see the PHI
-  note in CLAUDE.md Security posture).
+DESIGN POSTURE (CHANGED 2026-07-10 - was read-only/emit-SQL):
+  This script now WRITES to Supabase. New-client intakes are the primary
+  case: an unmatched, validated response is POSTed as a new clients row.
+  An intake that matches an existing client (dedup hit on email/phone) does
+  NOT create a duplicate - it PATCHes that client's intake_paperwork instead.
+  Writes go through the REST API with the key in SUPABASE_ANON_KEY (RLS is
+  disabled project-wide, so the key is what authorizes the write).
+
+  intake_paperwork carries health-screening answers (PHI). Two guards keep
+  this honest: (1) --dry-run performs ZERO writes and just reports what it
+  would do - always test a batch dry first; (2) validation is strict, so a
+  junk response can never mint a client (see validate_new).
 
 WHAT IT DOES PER RUN (one-shot; Task Scheduler, don't daemonize):
   - Scans WATCH_DIR for *.json (ignores archive/ and review/)
   - Per file: validate shape, normalize Yes/No -> booleans and dates -> ISO
   - Match to a client: unique email match, else unique phone match.
-    Name-only or ambiguous or zero matches -> review lane, never guessed.
-  - Matched   -> UPDATE appended to intake_updates_YYYY-MM-DD.sql
-  - Unmatched -> copied to review/ + row in review_YYYY-MM-DD.csv
+  - Matched   -> PATCH intake_paperwork on that client (no duplicate)
+  - Unmatched + valid (name + real email/phone) -> POST new client
+  - Unmatched + invalid, or ambiguous match -> review/ + review CSV row
   - Source file -> archive/ ; manifest line appended either way
 
 USAGE:
-  python intake_import.py --watch-dir "C:\\Users\\rmorrow\\OneDrive - City of Round Rock\\Docs\\intake_dropbox"
-  python intake_import.py --watch-dir "..." --dry-run
+  python intake_import.py --watch-dir "C:\\...\\intake_dropbox" --dry-run
+  python intake_import.py --watch-dir "C:\\...\\intake_dropbox"
 
 ENV:
   SUPABASE_URL       (default: the project URL below)
-  SUPABASE_ANON_KEY  (required; same designed-public key the app ships)
+  SUPABASE_ANON_KEY  (required; authorizes the read + writes)
 
 No third-party dependencies. Standard library only.
 """
@@ -45,13 +49,14 @@ import os
 import re
 import shutil
 import sys
+import uuid
 import urllib.request
 import urllib.error
 
 DEFAULT_SUPABASE_URL = "https://ofezaezijafglyjmisgz.supabase.co"
 
 # intake-v2 boolean keys, by section. Forms sends "Yes"/"No" strings; the app
-# render coerces defensively, but SQL rows should carry real booleans.
+# render coerces defensively, but stored rows should carry real booleans.
 BOOL_KEYS = {
     "participant": ["consent"],
     "health_screen": [
@@ -64,6 +69,8 @@ BOOL_KEYS = {
 }
 DATE_KEYS = {"participant": ["dob"]}
 TOP_DATE_KEYS = ["completed_date"]
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 log = logging.getLogger("intake_import")
 
@@ -81,13 +88,15 @@ def to_bool(v):
 
 
 def to_iso_date(v):
-    """Accept ISO already, or M/D/YYYY from Forms. Return None if hopeless."""
+    """Accept ISO already, or M/D/YYYY (with optional 12h/24h time) from Forms."""
     if not v or not isinstance(v, str):
         return None
     v = v.strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S"):
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y",
+                "%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S",
+                "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p"):
         try:
-            return dt.datetime.strptime(v.split("T")[0] if "T" in v else v, fmt).date().isoformat()
+            return dt.datetime.strptime(v, fmt).date().isoformat()
         except ValueError:
             continue
     # last resort: ISO datetime string
@@ -99,6 +108,16 @@ def to_iso_date(v):
 
 def digits(s):
     return re.sub(r"\D", "", s or "")
+
+
+def facility_to_location(f):
+    """Map the Forms facility label to the clients.location value."""
+    s = (f or "").strip().lower()
+    if "baca" in s:
+        return "Baca"
+    if "madsen" in s or "clay" in s or "cmrc" in s:
+        return "CMRC"
+    return None
 
 
 def normalize(payload):
@@ -140,7 +159,7 @@ def normalize(payload):
     return notes
 
 
-def fetch_clients(base_url, anon_key):
+def fetch_clients(base_url, key):
     """READ-ONLY. Pull id/name/email/phone for matching. Paged just in case."""
     out, start, page = [], 0, 1000
     while True:
@@ -148,8 +167,8 @@ def fetch_clients(base_url, anon_key):
             base_url.rstrip("/")
             + "/rest/v1/clients?select=id,name,email,phone&deleted_at=is.null",
             headers={
-                "apikey": anon_key,
-                "Authorization": "Bearer " + anon_key,
+                "apikey": key,
+                "Authorization": "Bearer " + key,
                 "Range": "%d-%d" % (start, start + page - 1),
             },
         )
@@ -163,7 +182,8 @@ def fetch_clients(base_url, anon_key):
 
 def match_client(payload, clients):
     """Return (client, reason) or (None, reason). Unique email, else unique
-    phone. Name-only is NEVER auto-matched - review lane."""
+    phone. Name-only is NEVER auto-matched. A multi-hit is ambiguous -> review
+    (caller must not create on an ambiguous reason)."""
     part = payload.get("participant") or {}
     email = (part.get("email") or "").strip().lower()
     phone = digits(part.get("phone"))
@@ -172,46 +192,95 @@ def match_client(payload, clients):
         if len(hits) == 1:
             return hits[0], "email"
         if len(hits) > 1:
-            return None, "email matched %d clients" % len(hits)
+            return None, "AMBIGUOUS: email matched %d clients" % len(hits)
     if len(phone) >= 10:
         hits = [c for c in clients if digits(c.get("phone")) == phone]
         if len(hits) == 1:
             return hits[0], "phone"
         if len(hits) > 1:
-            return None, "phone matched %d clients" % len(hits)
-    name = (part.get("name") or "").strip().lower()
-    if name and any((c.get("name") or "").strip().lower() == name for c in clients):
-        return None, "name-only candidate - confirm manually"
-    return None, "no match on email/phone/name"
+            return None, "AMBIGUOUS: phone matched %d clients" % len(hits)
+    return None, "no existing match"
 
 
-def sql_update(client, payload, reason):
-    body = json.dumps(payload, indent=2, ensure_ascii=False)
-    tag = "$intake_json$"
-    if tag in body:  # can't happen with Forms text, but never emit broken SQL
-        body = json.dumps(payload, ensure_ascii=True)
+def validate_new(payload):
+    """Gate a brand-new client: name required, plus a real email OR a 10-digit
+    phone. Returns (ok, reason). Junk responses fail here and route to review -
+    they must never mint a client."""
     part = payload.get("participant") or {}
-    return (
-        "-- %s  (form: %s, response %s, matched on %s)\n"
-        "UPDATE clients\n"
-        "SET intake_paperwork = %s\n%s\n%s::jsonb\n"
-        "WHERE id = '%s' AND deleted_at IS NULL;\n"
-        % (
-            client.get("name") or "?",
-            part.get("name") or "?",
-            payload.get("response_id", "?"),
-            reason,
-            tag, body, tag,
-            client["id"],
-        )
+    name = (part.get("name") or "").strip()
+    email = (part.get("email") or "").strip()
+    phone = digits(part.get("phone"))
+    if not name:
+        return False, "missing name"
+    has_email = bool(email) and bool(EMAIL_RE.match(email))
+    has_phone = len(phone) >= 10
+    if not has_email and not has_phone:
+        return False, "no valid email or 10-digit phone"
+    return True, "ok"
+
+
+def _client_row(payload):
+    """Build the clients insert row from a normalized intake payload."""
+    part = payload.get("participant") or {}
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    row = {
+        "id": str(uuid.uuid4()),
+        "name": (part.get("name") or "").strip(),
+        "email": ((part.get("email") or "").strip() or None),
+        "phone": ((part.get("phone") or "").strip() or None),
+        "is_active": True,
+        "created_by": "MS Forms intake",
+        "created_at": now,
+        "updated_at": now,
+        "intake_paperwork": payload,
+    }
+    loc = facility_to_location(part.get("facility"))
+    if loc:
+        row["location"] = loc
+    return row
+
+
+def _write(base_url, key, path, body, method):
+    req = urllib.request.Request(
+        base_url.rstrip("/") + path,
+        data=json.dumps(body).encode("utf-8"),
+        method=method,
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
     )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        out = json.loads(resp.read().decode("utf-8"))
+    return out[0] if isinstance(out, list) and out else out
 
 
-def process(watch_dir, base_url, anon_key, dry_run=False):
+def create_client(base_url, key, payload):
+    """POST a new clients row. Returns the created row (id populated)."""
+    return _write(base_url, key, "/rest/v1/clients", _client_row(payload), "POST")
+
+
+def update_paperwork(base_url, key, client_id, payload):
+    """PATCH intake_paperwork on an existing client (dedup hit). No dup."""
+    body = {"intake_paperwork": payload,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    return _write(base_url, key,
+                  "/rest/v1/clients?id=eq." + client_id, body, "PATCH")
+
+
+def _http_err(ex):
+    try:
+        return "%s %s" % (ex.code, ex.read().decode("utf-8", "replace")[:300])
+    except Exception:
+        return str(ex)
+
+
+def process(watch_dir, base_url, key, dry_run=False):
     today = dt.date.today().isoformat()
     archive = os.path.join(watch_dir, "archive")
     review = os.path.join(watch_dir, "review")
-    sql_path = os.path.join(watch_dir, "intake_updates_%s.sql" % today)
     review_csv = os.path.join(watch_dir, "review_%s.csv" % today)
     manifest = os.path.join(watch_dir, "manifest.log")
 
@@ -223,69 +292,105 @@ def process(watch_dir, base_url, anon_key, dry_run=False):
         log.info("nothing to process")
         return 0
 
-    clients = fetch_clients(base_url, anon_key)
-    log.info("matching against %d active clients", len(clients))
+    clients = fetch_clients(base_url, key)
+    log.info("matching against %d active clients%s",
+             len(clients), " (DRY RUN - no writes)" if dry_run else "")
     if not dry_run:
         os.makedirs(archive, exist_ok=True)
         os.makedirs(review, exist_ok=True)
 
-    matched, flagged = 0, 0
+    created = updated = flagged = 0
     for fname in files:
         src = os.path.join(watch_dir, fname)
+        payload, reason, bad = None, None, False
         try:
             with open(src, encoding="utf-8-sig") as fh:
                 payload = json.load(fh)
         except (ValueError, OSError) as ex:
-            log.warning("%s: unreadable JSON (%s) -> review", fname, ex)
-            payload, reason = None, "unreadable JSON: %s" % ex
+            reason, bad = "unreadable JSON: %s" % ex, True
+            log.warning("%s: %s -> review", fname, reason)
 
         if payload is not None:
             if payload.get("version") != "intake-v2":
-                log.warning("%s: version %r is not intake-v2 -> review",
-                            fname, payload.get("version"))
-                reason = "version %r != intake-v2" % payload.get("version")
-                payload_bad = True
+                reason, bad = "version %r != intake-v2" % payload.get("version"), True
+                log.warning("%s: %s -> review", fname, reason)
             else:
-                payload_bad = False
-                notes = normalize(payload)
-                for n in notes:
+                for n in normalize(payload):
                     log.warning("%s: %s", fname, n)
-                client, reason = match_client(payload, clients)
 
+        # Decide the action for this file.
+        action, client, reason = "review", None, (reason or "")
+        if not bad:
+            client, mreason = match_client(payload, clients)
+            if client:
+                action, reason = "update", mreason
+            elif mreason.startswith("AMBIGUOUS"):
+                action, reason = "review", mreason
+            else:
+                ok, vreason = validate_new(payload)
+                action = "create" if ok else "review"
+                reason = "new client" if ok else vreason
+
+        part = (payload or {}).get("participant") or {}
         line = None
-        if payload is not None and not payload_bad and client:
-            matched += 1
-            if not dry_run:
-                with open(sql_path, "a", encoding="utf-8") as fh:
-                    fh.write(sql_update(client, payload, reason) + "\n")
-                shutil.move(src, os.path.join(archive, fname))
-            line = "%s\t%s\tmatched(%s)\t%s" % (today, fname, reason, client["id"])
-            log.info("%s -> matched %s on %s", fname, client.get("name"), reason)
-        else:
+        try:
+            if action == "update":
+                updated += 1
+                if dry_run:
+                    log.info("%s -> would UPDATE %s (matched on %s)",
+                             fname, client.get("name"), reason)
+                else:
+                    update_paperwork(base_url, key, client["id"], payload)
+                    shutil.move(src, os.path.join(archive, fname))
+                    log.info("%s -> UPDATED %s (matched on %s)",
+                             fname, client.get("name"), reason)
+                line = "%s\t%s\tupdated(%s)\t%s" % (today, fname, reason, client["id"])
+
+            elif action == "create":
+                created += 1
+                if dry_run:
+                    log.info("%s -> would CREATE new client %r (%s / %s)",
+                             fname, part.get("name"), part.get("email") or "-",
+                             part.get("phone") or "-")
+                else:
+                    row = create_client(base_url, key, payload)
+                    shutil.move(src, os.path.join(archive, fname))
+                    log.info("%s -> CREATED %s id=%s",
+                             fname, part.get("name"), (row or {}).get("id"))
+                line = "%s\t%s\tcreated\t%s" % (today, fname, part.get("name") or "?")
+
+            else:  # review
+                flagged += 1
+                if not dry_run:
+                    new_row = not os.path.exists(review_csv)
+                    with open(review_csv, "a", newline="", encoding="utf-8") as fh:
+                        w = csv.writer(fh)
+                        if new_row:
+                            w.writerow(["file", "name", "email", "phone", "reason"])
+                        w.writerow([fname, part.get("name", ""), part.get("email", ""),
+                                    part.get("phone", ""), reason])
+                    shutil.move(src, os.path.join(review, fname))
+                log.info("%s -> review (%s)", fname, reason)
+                line = "%s\t%s\tREVIEW\t%s" % (today, fname, reason)
+
+        except urllib.error.HTTPError as ex:
+            # A write failed: back the counter out, quarantine to review.
+            if action == "update":
+                updated -= 1
+            elif action == "create":
+                created -= 1
             flagged += 1
-            if not dry_run:
-                new_row = not os.path.exists(review_csv)
-                with open(review_csv, "a", newline="", encoding="utf-8") as fh:
-                    w = csv.writer(fh)
-                    if new_row:
-                        w.writerow(["file", "name", "email", "phone", "reason"])
-                    part = (payload or {}).get("participant") or {}
-                    w.writerow([fname, part.get("name", ""), part.get("email", ""),
-                                part.get("phone", ""), reason])
-                shutil.move(src, os.path.join(review, fname))
-            line = "%s\t%s\tREVIEW\t%s" % (today, fname, reason)
-            log.info("%s -> review (%s)", fname, reason)
+            log.error("%s: %s FAILED (%s) -> left in place for retry",
+                      fname, action, _http_err(ex))
+            line = "%s\t%s\tERROR(%s)\t%s" % (today, fname, action, _http_err(ex))
 
         if not dry_run and line:
             with open(manifest, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
 
-    log.info("done: %d matched -> %s ; %d for review -> %s%s",
-             matched, os.path.basename(sql_path), flagged,
-             os.path.basename(review_csv), " (DRY RUN, nothing written)" if dry_run else "")
-    if matched and not dry_run:
-        log.info("NEXT STEP: review %s, then run it in the Supabase SQL editor",
-                 os.path.basename(sql_path))
+    log.info("done: %d created, %d updated, %d for review%s",
+             created, updated, flagged,
+             " (DRY RUN, nothing written)" if dry_run else "")
     return 0
 
 
@@ -295,15 +400,15 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    anon_key = os.environ.get("SUPABASE_ANON_KEY")
-    if not anon_key:
-        log.error("SUPABASE_ANON_KEY not set (use the app's designed-public anon key)")
+    key = os.environ.get("SUPABASE_ANON_KEY")
+    if not key:
+        log.error("SUPABASE_ANON_KEY not set")
         return 2
     base_url = os.environ.get("SUPABASE_URL", DEFAULT_SUPABASE_URL)
     if not os.path.isdir(args.watch_dir):
         log.error("watch dir does not exist: %s", args.watch_dir)
         return 2
-    return process(args.watch_dir, base_url, anon_key, dry_run=args.dry_run)
+    return process(args.watch_dir, base_url, key, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
