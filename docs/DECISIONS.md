@@ -761,7 +761,115 @@ Trigger to revisit: completion of the Section 5 infrastructure review, OR the fi
 real post-discharge handoff that needs to run through the system rather than direct
 coordination - whichever comes first.
 
+**2026-07-09 - Section 5 gate cleared.**
+
+The trigger above fired: the Section 5 infrastructure review completed with a
+Council verdict (Option A, partial port). The narrow port shipped as v4.39 and is
+ratified as ADR-0007. The four deferred broad-read items above are now unblocked
+and are the next build; they spec against ADR-0007, not against the pre-rebuild
+artifacts.
+
 ---
+
+## ADR-0007: PT discharge workflow metadata as a client-attached object (Section 5 partial port)
+
+- **Status:** Accepted
+- **Date:** 2026-07-09 (Council verdict and implementation v4.39 on 2026-07-08;
+  accepted on Selisa's production iPad verification 2026-07-09, per the
+  hold-until-verified release discipline)
+
+### Context
+
+Section 5 of the program-purpose doc inventories seven PT-clinic integration
+artifacts built before the program rebuild: the internal referral form template,
+the PT transition summary template, the post-rehab observation checklist, the
+post-rehab orientation module, the PT-approved-trainer criteria, the workflow
+map, and the PT-training transition tracker spreadsheet. The standing rule was
+that none of these are assumed forward; they get reviewed against the rebuilt
+program structure first.
+
+That review is what ADR-0006's post-discharge amendment gated on. It completed
+with a Council deliberation on how much of this infrastructure becomes tracker
+functionality now. The forcing question was the transition tracker spreadsheet
+(Sheet 1): its client-attached workflow fields were the piece with a live
+operational need, since the proof-of-concept discharge handoff ran on direct
+coordination with no system record.
+
+Two constraints shaped the answer:
+
+1. Combined Manager SOP 6.1 prohibits clinical content on the fitness surface.
+2. RLS is disabled project-wide, so anything stored on the clients row is open
+   at the DB layer. The PHI boundary must be structural, not behavioral.
+
+### Decision
+
+Council verdict: Option A, a partial port. Sheet 1 of the transition tracker
+becomes a single `pt_discharge` JSONB object on the clients row. Everything else
+in the Section 5 inventory stays where it lives today (Teams, paper, clinic side)
+and is NOT assumed forward.
+
+The shape of the port:
+
+- Eight workflow-metadata fields only: discharged_date, pt_completing,
+  assigned_trainer, summary_reviewed, first_session_date, follow_up_date,
+  follow_up_completed, status (Active / Completed / Returned to PT).
+- NO free-text or notes field. With RLS disabled, a notes field is a PHI leak
+  waiting to happen; the boundary is enforced by the field not existing. The
+  transition summary document itself stays in Teams per SOP 6.1.
+- The FMS source dropdown is untouched. The discharge object and the
+  `assessments[].source === 'post_pt_discharge'` stamp stay independent signals.
+  Their only coupling is the AdminAllClients From PT Discharge discovery
+  predicate, which ORs them (v4.39 Fix C) because a discharge record is the
+  stronger signal.
+- No dashboard rebuild. PT Discharge renders as a ClientDetail section (after
+  Movement Screen, before Session Log), read-only for trainers, hidden when
+  absent, with a status pill on a local color map.
+- Editing gated to admin and lead via `canEditClient`, not admin-only. Carlos
+  operationally owns the assigned-trainer field under the SOP; admin-only gating
+  would be incoherent with how the handoff actually runs.
+- Persistence rides the existing passthrough path (auditedUpsertClient, no
+  translator entry). Audit action is `pt_discharge_set` with a payload of
+  {status, discharged_date} only, so audit snapshots stay clinically clean too.
+
+### Consequences
+
+- The proof-of-concept handoff now has a system record. Discharge workflow state
+  is queryable and filterable, and survives trainer turnover instead of living
+  in one person's coordination.
+- The clinical/fitness boundary is structural. There is no field on the fitness
+  surface that can hold clinical narrative, which is the correct posture on an
+  RLS-disabled database.
+- The four broad-read items deferred in ADR-0006's amendment (handoff queue,
+  transition-summary pull with the scope boundary enforced, approved-trainer
+  gating, source stamping from the handoff flow) are now unblocked. They are
+  the next build and spec against this ADR.
+- The un-ported Section 5 artifacts remain under clinic-side ownership. If a
+  future need pulls more of them into the tracker, that is a new decision, not
+  an extension of this one.
+- One-time SQL column add (`pt_discharge` jsonb) plus PostgREST cache reload,
+  already run before v4.39 shipped.
+- Known doc drift: SCHEMA.md's clients table does not yet list `pt_discharge`
+  (or `assessments` / `intake_paperwork`). Flagged for the next docs sweep, not
+  swept here.
+
+### Notes
+
+Verification record: Selisa's production iPad pass covered the v4.39 surface
+(PTDischargeModal, ClientDetail section, From PT Discharge chip predicate) on
+2026-07-09. Per release discipline, this decision record was held until that
+verification landed.
+
+The full Council deliberation (five advisors plus peer review and Chairman
+verdict) lives in the Web Claude session record and the project hub; this ADR is
+the durable summary.
+
+Related: ADR-0006 (assessments layer and its post-discharge amendment, whose
+gate this ADR clears), ADR-0004 (JSONB-on-parent pattern this follows), Combined
+Manager SOP 6.1 (PHI boundary), *anon RLS prototype posture* (backlog topic; the
+RLS-disabled context that shaped the no-notes-field decision).
+
+---
+
 
 ## Backlog of proposed ADRs
 
