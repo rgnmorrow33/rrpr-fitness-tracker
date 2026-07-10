@@ -8546,6 +8546,46 @@
         .upsert(supabaseRow, { onConflict: 'id' })
         .then(function(res){ if (res.error) throw res.error; });
     }
+    /* Patch G2 Batch A: single-row persist helpers for the remaining
+       Pattern B entities. Same shape as persistClientRow /
+       persistReferralRow - direct Supabase upsert through the same
+       translate.X.toSupabase the array save uses, so the persisted row
+       is byte-identical to what storage.X.save would have written.
+       localStorage mode resolves as a no-op (the save useEffect still
+       handles that mode). */
+    function persistClassRow(cl){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.classes.toSupabase(cl);
+      return supabaseClient.from('classes')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+    function persistWRORow(w){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.wros.toSupabase(w);
+      return supabaseClient.from('wros')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+    function persistContactRow(c){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      var supabaseRow = translate.contacts.toSupabase(c);
+      return supabaseClient.from('member_contacts')
+        .upsert(supabaseRow, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
+    /* Closures replace-then-append writes touch multiple rows in one
+       mutation (soft-delete prior same-date+facility rows plus the new
+       row), so this helper takes an array. Supabase upsert accepts a
+       row array natively. */
+    function persistClosureRows(rows){
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      if (!rows || rows.length === 0) return Promise.resolve();
+      var supabaseRows = rows.map(function(r){ return translate.closures.toSupabase(r); });
+      return supabaseClient.from('closures')
+        .upsert(supabaseRows, { onConflict: 'id' })
+        .then(function(res){ if (res.error) throw res.error; });
+    }
     /* Patch P: lead-create with persist-then-toast sequencing. Persists
        first, then advances local state. On reject, no optimistic state
        lands and the caller's .catch surfaces the error. Mirrors the
@@ -8573,6 +8613,358 @@
           return next;
         });
         return r;
+      });
+    }
+    /* ===== Patch G2 Batch A: persist-then-toast async mutators =====
+       Infrastructure only - no callers converted in this commit.
+       Each mirrors its sync counterpart exactly (same audit stamps,
+       same side effects, same guards) but persists the changed row(s)
+       FIRST via a direct row upsert, then advances state AND the
+       dirty-check ref inside the updater so the array-save useEffect
+       skips the redundant follow-up write. On reject, no optimistic
+       state lands; the caller's .catch surfaces the error and keeps
+       the modal open. Mirrors requestTimeOff / createQueueEntry /
+       upsertReferralAsync. Batches B and C convert callers.
+
+       Secondary side effects that write OTHER entities (queue flips,
+       WRO follow-up queue entries, notification fan-outs) run after
+       the primary persist resolves and stay on their own savers,
+       same durability as today. */
+    function auditedUpsertClientAsync(c, action, opts){
+      opts = opts || {};
+      /* Same union-NULL guard as upsertClient: clients.is_active is
+         NOT NULL, and this row persists directly. */
+      if (c && c.is_active === undefined) c = Object.assign({}, c, { is_active: true });
+      var before = clients.find(function(x){ return x.id === c.id; }) || null;
+      var stamped = appendAuditEntry(c, session, action, Object.assign({
+        entity_type: 'client',
+        target_id: opts.target_id || c.id,
+        before: opts.before !== undefined ? opts.before : before,
+        after: opts.after !== undefined ? opts.after : c
+      },
+        opts.changes !== undefined ? { changes: opts.changes } : {},
+        opts.amount !== undefined ? { amount: opts.amount } : {},
+        opts.payload !== undefined ? { payload: opts.payload } : {}
+      ));
+      return persistClientRow(stamped).then(function(){
+        setClients(function(list){
+          var exists = list.some(function(x){ return x.id === stamped.id; });
+          var next = exists
+            ? list.map(function(x){ return x.id === stamped.id ? stamped : x; })
+            : list.concat([stamped]);
+          clientsRef.current = next;
+          return next;
+        });
+        return stamped;
+      });
+    }
+    function auditedUpsertClassAsync(cl, action, opts){
+      opts = opts || {};
+      /* Same guard as upsertClass: classes.is_active is NOT NULL. */
+      if (cl && cl.is_active === undefined) cl = Object.assign({}, cl, { is_active: true });
+      var before = classes.find(function(x){ return x.id === cl.id; }) || null;
+      var stamped = appendAuditEntry(cl, session, action, Object.assign({
+        entity_type: 'class',
+        target_id: opts.target_id || cl.id,
+        before: opts.before !== undefined ? opts.before : before,
+        after: opts.after !== undefined ? opts.after : cl
+      }, opts.changes !== undefined ? { changes: opts.changes } : {}));
+      return persistClassRow(stamped).then(function(){
+        setClasses(function(list){
+          var exists = list.some(function(x){ return x.id === stamped.id; });
+          var next = exists
+            ? list.map(function(x){ return x.id === stamped.id ? stamped : x; })
+            : list.concat([stamped]);
+          classesRef.current = next;
+          return next;
+        });
+        /* Fan-out identical to auditedUpsertClass. */
+        var newInstructorId = trainerIdByName(cl.instructor);
+        if (action === 'create' && cl.instructor && !_selfSuppress(newInstructorId)) {
+          storage.notifications.emit(newInstructorId, 'class_assigned', {
+            className: cl.name,
+            date: cl.dayOfWeek,
+            classId: cl.id
+          });
+        } else if (action === 'update' && before) {
+          var rescheduled =
+            before.dayOfWeek !== cl.dayOfWeek ||
+            before.startTime !== cl.startTime ||
+            before.endTime !== cl.endTime;
+          if (rescheduled && cl.instructor && !_selfSuppress(newInstructorId)) {
+            storage.notifications.emit(newInstructorId, 'class_rescheduled', {
+              className: cl.name,
+              oldDate: before.dayOfWeek,
+              newDate: cl.dayOfWeek,
+              oldTime: before.startTime,
+              newTime: cl.startTime,
+              classId: cl.id
+            });
+          }
+          var reassigned = before.instructor !== cl.instructor && !!cl.instructor;
+          if (reassigned && !_selfSuppress(newInstructorId)) {
+            storage.notifications.emit(newInstructorId, 'class_assigned', {
+              className: cl.name,
+              date: cl.dayOfWeek,
+              classId: cl.id
+            });
+          }
+        }
+        return stamped;
+      });
+    }
+    function addSessionAsync(clientId, sess){
+      var before = clients.find(function(x){ return x.id === clientId; });
+      if (!before) return Promise.reject(new Error('Client not found'));
+      /* Same Patch P dedup branch as addSession. */
+      var newStatus = sess && sess.status;
+      var sessTime = sess.time || '';
+      var signoffMatch = null;
+      if (newStatus && newStatus !== 'scheduled' && sess.date) {
+        signoffMatch = (before.sessions || []).find(function(x){
+          return x.status === 'scheduled' && x.date === sess.date && (x.time || '') === sessTime;
+        });
+      }
+      var after, action, amount;
+      if (signoffMatch) {
+        var merged = Object.assign({}, signoffMatch, sess, { id: signoffMatch.id });
+        after = Object.assign({}, before, {
+          sessions: (before.sessions || []).map(function(x){
+            return x.id === signoffMatch.id ? merged : x;
+          })
+        });
+        action = 'session_signoff';
+        amount = sessionConsumption(merged) - sessionConsumption(signoffMatch);
+      } else {
+        after = Object.assign({}, before, {
+          sessions: (before.sessions || []).concat([sess])
+        });
+        action = 'session_create';
+        amount = sessionConsumption(sess);
+      }
+      return auditedUpsertClientAsync(after, action, { before: before, after: after, amount: amount }).then(function(stamped){
+        /* Queue converted-flip stays on the leads saver, same as the
+           sync path - secondary convenience flag, not part of the
+           durability guarantee. */
+        if (before.fromQueueId) {
+          setQueue(function(qList){
+            return qList.map(function(q){
+              if (q.id !== before.fromQueueId) return q;
+              if (q.status === 'converted') return q;
+              return Object.assign({}, q, {
+                status: 'converted',
+                convertedToClientId: clientId
+              });
+            });
+          });
+        }
+        return stamped;
+      });
+    }
+    function addAttendanceAsync(classId, att){
+      var target = (classes || []).find(function(x){ return x.id === classId; });
+      if (!target) return Promise.reject(new Error('Class not found'));
+      /* Same stamp + audit as addAttendance, computed from a state
+         snapshot BEFORE persisting instead of inside the updater
+         (which also removes the StrictMode double-stamp exposure the
+         in-updater appendAuditEntry carried). */
+      var userPickedDate = att.date;
+      var classDate = snapAttendanceClassDate(target, userPickedDate);
+      var loggedAtIso = new Date().toISOString();
+      var stampedAtt = Object.assign({}, att, {
+        date: classDate,
+        class_date: classDate,
+        logged_at: loggedAtIso
+      });
+      var copy = Object.assign({}, target);
+      copy.attendance = (target.attendance || []).concat([stampedAtt]);
+      copy = appendAuditEntry(copy, session, 'attendance_logged', {
+        entity_type: 'class',
+        target_id: target.id,
+        after: {
+          attendance_id: stampedAtt.id,
+          class_date: classDate,
+          user_picked_date: userPickedDate,
+          instructor: stampedAtt.instructor || stampedAtt.actualInstructor || null,
+          headcount: typeof stampedAtt.headcount === 'number' ? stampedAtt.headcount : null
+        }
+      });
+      return persistClassRow(copy).then(function(){
+        setClasses(function(list){
+          var next = list.map(function(c){ return c.id === classId ? copy : c; });
+          classesRef.current = next;
+          return next;
+        });
+        return copy;
+      });
+    }
+    function addSubAssignmentAsync(classId, assignment){
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      if (!prevClass) return Promise.reject(new Error('Class not found'));
+      var prevForDate = (prevClass.subAssignments || [])
+        .find(function(s){ return s.date === assignment.date; });
+      var copy = Object.assign({}, prevClass);
+      copy.subAssignments = (prevClass.subAssignments || [])
+        .filter(function(s){ return s.date !== assignment.date; })
+        .concat([assignment]);
+      return persistClassRow(copy).then(function(){
+        setClasses(function(list){
+          var next = list.map(function(c){ return c.id === classId ? copy : c; });
+          classesRef.current = next;
+          return next;
+        });
+        /* sub_posted fan-out identical to addSubAssignment. */
+        if (assignment.status === 'open' && (!prevForDate || prevForDate.status !== 'open')) {
+          var className = prevClass.name || null;
+          var requesterId = (assignment.requestedBy ? trainerIdByName(assignment.requestedBy) : null)
+            || (session && session.trainer_id) || null;
+          var rows = (trainerProfiles || [])
+            .filter(function(p){ return p.is_active !== false && p.id && p.id !== requesterId; })
+            .map(function(p){
+              return {
+                target_trainer_id: p.id,
+                type: 'sub_posted',
+                payload: {
+                  className: className,
+                  date: assignment.date,
+                  time: prevClass.startTime || null,
+                  classId: classId,
+                  subAssignmentId: assignment.id
+                }
+              };
+            });
+          storage.notifications.emitMany(rows);
+        }
+        return copy;
+      });
+    }
+    function addCancellationAsync(classId, cancellation){
+      var prevClass = (classes || []).find(function(x){ return x.id === classId; });
+      if (!prevClass) return Promise.reject(new Error('Class not found'));
+      var prevForDate = (prevClass.cancellations || [])
+        .find(function(x){ return x.date === cancellation.date; });
+      var copy = Object.assign({}, prevClass);
+      copy.cancellations = (prevClass.cancellations || [])
+        .filter(function(x){ return x.date !== cancellation.date; })
+        .concat([cancellation]);
+      return persistClassRow(copy).then(function(){
+        setClasses(function(list){
+          var next = list.map(function(c){ return c.id === classId ? copy : c; });
+          classesRef.current = next;
+          return next;
+        });
+        /* class_canceled fan-out identical to addCancellation. */
+        if (!prevForDate) {
+          var instructorId = trainerIdByName(prevClass.instructor);
+          if (!_selfSuppress(instructorId)) {
+            storage.notifications.emit(instructorId, 'class_canceled', {
+              className: prevClass.name,
+              date: cancellation.date,
+              classId: classId
+            });
+          }
+        }
+        return copy;
+      });
+    }
+    function addContactAsync(c){
+      return persistContactRow(c).then(function(){
+        setContacts(function(list){
+          var next = list.concat([c]);
+          contactsRef.current = next;
+          return next;
+        });
+        return c;
+      });
+    }
+    function upsertWROAsync(w){
+      /* Guard the id before persisting: translate.wros.toSupabase mints
+         id: w.id || uid() on write, so an id-less row would persist
+         under a different id than the one kept in memory. */
+      if (w && !w.id) w = Object.assign({}, w, { id: uid() });
+      return persistWRORow(w).then(function(){
+        setWros(function(list){
+          var exists = list.some(function(x){ return x.id === w.id; });
+          var next = exists
+            ? list.map(function(x){ return x.id === w.id ? w : x; })
+            : list.concat([w]);
+          wrosRef.current = next;
+          return next;
+        });
+        /* v2.3 follow-up queue side effect identical to upsertWRO;
+           stays on the leads saver. */
+        if (w.postCompleted && w.post && Array.isArray(w.post.conversionOutcomes)) {
+          var FOLLOWUP_OUTCOMES = ['Assessment scheduled', 'Follow-up call planned'];
+          var triggers = w.post.conversionOutcomes.filter(function(o){
+            return FOLLOWUP_OUTCOMES.indexOf(o) !== -1;
+          });
+          if (triggers.length > 0) {
+            setQueue(function(qList){
+              var alreadyHasEntry = qList.some(function(q){ return q.fromWroId === w.id; });
+              if (alreadyHasEntry) return qList;
+              var todayY = todayStr();
+              var followUpYMD = toYMD(addDays(parseYMD(todayY), 3));
+              var note = 'WRO follow-up: ' + triggers.join(', ');
+              if (w.post.notes && w.post.notes.trim()) note += ' · ' + w.post.notes.trim();
+              var newEntry = {
+                id: uid(),
+                name: w.participantName,
+                phone: w.phone || '',
+                email: w.email || '',
+                note: note,
+                source: 'wro_conversion',
+                sourceTag: null,
+                fromWroId: w.id,
+                status: 'assigned',
+                assignedTo: w.post.specialistName,
+                assignedAt: new Date().toISOString(),
+                assignedBy: w.post.specialistName,
+                followUpBy: followUpYMD,
+                statusHistory: [
+                  { status: 'waiting', at: new Date().toISOString(), by: 'system', note: 'Auto-created from WRO post-form' },
+                  { status: 'assigned', at: new Date().toISOString(), by: w.post.specialistName, note: 'Auto-assigned to WRO specialist' }
+                ],
+                createdAt: new Date().toISOString()
+              };
+              return qList.concat([newEntry]);
+            });
+          }
+        }
+        return w;
+      });
+    }
+    function addClosureAsync(closure){
+      var actor = ctxCurrentUserName() || 'unknown';
+      var nowIso = new Date().toISOString();
+      var withId = Object.assign({
+        id: uid(),
+        createdBy: actor,
+        facility: 'all'
+      }, closure);
+      var newFacility = withId.facility || 'all';
+      var stamped = appendAuditEntry(withId, session, 'closure_added', {
+        entity_type: 'closure',
+        target_id: withId.id,
+        before: null,
+        after: withId
+      });
+      /* Same-date+facility replacement soft-deletes computed from the
+         snapshot so they persist in the SAME upsert as the new row -
+         the multi-row write addClosure does inside its updater. */
+      var replaced = (closures || []).filter(function(x){
+        return x.date === withId.date && (x.facility || 'all') === newFacility && !x.deleted_at;
+      }).map(function(x){
+        return Object.assign({}, x, { deleted_at: nowIso, deleted_by: actor });
+      });
+      return persistClosureRows(replaced.concat([stamped])).then(function(){
+        setClosures(function(list){
+          var replacedById = {};
+          replaced.forEach(function(r){ replacedById[r.id] = r; });
+          var next = (list || []).map(function(x){ return replacedById[x.id] || x; }).concat([stamped]);
+          closuresRef.current = next;
+          return next;
+        });
+        return stamped;
       });
     }
     function deleteQueueEntry(id){
@@ -9534,6 +9926,18 @@
       referrals: referrals,
       upsertReferral: upsertReferral,
       upsertReferralAsync: upsertReferralAsync,
+      /* Patch G2 Batch A: persist-then-toast async variants. Callers
+         convert in Batches B and C; sync versions stay for low-stakes
+         call sites. */
+      auditedUpsertClientAsync: auditedUpsertClientAsync,
+      auditedUpsertClassAsync: auditedUpsertClassAsync,
+      addSessionAsync: addSessionAsync,
+      addAttendanceAsync: addAttendanceAsync,
+      addSubAssignmentAsync: addSubAssignmentAsync,
+      addCancellationAsync: addCancellationAsync,
+      addContactAsync: addContactAsync,
+      upsertWROAsync: upsertWROAsync,
+      addClosureAsync: addClosureAsync,
       deleteReferral: deleteReferral,
       addTrainer: addTrainer,
       removeTrainer: removeTrainer,
