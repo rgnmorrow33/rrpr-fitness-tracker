@@ -4182,48 +4182,81 @@
       e('span', { style: { fontWeight: 600, color: 'var(--navy)', textAlign: 'right' } }, val)
     );
   }
-  /* ===== Intake Paperwork ===== v4.40 read-only render of the CMRC Adult
-     Fitness Pre-Assessment Packet. Single object on clients.intake_paperwork
-     (NOT an array; passthrough column like par_q - no translator entry).
-     No in-app editor this round: data lands via import/SQL today, and the
-     Microsoft Forms ingestion path is a separate future build (BACKLOG).
-     INTAKE_SECTIONS is the single source of truth (CLEARING_TESTS pattern):
-     the renderer walks it, skips absent fields, skips empty sections, and
-     ignores unknown JSONB keys - so the upstream ingestion shape can grow
-     without breaking this render. ASSUMED SHAPE (spec rebuilt from project
-     memory, not the original Web Claude spec - field keys flagged for
-     review against the paper packet):
-       { version: 'intake-v1', completed_date, source: 'paper'|'ms_forms',
-         participant: {...}, health_history: {...}, lifestyle: {...},
-         goals: {...}, acknowledgment: {...} } */
+  /* ===== Intake Paperwork ===== v4.43 (shape locked). Read-only render of
+     the CMRC Adult Fitness Pre-Assessment Packet. Single object on
+     clients.intake_paperwork (passthrough column like par_q - no translator
+     entry). v4.40 shipped an assumed intake-v1 shape drafted before the live
+     form existed; v4.43 replaces it with intake-v2, locked field-by-field
+     against the Microsoft Forms response export (July 10, 2026). No
+     production rows ever carried intake-v1, so there is no back-compat
+     guard. No in-app editor: data lands via the Forms ingestion build
+     (BACKLOG) or SQL until then.
+     Field types: 'flag' is a screening yes/no where YES is the clinical
+     finding (amber pill, counts toward the header flag chip); 'bool' is a
+     neutral yes/no (moss pill). Forms sends "Yes"/"No" STRINGS - both pills
+     coerce through intakeBool(), never truthiness ("No" is truthy). */
   var INTAKE_SOURCE_LABEL = { paper: 'Paper packet', ms_forms: 'Microsoft Forms' };
+  function intakeBool(v){
+    if (typeof v === 'string') return ['yes','true','y','1'].indexOf(v.trim().toLowerCase()) !== -1;
+    return !!v;
+  }
+  function intakeBoolPresent(v){ return v != null && v !== ''; }
+  function uiFlagPill(val){
+    return e('span', {
+      style: {
+        display: 'inline-block', background: val ? 'var(--amber)' : 'var(--moss)',
+        color: '#fff', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 700
+      }
+    }, val ? 'Yes' : 'No');
+  }
   var INTAKE_SECTIONS = [
     { key: 'participant', label: 'Participant', fields: [
+      { key: 'name', label: 'Name' },
       { key: 'dob', label: 'Date of birth', type: 'date' },
-      { key: 'occupation', label: 'Occupation' },
-      { key: 'emergency_contact_name', label: 'Emergency contact' },
-      { key: 'emergency_contact_phone', label: 'Emergency phone' }
+      { key: 'phone', label: 'Phone' },
+      { key: 'email', label: 'Email' },
+      { key: 'emergency_contact', label: 'Emergency contact' },
+      { key: 'facility', label: 'Facility' },
+      { key: 'consent', label: 'Consent to assessment and training', type: 'bool' }
     ]},
-    { key: 'health_history', label: 'Health History', fields: [
-      { key: 'conditions', label: 'Reported conditions', type: 'list' },
-      { key: 'injuries_surgeries', label: 'Injuries / surgeries', type: 'list' },
-      { key: 'medications', label: 'Medications', type: 'list' },
-      { key: 'physician_clearance', label: 'Physician clearance on file', type: 'bool' }
+    { key: 'health_screen', label: 'Health Screening', fields: [
+      { key: 'heart_condition_bp', label: 'Heart condition or high blood pressure', type: 'flag' },
+      { key: 'chest_pain_activity', label: 'Chest pain during activity', type: 'flag' },
+      { key: 'chest_pain_rest', label: 'Chest pain at rest (last month)', type: 'flag' },
+      { key: 'dizziness_balance', label: 'Dizziness or loss of balance', type: 'flag' },
+      { key: 'bone_joint_problem', label: 'Bone or joint problem', type: 'flag' },
+      { key: 'bp_heart_medication', label: 'On blood pressure / heart medication', type: 'flag' },
+      { key: 'pregnant_postpartum', label: 'Pregnant or postpartum (6 mo)', type: 'flag' },
+      { key: 'breathing_issues', label: 'Breathing issues (asthma, emphysema)', type: 'flag' },
+      { key: 'surgery_last_year', label: 'Surgery in the last year', type: 'flag' },
+      { key: 'surgery_detail', label: 'Surgery detail' },
+      { key: 'diabetes_cholesterol', label: 'Diabetes or high cholesterol', type: 'flag' },
+      { key: 'other_contraindication', label: 'Other reason to limit activity', type: 'flag' },
+      { key: 'details', label: 'Details on yes answers' },
+      { key: 'medications', label: 'Medications / vitamins / supplements' }
     ]},
-    { key: 'lifestyle', label: 'Lifestyle', fields: [
-      { key: 'activity_level', label: 'Current activity level' },
-      { key: 'exercise_history', label: 'Exercise history' },
-      { key: 'sleep_hours', label: 'Sleep (hrs per night)' },
-      { key: 'stress_level', label: 'Stress level' }
+    { key: 'exercise_history', label: 'Exercise History', fields: [
+      { key: 'current_routine', label: 'Current routine' },
+      { key: 'trainer_experience', label: 'Past trainer experience' },
+      { key: 'likes_dislikes', label: 'Enjoys / dislikes' },
+      { key: 'why_now', label: 'Why now' },
+      { key: 'past_attempts', label: 'What pulled them off track before' },
+      { key: 'obstacles', label: 'Obstacles to consistency' }
     ]},
     { key: 'goals', label: 'Goals', fields: [
-      { key: 'primary_goal', label: 'Primary goal' },
-      { key: 'secondary_goals', label: 'Secondary goals', type: 'list' },
-      { key: 'target_date', label: 'Target date', type: 'date' }
+      { key: 'short_term', label: 'Short term (under 3 months)' },
+      { key: 'long_term', label: 'Long term (6-12 months)' }
     ]},
-    { key: 'acknowledgment', label: 'Acknowledgment', fields: [
-      { key: 'signed', label: 'Packet signed', type: 'bool' },
-      { key: 'signed_date', label: 'Signed date', type: 'date' }
+    { key: 'lifestyle', label: 'Lifestyle', fields: [
+      { key: 'nutrition_rating', label: 'Nutrition (1-10)' },
+      { key: 'meals_per_day', label: 'Meals per day' },
+      { key: 'sleep_hours', label: 'Sleep (hrs per night)' },
+      { key: 'stress_level', label: 'Stress level (1-10)' },
+      { key: 'nicotine', label: 'Nicotine use', type: 'flag' },
+      { key: 'nicotine_frequency', label: 'Nicotine frequency' },
+      { key: 'alcohol', label: 'Alcohol use', type: 'bool' },
+      { key: 'alcohol_frequency', label: 'Alcohol frequency' },
+      { key: 'anything_else', label: 'Anything else for safe training' }
     ]}
   ];
   function totalSessionsPurchased(client){
@@ -14214,10 +14247,21 @@
            import/SQL today, Microsoft Forms ingestion later). Every read is
            (c.intake_paperwork || null)-guarded for pre-v4.40 clients.
            Definition-driven off INTAKE_SECTIONS - see the constant for the
-           assumed JSONB shape. */
+           intake-v2 JSONB shape (locked to the live Forms export, v4.43). */
         (function(){
           var ip = c.intake_paperwork || null;
           if (!ip) return null;
+          /* v4.43: screening flag count for the header chip. Only 'flag'
+             fields count - a yes on nicotine or surgery is a conversation,
+             surfaced amber, same semantics as the PAR-Q flag count. */
+          var flagCount = 0;
+          INTAKE_SECTIONS.forEach(function(sec){
+            var data = ip[sec.key];
+            if (!data || typeof data !== 'object') return;
+            sec.fields.forEach(function(f){
+              if (f.type === 'flag' && intakeBoolPresent(data[f.key]) && intakeBool(data[f.key])) flagCount++;
+            });
+          });
           var sections = INTAKE_SECTIONS.map(function(sec){
             var data = ip[sec.key];
             if (!data || typeof data !== 'object') return null;
@@ -14227,9 +14271,11 @@
                  skips null/empty so partial packets render clean. */
               var v = data[f.key];
               var out;
-              if (f.type === 'bool') {
-                if (!(f.key in data)) return null;
-                out = uiBoolPill(!!v);
+              if (f.type === 'flag' || f.type === 'bool') {
+                /* Forms sends "Yes"/"No" strings; '' means unanswered.
+                   Coerce, never truthy-check ("No" is truthy). */
+                if (!intakeBoolPresent(v)) return null;
+                out = (f.type === 'flag' ? uiFlagPill : uiBoolPill)(intakeBool(v));
               } else if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) {
                 return null;
               } else if (f.type === 'date') {
@@ -14256,7 +14302,13 @@
                   display: 'inline-block', background: 'var(--slate-soft)', color: '#fff',
                   padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
                 }
-              }, (INTAKE_SOURCE_LABEL[ip.source] || ip.source).toUpperCase())
+              }, (INTAKE_SOURCE_LABEL[ip.source] || ip.source).toUpperCase()),
+              flagCount > 0 && e('span', {
+                style: {
+                  display: 'inline-block', background: 'var(--amber)', color: '#fff',
+                  padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
+                }
+              }, flagCount + ' SCREENING FLAG' + (flagCount === 1 ? '' : 'S'))
             ),
             sections.length > 0
               ? sections
