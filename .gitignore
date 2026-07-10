@@ -32,3 +32,6 @@ __pycache__/
 *.tmp
 intake-import/run_intake_import.cmd
 intake-import/intake_import.task.log
+purchase-import/run_purchase_import.cmd
+purchase-import/purchase_import.task.log
+**/__pycache__/
