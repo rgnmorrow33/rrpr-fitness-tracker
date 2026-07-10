@@ -30,3 +30,5 @@ __pycache__/
 # and generic temp files
 .embedded-check.js
 *.tmp
+intake-import/run_intake_import.cmd
+intake-import/intake_import.task.log
