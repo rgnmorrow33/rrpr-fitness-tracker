@@ -4259,6 +4259,77 @@
       { key: 'anything_else', label: 'Anything else for safe training' }
     ]}
   ];
+  /* v4.44: shared read-only render of the intake-v2 packet (c.intake_paperwork,
+     a single object - NOT an array). Extracted from ClientDetail so the consult
+     queue (LeadDetailModal) can render the SAME packet off the lead's linked
+     client - a trainer picking up a lead reads the full paperwork during the
+     consult without leaving the queue. Definition-driven off INTAKE_SECTIONS;
+     skips null/empty leaves so partial packets render clean; a "No" on a
+     screening line is real information and always renders. Returns null when
+     there is no packet, so callers can drop it in unguarded. */
+  function IntakePaperworkSection(ip){
+    if (!ip) return null;
+    /* Screening flag count for the header chip. Only 'flag' fields count - a
+       yes on nicotine or surgery is a conversation, surfaced amber. */
+    var flagCount = 0;
+    INTAKE_SECTIONS.forEach(function(sec){
+      var data = ip[sec.key];
+      if (!data || typeof data !== 'object') return;
+      sec.fields.forEach(function(f){
+        if (f.type === 'flag' && intakeBoolPresent(data[f.key]) && intakeBool(data[f.key])) flagCount++;
+      });
+    });
+    var sections = INTAKE_SECTIONS.map(function(sec){
+      var data = ip[sec.key];
+      if (!data || typeof data !== 'object') return null;
+      var rows = sec.fields.map(function(f){
+        var v = data[f.key];
+        var out;
+        if (f.type === 'flag' || f.type === 'bool') {
+          /* Forms sends "Yes"/"No" strings; '' means unanswered. Coerce,
+             never truthy-check ("No" is truthy). */
+          if (!intakeBoolPresent(v)) return null;
+          out = (f.type === 'flag' ? uiFlagPill : uiBoolPill)(intakeBool(v));
+        } else if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) {
+          return null;
+        } else if (f.type === 'date') {
+          out = formatDate(v);
+        } else if (f.type === 'list') {
+          out = Array.isArray(v) ? v.join(', ') : String(v);
+        } else {
+          out = String(v);
+        }
+        return e('div', { key: f.key }, uiFieldRow(f.label, out));
+      }).filter(Boolean);
+      if (rows.length === 0) return null;
+      return e('div', { key: sec.key, style: { marginTop: '10px' } },
+        e('div', { style: { fontSize: '12px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--slate)', marginBottom: '2px' } }, sec.label),
+        rows
+      );
+    }).filter(Boolean);
+    return e('div', { style: { marginTop: '18px' } },
+      e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', marginBottom: '4px' } },
+        e('h3', { style: { fontSize: '20px', margin: 0 } }, 'Intake Paperwork'),
+        ip.completed_date && e('span', { style: { fontSize: '12px', color: 'var(--slate)' } }, 'Completed ' + formatDate(ip.completed_date)),
+        ip.source && e('span', {
+          style: {
+            display: 'inline-block', background: 'var(--slate-soft)', color: '#fff',
+            padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
+          }
+        }, (INTAKE_SOURCE_LABEL[ip.source] || ip.source).toUpperCase()),
+        flagCount > 0 && e('span', {
+          style: {
+            display: 'inline-block', background: 'var(--amber)', color: '#fff',
+            padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
+          }
+        }, flagCount + ' SCREENING FLAG' + (flagCount === 1 ? '' : 'S'))
+      ),
+      sections.length > 0
+        ? sections
+        : e('div', { style: { fontSize: '13px', color: 'var(--slate)', fontStyle: 'italic' } },
+            'Packet on file - no readable fields. Check the intake_paperwork shape against INTAKE_SECTIONS.')
+    );
+  }
   function totalSessionsPurchased(client){
     return getPackages(client).reduce(function(sum, p){ return sum + (p.sessions || 0); }, 0);
   }
@@ -4968,6 +5039,7 @@
   var QUEUE_SOURCE_LABEL = {
     pt_discharge: 'PT clinic discharge',
     wro_conversion: 'WRO conversion',
+    ms_forms: 'Microsoft Forms intake',
     walk_in: 'Walk-in / front desk',
     phone_inquiry: 'Phone inquiry',
     web_form: 'Web form',
@@ -14239,83 +14311,13 @@
             )
           );
         })(),
-        /* ===== Intake Paperwork ===== v4.40 read-only render of the CMRC
-           Adult Fitness Pre-Assessment Packet on c.intake_paperwork (single
-           object, NOT an array). No in-app editor and no edit gating needed:
-           read-only for every tier, section hidden entirely when absent
-           (there is nothing for anyone to create from here - data lands via
-           import/SQL today, Microsoft Forms ingestion later). Every read is
-           (c.intake_paperwork || null)-guarded for pre-v4.40 clients.
-           Definition-driven off INTAKE_SECTIONS - see the constant for the
-           intake-v2 JSONB shape (locked to the live Forms export, v4.43). */
-        (function(){
-          var ip = c.intake_paperwork || null;
-          if (!ip) return null;
-          /* v4.43: screening flag count for the header chip. Only 'flag'
-             fields count - a yes on nicotine or surgery is a conversation,
-             surfaced amber, same semantics as the PAR-Q flag count. */
-          var flagCount = 0;
-          INTAKE_SECTIONS.forEach(function(sec){
-            var data = ip[sec.key];
-            if (!data || typeof data !== 'object') return;
-            sec.fields.forEach(function(f){
-              if (f.type === 'flag' && intakeBoolPresent(data[f.key]) && intakeBool(data[f.key])) flagCount++;
-            });
-          });
-          var sections = INTAKE_SECTIONS.map(function(sec){
-            var data = ip[sec.key];
-            if (!data || typeof data !== 'object') return null;
-            var rows = sec.fields.map(function(f){
-              /* Bool fields render whenever the key is present - a "No" is
-                 real information on a screening packet. Everything else
-                 skips null/empty so partial packets render clean. */
-              var v = data[f.key];
-              var out;
-              if (f.type === 'flag' || f.type === 'bool') {
-                /* Forms sends "Yes"/"No" strings; '' means unanswered.
-                   Coerce, never truthy-check ("No" is truthy). */
-                if (!intakeBoolPresent(v)) return null;
-                out = (f.type === 'flag' ? uiFlagPill : uiBoolPill)(intakeBool(v));
-              } else if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) {
-                return null;
-              } else if (f.type === 'date') {
-                out = formatDate(v);
-              } else if (f.type === 'list') {
-                out = Array.isArray(v) ? v.join(', ') : String(v);
-              } else {
-                out = String(v);
-              }
-              return e('div', { key: f.key }, uiFieldRow(f.label, out));
-            }).filter(Boolean);
-            if (rows.length === 0) return null;
-            return e('div', { key: sec.key, style: { marginTop: '10px' } },
-              e('div', { style: { fontSize: '12px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--slate)', marginBottom: '2px' } }, sec.label),
-              rows
-            );
-          }).filter(Boolean);
-          return e('div', { style: { marginTop: '18px' } },
-            e('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', marginBottom: '4px' } },
-              e('h3', { style: { fontSize: '20px', margin: 0 } }, 'Intake Paperwork'),
-              ip.completed_date && e('span', { style: { fontSize: '12px', color: 'var(--slate)' } }, 'Completed ' + formatDate(ip.completed_date)),
-              ip.source && e('span', {
-                style: {
-                  display: 'inline-block', background: 'var(--slate-soft)', color: '#fff',
-                  padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
-                }
-              }, (INTAKE_SOURCE_LABEL[ip.source] || ip.source).toUpperCase()),
-              flagCount > 0 && e('span', {
-                style: {
-                  display: 'inline-block', background: 'var(--amber)', color: '#fff',
-                  padding: '2px 8px', borderRadius: '999px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.04em'
-                }
-              }, flagCount + ' SCREENING FLAG' + (flagCount === 1 ? '' : 'S'))
-            ),
-            sections.length > 0
-              ? sections
-              : e('div', { style: { fontSize: '13px', color: 'var(--slate)', fontStyle: 'italic' } },
-                  'Packet on file - no readable fields. Check the intake_paperwork shape against INTAKE_SECTIONS.')
-          );
-        })(),
+        /* ===== Intake Paperwork ===== read-only render of the CMRC Adult
+           Fitness Pre-Assessment Packet on c.intake_paperwork (single object,
+           NOT an array). Read-only for every tier; section hidden entirely when
+           absent. Shared IntakePaperworkSection helper (defined by INTAKE_SECTIONS)
+           renders the identical packet here and in LeadDetailModal (v4.44).
+           (c.intake_paperwork || null)-guarded for pre-v4.40 clients. */
+        IntakePaperworkSection(c.intake_paperwork || null),
         /* ===== PT Discharge ===== v4.39 workflow/provenance metadata for
            clients who transitioned from the PT clinic. Single object on
            c.pt_discharge (NOT an array). Admin/lead (canEditClient) create
@@ -20070,6 +20072,17 @@
             e('b', null, 'Follow up by: '), formatShort(parseYMD(lead.followUpBy))
           ),
           lead.note && e('div', { style: { fontSize: '13px', color: 'var(--navy-soft)', marginTop: '4px', marginBottom: '12px', fontStyle: 'italic', padding: '10px 12px', background: 'var(--paper-2)', borderRadius: '8px' } }, '\u201c' + lead.note + '\u201d'),
+
+          /* v4.44: full intake packet for the consult. A Microsoft Forms intake
+             creates a prospect client carrying intake_paperwork and links it back
+             via client.fromQueueId === lead.id. Render that packet here so a
+             trainer reads the whole screening / goals / history while working the
+             lead, without leaving the queue. Read from allClients (a prospect can
+             be inactive) and render nothing when there is no linked packet. */
+          (function(){
+            var linked = (ctx.allClients || ctx.clients || []).find(function(c){ return c.fromQueueId === lead.id; });
+            return linked ? IntakePaperworkSection(linked.intake_paperwork || null) : null;
+          })(),
           lead.sourceTag && e('div', { style: { fontSize: '12px', color: 'var(--slate)', marginBottom: '12px' } },
             e('b', null, 'Event: '), lead.sourceTag
           ),
