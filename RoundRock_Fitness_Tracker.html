@@ -5740,8 +5740,10 @@
     });
   }
 
-  /* package_expiring sweep. Per-device, per-signed-in-trainer: each
-     trainer's iPad fans out for their own assigned clients only.
+  /* package_expiring + sessions_low sweep. Per-device, per-signed-in-
+     trainer: each trainer's iPad fans out for their own assigned clients
+     only. Emits two types from one pass: package_expiring (time-based,
+     per package) and sessions_low (count-based, client-wide).
      Idempotent via storage.notifications.existsForTrainer dedup keyed on
      <package_id>:<threshold_band>. Bands: 14 (>7 and <=14 days), 7 (>0
      and <=7), 0 (<=0 days). Skips fully-consumed clients (live recompute
@@ -5811,6 +5813,7 @@
     var actorTrainerId = session.trainer_id;
     var activeClients = (clients || []).filter(function(c){ return !c.deleted_at; });
     var candidates = [];
+    var lowCandidates = [];
 
     activeClients.forEach(function(client){
       var targetId = trainerIdFor(client.trainerName);
@@ -5830,6 +5833,32 @@
       var consumed = sessionsConsumedFromArray(client.sessions) + totalConsumedBeforeImport(client);
       var remaining = Math.max(0, purchased - consumed);
       if (remaining <= 0) return;
+
+      /* sessions_low: client-wide low-count renewal alert. Bands: 1
+         (remaining <= 1, last session) and 2 (>1 and <= 2), matching the
+         AdminDashboard "near renewal" tile threshold. Client-wide rather
+         than per-package because renewal is a client conversation, not a
+         package property. Dedup key includes purchased so a renewal
+         purchase changes the key and re-arms the alert with no reset
+         logic. Consult-only clients never reach here (purchased 0 means
+         remaining 0, filtered above). */
+      var lowBand = null;
+      if (remaining <= 1) lowBand = 1;
+      else if (remaining <= 2) lowBand = 2;
+      if (lowBand != null) {
+        var lowDedup = client.id + ':low:' + lowBand + ':' + purchased;
+        lowCandidates.push({
+          targetTrainerId: targetId,
+          dedupKey: lowDedup,
+          payload: {
+            client_id: client.id,
+            client_name: client.name,
+            sessions_remaining: remaining,
+            threshold_band: lowBand,
+            dedup_key: lowDedup
+          }
+        });
+      }
 
       activePackages.forEach(function(pkg){
         if (!pkg.id) return;
@@ -5867,22 +5896,30 @@
       });
     });
 
-    if (candidates.length === 0) return Promise.resolve();
+    /* Shared dedup-then-emit tail. existsForTrainer's cache is keyed
+       trainerId|type, so each type gets its own dedup map for free. */
+    function dedupAndEmit(list, type){
+      if (list.length === 0) return Promise.resolve();
+      return Promise.all(list.map(function(c){
+        return storage.notifications.existsForTrainer(c.targetTrainerId, type, c.dedupKey)
+          .then(function(exists){ return exists ? null : c; });
+      })).then(function(results){
+        var fresh = results.filter(function(c){ return !!c; });
+        if (fresh.length === 0) return;
+        return storage.notifications.emitMany(fresh.map(function(c){
+          return {
+            target_trainer_id: c.targetTrainerId,
+            type: type,
+            payload: c.payload
+          };
+        }));
+      });
+    }
 
-    return Promise.all(candidates.map(function(c){
-      return storage.notifications.existsForTrainer(c.targetTrainerId, 'package_expiring', c.dedupKey)
-        .then(function(exists){ return exists ? null : c; });
-    })).then(function(results){
-      var fresh = results.filter(function(c){ return !!c; });
-      if (fresh.length === 0) return;
-      return storage.notifications.emitMany(fresh.map(function(c){
-        return {
-          target_trainer_id: c.targetTrainerId,
-          type: 'package_expiring',
-          payload: c.payload
-        };
-      }));
-    });
+    return Promise.all([
+      dedupAndEmit(candidates, 'package_expiring'),
+      dedupAndEmit(lowCandidates, 'sessions_low')
+    ]);
   }
 
   /* Pull a duration off an attendance entry. If the attendance row has its
@@ -9688,6 +9725,12 @@
       if (p.threshold_band === 0)      return who + "'s " + pkgLbl + ' expired ' + (p.expires_on || '');
       if (p.days_remaining === 1)      return who + "'s " + pkgLbl + ' expires tomorrow';
       return who + "'s " + pkgLbl + ' expires in ' + p.days_remaining + ' days';
+    }
+    if (n.type === 'sessions_low') {
+      var slWho = p.client_name || 'A client';
+      if (p.threshold_band === 1) return slWho + ' is on their last session - discuss renewal';
+      var slRem = (p.sessions_remaining != null) ? p.sessions_remaining : 'few';
+      return slWho + ' has ' + slRem + ' sessions left - renewal conversation soon';
     }
     /* Spec 1 (B): time-off request flow */
     if (n.type === 'time_off_requested') {
