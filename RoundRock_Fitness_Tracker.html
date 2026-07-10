@@ -3060,7 +3060,12 @@
       { id: 'cmrc-pt-10',   label: '10 sessions',           sessions: 10, price: 330, type: 'CMRC-PT-10',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
       { id: 'cmrc-pt-15',   label: '15 sessions',           sessions: 15, price: 495, type: 'CMRC-PT-15',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
       { id: 'cmrc-pt-20',   label: '20 sessions',           sessions: 20, price: 630, type: 'CMRC-PT-20',   location: 'CMRC', is_pairs: false, is_consult: false, is_intro: false, validDays: 365 },
-      { id: 'cmrc-pairs-4', label: 'Pairs - 4 sessions',    sessions: 4,  price: 60,  type: 'CMRC-Pairs-4', location: 'CMRC', is_pairs: true,  is_consult: false, is_intro: false, validDays: 365 }
+      { id: 'cmrc-pairs-4', label: 'Pairs - 4 sessions',    sessions: 4,  price: 60,  type: 'CMRC-Pairs-4', location: 'CMRC', is_pairs: true,  is_consult: false, is_intro: false, validDays: 365 },
+      /* v4.45: CMRC Pairs 8 / 12 exist in RecTrac (sold YTD) but were missing
+         from this catalog - added so the RecTrac package import can map them.
+         Prices/expiry from the YTD Training Packages report. */
+      { id: 'cmrc-pairs-8',  label: 'Pairs - 8 sessions',   sessions: 8,  price: 105, type: 'CMRC-Pairs-8',  location: 'CMRC', is_pairs: true,  is_consult: false, is_intro: false, validDays: 365 },
+      { id: 'cmrc-pairs-12', label: 'Pairs - 12 sessions',  sessions: 12, price: 145, type: 'CMRC-Pairs-12', location: 'CMRC', is_pairs: true,  is_consult: false, is_intro: false, validDays: 365 }
     ],
     Baca: [
       { id: 'baca-consult',    label: 'Consultation (45 min)',  sessions: 0,  price: 0,   type: 'Baca-Consult',    location: 'Baca', is_pairs: false, is_consult: true,  is_intro: false },
