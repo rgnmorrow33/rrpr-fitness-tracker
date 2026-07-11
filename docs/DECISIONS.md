@@ -871,6 +871,69 @@ RLS-disabled context that shaped the no-notes-field decision).
 ---
 
 
+## ADR-0008: Auto-write import pipelines (intake + RecTrac purchase) via the anon key
+
+**Status.** Accepted
+**Date.** 2026-07-10
+
+### Context
+
+The intake importer (`intake-import/intake_import.py`) and the RecTrac purchase
+importer were built to the same read-only posture as `rectrac-import`: match
+against Supabase with a read-only GET, emit a reviewed SQL/CSV file, and let
+Reagan run the actual insert by hand in the SQL editor. That posture was chosen
+while the credential/RLS question was open and no intake data existed yet.
+
+On 2026-07-10 both were promoted to auto-write, because the manual SQL step did
+not scale to a daily Forms feed and a daily RecTrac purchase report, and because
+the whole point was hands-off population:
+
+- `intake_import.py` (v4.44) POSTs a new client (carrying `intake_paperwork`,
+  which is health-screening PHI) plus a linked `waiting` consult-queue lead, or
+  PATCHes an existing client's paperwork.
+- `purchase_import.py` (v4.45) PATCHes a package onto a matched client, or
+  creates the client from the purchase row (backfill).
+
+Both write through the committed **designed-public anon key** (RLS is disabled
+project-wide, so that key is what authorizes the write), and both run unattended
+on Windows Task Scheduler (intake 5am daily, purchase 8am weekdays).
+
+### Decision
+
+Accept auto-write as the operative posture for both pipelines. Writes go through
+the anon key. The guardrails that make this acceptable-for-prototype are: strict
+validation before any create (name + a real email or 10-digit phone), a
+zero-write `--dry-run` used to rehearse every batch, idempotent dedup (email/phone
+for intake; `(type, purchaseDate)` for purchases) so re-runs converge instead of
+duplicating, and partial-write failures that leave the source file for a
+self-healing retry.
+
+### Consequences
+
+- **Good.** No manual SQL step. Intakes land as clients + consult leads and
+  purchases land as packages automatically; the consult queue and package data
+  stay current with no human in the loop.
+- **Cost - PHI/financial writes by unattended script.** Health-screening answers
+  and auto-created client/lead/package rows are now written to production by a
+  scheduled script through a public anon key. This escalates **RLS on
+  `clients`/`leads` from queued to urgent** - it is no longer acceptable-for-
+  prototype once live PHI flows through it.
+- **Cost - blast radius.** A dedup miss or a bad map creates real rows that need
+  manual cleanup. The local task wrappers hold the anon key in plaintext (they
+  are gitignored). Both tasks run only on Reagan's machine, not server-side.
+
+### Notes
+
+Supersedes the no-write posture documented in the import READMEs and the
+`rectrac_import.py` docstring (those are being updated alongside this ADR).
+Pipelines: `intake_import.py` (v4.44), `purchase_import.py` (v4.45). Related: the
+*anon RLS prototype posture* backlog topic - this ADR is the event that escalates
+it. A Supabase key pasted into a setup chat on 2026-07-10 should be rotated; the
+tasks themselves use the designed-public anon key.
+
+---
+
+
 ## Backlog of proposed ADRs
 
 The following decisions are foundational to the system as it stands
