@@ -35,3 +35,4 @@ intake-import/intake_import.task.log
 purchase-import/run_purchase_import.cmd
 purchase-import/purchase_import.task.log
 **/__pycache__/
+docs/Fitness_Tracker_Update_Log.docx
