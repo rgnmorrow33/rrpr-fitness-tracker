@@ -123,6 +123,55 @@ plus a `DO $$` assertion that aborts the migration if any survive. Nothing else
 in the pass changed. Re-run the staging suite before go-live to confirm the
 DELETE and admin_pin assertions now behave as designed.
 
+## AMENDMENT 2026-07-13 - the crypt() search_path bug (CRITICAL, now fixed)
+
+Found by running the real migrations against a throwaway Supabase branch that
+mirrored prod's exact starting state. This one would have taken the whole app
+down on go-live morning with no way back.
+
+`0002_pin_hashing.sql` declared its four PIN functions with:
+
+    SET search_path = public, pg_temp
+
+But `pgcrypto` is installed in the **`extensions`** schema on Supabase (verified
+on production and on the test branch). `crypt()` and `gen_salt()` are therefore
+NOT resolvable from `public, pg_temp`.
+
+The failure mode is nasty because the migration itself appears to succeed:
+
+1. The backfill (`INSERT INTO trainer_pins ... crypt(...)`) works, because
+   migration scripts run with a wide search_path that includes `extensions`.
+2. `UPDATE trainers SET pin = NULL` fires. Every plaintext PIN is destroyed.
+3. The migration commits. Green checkmark.
+4. First person to tap their tile gets
+   `ERROR: function crypt(text, text) does not exist`. Sign-in is dead.
+5. **`rls_emergency_rollback.sql` does not save you.** It states "the updated app
+   verifies via RPC, which works with RLS on or off." It does not work. The RPC
+   is broken independently of RLS.
+6. **You cannot redeploy the old HTML either.** It compares plaintext PINs that
+   step 2 already deleted.
+
+Net: total, unrecoverable sign-in lockout of every production iPad, with the
+team standing there, recoverable only by hand-writing SQL under pressure.
+
+Fixes applied to `0002_pin_hashing.sql`:
+
+- All four crypt-using functions (`verify_admin_pin`, `set_admin_pin`,
+  `verify_trainer_pin`, `set_trainer_pin`) now declare
+  `SET search_path = public, extensions, pg_temp`.
+- A **SELF-TEST** block was added at the end of the migration. It calls
+  `verify_trainer_pin` and `verify_admin_pin` for real before COMMIT. If they
+  raise, the exception aborts the transaction, nothing is committed, the
+  plaintext PINs survive, and the app keeps working. A broken PIN path can no
+  longer reach production silently.
+
+Verified on the branch after the fix: `verify_trainer_pin` returns `ok` for the
+correct PIN, `wrong` for a bad one, and `locked` after five failures (and keeps
+returning `locked` even when handed the correct PIN, so it doesn't leak).
+
+Standing lesson: **never let a migration destroy the old credential path in the
+same transaction that installs the new one, without proving the new one runs.**
+
 ## OPEN DECISION - do not defer per-user auth to APC
 
 This pass, by its own design note, leaves anon with full read/write on the

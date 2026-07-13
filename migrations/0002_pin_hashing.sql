@@ -114,8 +114,16 @@ END $$;
 -- never returned, never raised in an error, never logged.
 -- ----------------------------------------------------------------------------
 
+-- NOTE (2026-07-13): search_path MUST include `extensions`. pgcrypto is
+-- installed in the `extensions` schema on Supabase (verified on prod and on a
+-- test branch), so crypt() and gen_salt() are NOT resolvable from
+-- `public, pg_temp`. Without `extensions` here, this function throws
+-- "function crypt(text, text) does not exist" at runtime - AFTER the backfill
+-- above has already nulled every plaintext PIN. Net effect: total sign-in
+-- lockout with no rollback path. Caught on a staging branch before go-live.
+-- Applies to all four crypt-using functions below.
 CREATE OR REPLACE FUNCTION verify_admin_pin(p_pin text) RETURNS text
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_hash text;
 BEGIN
   IF p_pin IS NULL OR p_pin !~ '^\d{4}$' THEN RETURN 'wrong'; END IF;
@@ -131,7 +139,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION set_admin_pin(p_current text, p_new text) RETURNS text
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_hash text;
 BEGIN
   IF p_new IS NULL OR p_new !~ '^\d{4}$' THEN RETURN 'invalid'; END IF;
@@ -152,7 +160,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION verify_trainer_pin(p_trainer_id uuid, p_pin text) RETURNS text
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_hash text; v_scope text;
 BEGIN
   IF p_trainer_id IS NULL OR p_pin IS NULL OR p_pin !~ '^\d{4}$' THEN RETURN 'wrong'; END IF;
@@ -173,7 +181,7 @@ END $$;
 -- (anyone holding the anon key already has full operational table access).
 -- Tighten to real auth at the APC gate.
 CREATE OR REPLACE FUNCTION set_trainer_pin(p_trainer_id uuid, p_new text) RETURNS text
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 BEGIN
   IF p_new IS NULL OR p_new !~ '^\d{4}$' THEN RETURN 'invalid'; END IF;
   IF NOT EXISTS (SELECT 1 FROM trainers WHERE id = p_trainer_id) THEN RETURN 'invalid'; END IF;
@@ -201,6 +209,54 @@ GRANT EXECUTE ON FUNCTION verify_admin_pin(text) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION set_admin_pin(text, text) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION verify_trainer_pin(uuid, text) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION set_trainer_pin(uuid, text) TO anon, authenticated;
+
+-- ----------------------------------------------------------------------------
+-- SELF-TEST. Do not remove.
+--
+-- This migration destroys every plaintext PIN (UPDATE trainers SET pin = NULL,
+-- above) and hands sign-in over to the RPCs below. If those RPCs are broken,
+-- the team is locked out of the app with no rollback path: the old HTML cannot
+-- be redeployed because the plaintext PINs it compares against are gone.
+--
+-- So: actually call the RPC before committing. If it raises (the crypt/
+-- search_path failure this file shipped with until 2026-07-13, caught on a
+-- staging branch), the exception aborts the transaction and NOTHING above is
+-- committed. Plaintext PINs survive, the app keeps working, and you get a loud
+-- error instead of a silent morning-of disaster.
+-- ----------------------------------------------------------------------------
+
+DO $$
+DECLARE v_id uuid; v_res text;
+BEGIN
+  SELECT trainer_id INTO v_id FROM trainer_pins LIMIT 1;
+
+  IF v_id IS NULL THEN
+    RAISE NOTICE 'PIN self-test skipped: no PINs present to test against.';
+    RETURN;
+  END IF;
+
+  -- Deliberately wrong PIN. We are testing that the function RUNS, not that it
+  -- authenticates. A crypt/search_path failure raises here and aborts the txn.
+  v_res := verify_trainer_pin(v_id, '0000');
+
+  IF v_res NOT IN ('ok', 'wrong', 'locked', 'unset') THEN
+    RAISE EXCEPTION 'ABORT: verify_trainer_pin self-test returned unexpected value: %', v_res;
+  END IF;
+
+  -- Undo the failed-attempt counter our probe just incremented.
+  DELETE FROM pin_attempts WHERE scope = 'trainer:' || v_id::text;
+
+  -- Same check for the admin PIN path (exercises crypt() in verify_admin_pin).
+  IF EXISTS (SELECT 1 FROM settings WHERE key = 'admin_pin') THEN
+    v_res := verify_admin_pin('0000');
+    IF v_res NOT IN ('ok', 'wrong', 'locked', 'unset') THEN
+      RAISE EXCEPTION 'ABORT: verify_admin_pin self-test returned unexpected value: %', v_res;
+    END IF;
+    DELETE FROM pin_attempts WHERE scope = 'admin';
+  END IF;
+
+  RAISE NOTICE 'PIN RPC self-test passed. Safe to commit.';
+END $$;
 
 NOTIFY pgrst, 'reload schema';
 
