@@ -1,0 +1,32 @@
+{
+  "version": "intake-v2",
+  "source": "ms_forms",
+  "response_id": "rlstest-0001",
+  "completed_date": "2026-07-10",
+  "participant": {
+    "name": "RLSTEST Intake Person",
+    "dob": "1/15/1985",
+    "phone": "512-555-0142",
+    "email": "rlstest.intake@example.com",
+    "emergency_contact": "RLSTEST Contact 512-555-0143",
+    "facility": "Clay Madsen Recreation Center",
+    "consent": "Yes"
+  },
+  "health_screen": {
+    "heart_condition_bp": "No",
+    "chest_pain_activity": "No",
+    "chest_pain_rest": "No",
+    "dizziness_balance": "No",
+    "bone_joint_problem": "No",
+    "bp_heart_medication": "No",
+    "pregnant_postpartum": "No",
+    "breathing_issues": "No",
+    "surgery_last_year": "No",
+    "diabetes_cholesterol": "No",
+    "other_contraindication": "No"
+  },
+  "lifestyle": {
+    "nicotine": "No",
+    "alcohol": "No"
+  }
+}

@@ -35,8 +35,9 @@ USAGE:
   python purchase_import.py --watch-dir "C:\\...\\purchases_dropbox"
 
 ENV:
-  SUPABASE_URL       (default: the project URL below)
-  SUPABASE_ANON_KEY  (required)
+  SUPABASE_URL               (default: the project URL below)
+  SUPABASE_SERVICE_ROLE_KEY  (preferred once RLS is live; required after)
+  SUPABASE_ANON_KEY          (fallback; sufficient only while RLS is off)
 
 No third-party dependencies. Standard library only.
 """
@@ -443,10 +444,16 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    key = os.environ.get("SUPABASE_ANON_KEY")
+    # RLS pass (item 3): prefer the service role key when present. The anon
+    # key fallback keeps this run-identical until the env var is added, and
+    # stops working for writes once RLS is enforced differently. Never commit
+    # either key; both live in the runner's environment only.
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
     if not key:
-        log.error("SUPABASE_ANON_KEY not set")
+        log.error("SUPABASE_SERVICE_ROLE_KEY / SUPABASE_ANON_KEY not set")
         return 2
+    if os.environ.get("SUPABASE_SERVICE_ROLE_KEY"):
+        log.info("using service role key")
     base_url = os.environ.get("SUPABASE_URL", DEFAULT_SUPABASE_URL)
     if not os.path.isdir(args.watch_dir):
         log.error("watch dir does not exist: %s", args.watch_dir)

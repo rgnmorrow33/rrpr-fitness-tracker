@@ -1,0 +1,158 @@
+# RLS + PIN Hashing: Staging Test and Go-Live Runbook
+
+Item 3 of the post-v4.45 work order. Everything below is staged and NOTHING
+has touched production. Production flip happens after Hawaii, on a day Reagan
+can watch it, with Selisa available for iPad verification.
+
+## What shipped in this pass (all staged)
+
+| Piece | Where | State |
+|---|---|---|
+| PIN hashing migration | `migrations/0002_pin_hashing.sql` | Written, not applied |
+| RLS policy set | `migrations/0003_rls_policies.sql` | Written, not applied |
+| Emergency rollback | `sql/rls_emergency_rollback.sql` | Written, for go-live day pocket |
+| Pipeline dual-key | `intake-import/intake_import.py`, `purchase-import/purchase_import.py` | Live-safe: identical behavior until `SUPABASE_SERVICE_ROLE_KEY` is set |
+| App PIN changes | `staging/RoundRock_Fitness_Tracker.staging.html` | Staging copy; prod file untouched |
+| Acceptance suite | `scripts/staging/rls_staging_test.py` + fixtures | Ready to run |
+
+## What this pass does and does not fix (for the IT self-assessment)
+
+Fixes: PINs hashed (bcrypt) and verified server-side with a 5-attempt
+lockout, PINs and admin PIN unreadable/unwritable via the anon key, both
+pipelines moved off the anon key, three unused tables (packages,
+package_participants, queue) closed to anon, hard deletes closed except
+banners, and RLS scaffolding on all 17 tables.
+
+Does not fix: the anon key is committed in a public app by design, so for
+operational tables (clients, leads, wros...) anyone with the key has the same
+read/write the app has. That requires real per-user auth - scoped as the APC
+gate, not this pass. If IT expected more, that is a conversation to have
+before go-live.
+
+## Phase 1 - Staging test (before Hawaii, ~1 hour)
+
+1. Create a staging Supabase project (supabase.com > New project, any region,
+   free tier fine). ~5 minutes to provision.
+2. SQL editor: paste and run, in order:
+   `migrations/0001_baseline.sql`, `migrations/0002_pin_hashing.sql`,
+   `migrations/0003_rls_policies.sql`.
+3. Grab from Project Settings > API: the URL, the `anon` key, and the
+   `service_role` key.
+4. From the repo root:
+
+   ```
+   set SUPABASE_URL=https://<staging-ref>.supabase.co
+   set SUPABASE_ANON_KEY=<staging anon>
+   set SUPABASE_SERVICE_ROLE_KEY=<staging service role>
+   python scripts\staging\rls_staging_test.py
+   ```
+
+   Everything should PASS. The suite refuses to run against the prod URL.
+5. App smoke: paste the staging URL and anon key into the two placeholders at
+   the top of `staging/RoundRock_Fitness_Tracker.staging.html`, open it
+   locally (`node scripts/serve-local.js` or just the file), then:
+   - Manage Team: set the Front Desk PIN (current blank on first setup).
+   - Add a team member, set their PIN in the Edit modal.
+   - Sign out, sign back in with that PIN. Wrong PIN 5x -> lockout toast.
+   - Log a session, add a lead, check the WRO board (anon writes under RLS).
+6. Do NOT commit the staging keys. The placeholders stay placeholders in git.
+
+## Phase 2 - Go-live (after Hawaii, calendared, Selisa on deck)
+
+Pick a low-traffic morning. Sequence matters because the old app compares
+plaintext PINs that 0002 deletes - sign-in is briefly broken between steps 2
+and 3 (about 2 minutes).
+
+1. Pre-flight: `git status` clean, staging suite green within the last week,
+   `sql/rls_emergency_rollback.sql` open in a SQL editor tab.
+2. Prod SQL editor: run `migrations/0002_pin_hashing.sql`.
+3. Port the app changes to `RoundRock_Fitness_Tracker.html` (checklist below),
+   run node --check, commit, tag, push. Netlify deploys in ~30s.
+4. Prod SQL editor: run `migrations/0003_rls_policies.sql`.
+5. Add `SUPABASE_SERVICE_ROLE_KEY` to the environment on the machine that
+   runs the 5am/8am imports (same place SUPABASE_ANON_KEY lives today).
+   The key comes from prod Project Settings > API. Never in the repo.
+6. Selisa: hard-reload every iPad (the wake sweep reloads data, not code),
+   then sign in with her PIN, log a test entry, confirm sync indicator.
+7. Watch the next 5am and 8am runs (or run both importers by hand with
+   yesterday's files against prod, --dry-run first).
+8. If anything unexplained breaks: run `sql/rls_emergency_rollback.sql`,
+   which restores the open posture WITHOUT breaking sign-in (PIN RPCs keep
+   working). Do not redeploy the old HTML - plaintext PINs no longer exist.
+9. Update-log entry + version tag close the item, per house rules.
+
+## App change checklist for the prod port (step 3)
+
+All already applied and syntax-checked in the staging copy - diff it against
+prod for the exact lines. Keep prod URL/key; everything else ports:
+
+1. translate.trainers.toSupabase: stop writing `pin`.
+2. translate.trainers.fromSupabase: `pin` -> `pin_set`.
+3. Three profile constructors: `pin: null` -> `pin_set: false`.
+4. Login startSignIn: `!profile.pin` -> `!profile.pin_set`.
+5. Per-user PinModal call: `expected` -> `verify` via `verify_trainer_pin`
+   RPC; onFail handles 'locked' / 'unset'.
+6. Front desk PinModal call: `expected` -> `verify` via `verify_admin_pin`.
+7. PinModal component: async `verify` support + busy state (legacy
+   `expected` fallback retained).
+8. TrainerEditModal: `pinAlreadySet` reads `pin_set`; audit strings use
+   `pin_set`; `update.pin` write removed; `set_trainer_pin` RPC chained
+   after the row update.
+9. Manage Team: Front Desk PIN update via `set_admin_pin` RPC with a new
+   current-PIN field.
+
+## AMENDMENT 2026-07-13 - the `allow all` policies (blocker, now fixed)
+
+An audit of the live database found twelve tables already carrying a policy
+named `allow all` (`FOR ALL TO anon USING (true) WITH CHECK (true)`), inert
+only because RLS was never enabled. `0003_rls_policies.sql` did not drop them.
+
+Postgres OR's permissive policies. Enabling RLS with `allow all` still present
+means anon keeps full ALL access, DELETE included, no matter what the new
+policies say. Reproduced and confirmed on a throwaway table: with `allow all`
+alongside `anon_select ... USING (key <> 'admin_pin')`, anon read the admin_pin
+row anyway. Dropping `allow all`, changing nothing else, anon read zero.
+
+Without the fix, this pass would have silently failed three of its four claims:
+hard-deletes-closed, admin_pin-unreachable, and queue-closed. The Supabase
+linter would have gone green. That is the worst possible outcome: a database
+that looks locked, reports locked, and is not.
+
+Fix applied to `0003_rls_policies.sql`: a STEP 0 block that drops all twelve,
+plus a `DO $$` assertion that aborts the migration if any survive. Nothing else
+in the pass changed. Re-run the staging suite before go-live to confirm the
+DELETE and admin_pin assertions now behave as designed.
+
+## OPEN DECISION - do not defer per-user auth to APC
+
+This pass, by its own design note, leaves anon with full read/write on the
+operational tables. That means after go-live, anyone with the public URL can
+still read every row of `clients`.
+
+As of 2026-07-13 that is 15 clients, all 15 with email and phone, 4 with PAR-Q
+health answers, 7 with session history. Plus 10 leads. Real Round Rock
+residents, in a public database, with the credential published in a public repo.
+
+The staged plan scopes the fix to "the APC gate (April 2027)." That was a
+defensible call when this was a trainer-hours tracker. It is not defensible
+heading into a beta that puts more resident PII and health-screen answers into
+the same tables.
+
+Recommended: treat per-user auth (PIN verified server-side already exists in
+0002; what's missing is a signed JWT carrying trainer_id + role_tier, so
+policies can key on identity instead of `true`) as the immediate next pass after
+go-live, not an APC item. The scaffolding note in 0003 is right that this is a
+policy edit rather than a rebuild. Do the edit.
+
+Interim, if beta lands first: beta on synthetic client data. `sql/wipe_pre_alpha_clients.sql` exists.
+
+## Known follow-ups (not this pass)
+
+- Real per-user auth + row-scoped policies: APC gate (April 2027), or before
+  any PHI flows through this app, whichever comes first. Note intake_paperwork
+  already carries health-screen answers; worth raising the PHI question with
+  IT sooner than APC.
+- set_trainer_pin is not server-gated beyond the anon key (matches current
+  posture; client-side canSetPINs gates the UI). Tighten with real auth.
+- The pin_attempts lockout is per-scope, not per-device. Shared-iPad lockout
+  hits everyone using that trainer tile for 5 minutes. Acceptable.

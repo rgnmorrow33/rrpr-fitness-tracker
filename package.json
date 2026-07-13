@@ -5,6 +5,7 @@
   "description": "Read-only post-deploy smoke suite for the Round Rock Fitness Tracker. Does not build or bundle the app (single-file HTML, no build step); this package only carries the Playwright test harness.",
   "scripts": {
     "test": "playwright test",
+    "test:local": "playwright test -c playwright.local.config.ts",
     "test:headed": "playwright test --headed",
     "test:report": "playwright show-report",
     "log:scaffold": "node scripts/log-scaffold.js",
