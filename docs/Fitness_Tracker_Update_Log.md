@@ -33,8 +33,11 @@ Newest version at the top; append new sections above the older ones.
   on a write-only kiosk token that can read nothing.
 - **Both import pipelines cut over to `service_role`** and verified with a live
   authenticated read. They will run normally at 5am and 8am.
-- Production migrations applied: **0002, 0004, 0005, 0006, 0007**.
+- Production migrations applied: **0002, 0004, 0005, 0006, 0007, 0008**.
   **0003 was retired and never run.**
+- **anon now holds exactly ONE privilege in the entire `public` schema:**
+  `trainer_directory:SELECT`. That is the correct end state and is worth
+  re-asserting after any future migration that creates a table or view (see 0008).
 
 ### Still open
 
@@ -84,7 +87,7 @@ public internet. The team signs in the way they always have (tap name, type a
 
 v4.46 - 31,358 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
 
-### Six bugs, and how each was found
+### Seven bugs, and how each was found
 
 None of these were found by reading code. Every one surfaced by running the thing
 against a real database. That is the whole lesson of this pass.
@@ -165,6 +168,38 @@ against a real database. That is the whole lesson of this pass.
    assertion. **Verify, do not assume - including when the assertion comes from
    me.**
 
+7. **`trainer_directory` was WRITABLE by anon. Live privilege escalation, found
+   two hours after go-live, while double-checking work I had already called done.**
+   Supabase ships DEFAULT PRIVILEGES granting ALL on newly-created objects in
+   `public` to anon. `0005` ran `REVOKE ALL ON ALL TABLES ... FROM anon` at step 2
+   and then `CREATE VIEW trainer_directory` at step 3. The view was born *after*
+   the revoke, so it picked up the defaults: anon got INSERT, UPDATE, DELETE and
+   TRUNCATE on it. A revoke cannot cover an object that does not exist yet.
+
+   The view is SECURITY DEFINER (by design, so the login screen can read names
+   pre-token) and auto-updatable, so writes through it execute as the view owner
+   and **bypass RLS on `trainers` entirely.** Verified exploitable on production:
+
+       anon UPDATEs trainers via the view ... 1 row
+       anon INSERTs a trainer via the view .. 1 row
+       anon DELETEs a trainer via the view .. blocked only by an incidental FK
+
+   Anyone on the internet could insert, rename or modify team members. The delete
+   failed only because that trainer happened to have notifications rows.
+
+   Roster was writable for roughly two hours. Checked afterwards: 21 trainers,
+   3 admins, zero rows created or updated in the window, no suspicious names.
+   Nobody found it.
+
+   Fixed in `0008`: `REVOKE ALL` then `GRANT SELECT` on the view, plus
+   `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon` so
+   the next object created cannot repeat it.
+
+   **The policies were right. The GRANTS were wrong.** A policy audit says nothing
+   about privileges. This was found only by enumerating
+   `information_schema.role_table_grants` and asking why a number was 7 - after
+   everything had been declared finished, verified, and shipped.
+
 ### Changes
 
 **Database**
@@ -212,6 +247,9 @@ against a real database. That is the whole lesson of this pass.
   UPDATE policy, the kiosk has none, and the write is rejected.
 - **`0007_revoke_public_execute_on_pin_setters.sql`** - `REVOKE ... FROM PUBLIC`
   on the PIN setters. See bug 6.
+- **`0008_lock_trainer_directory_to_select_only.sql`** - `REVOKE ALL` +
+  `GRANT SELECT` on the roster view, and `ALTER DEFAULT PRIVILEGES` so future
+  objects do not inherit anon write access. See bug 7.
 
 **App**
 
@@ -315,8 +353,15 @@ pre-auth path would have written empty arrays over live client records. The kios
 regression would have been discovered by a confused member, not a log file. And
 0007 was found by a linter *after I had told Reagan it was already fixed*.
 
-Run it. Then check what actually happened. Assertions - including confident ones -
-are not evidence.
+And the last one, bug 7, is the sharpest of all: it was found AFTER the work was
+declared finished, verified, shipped, documented and pushed - during a final audit
+that existed only because the ask was "make sure this is correctly done." The
+policies were all correct. The GRANTS were not, and nothing about a policy review
+would ever have surfaced that.
+
+Run it. Then check what actually happened. Then check the thing you did not think
+to check. Assertions - including confident ones, including mine - are not
+evidence.
 
 ---
 
