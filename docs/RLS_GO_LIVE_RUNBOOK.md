@@ -93,9 +93,15 @@ an hour of confusion.
 
 **3. Run the migrations, prod SQL editor, in this order:**
 
-    migrations/0002_pin_hashing.sql        -- plaintext PINs are destroyed here
-    migrations/0004_auth_identity.sql      -- sign_in() + claim accessors
+    migrations/0002_pin_hashing.sql            -- plaintext PINs are destroyed here
+    migrations/0004_auth_identity.sql          -- sign_in() + claim accessors
     migrations/0005_rls_identity_policies.sql  -- anon loses everything
+    migrations/0006_kiosk_public_writes.sql    -- restores the two public tiles
+
+0006 is NOT optional. 0005 alone breaks the two no-PIN member tiles on the login
+screen (Weight Room Orientation Sign-Up, Book a Consultation). A member would fill
+out the whole form and the save would 401. 0006 gives the kiosk a write-only
+identity: it can INSERT a WRO and a consult client, and read nothing at all.
 
 Each has a self-test that aborts rather than committing something broken.
 **Sign-in is now broken until step 5.** The deployed app still speaks the old

@@ -2190,6 +2190,25 @@
 
   function getAppToken(){ return _appToken; }
 
+  /* The kiosk holds a REAL token (it has to, in order to write a WRO or a
+     consult client), but it is not a team member. It must never be treated as
+     signed in: loadAll would then try to read clients/classes/etc, which the
+     kiosk cannot see, and the member would get "Couldn't connect to the server"
+     instead of the orientation form.
+
+     So the app asks isStaff(), not "do we have a token". Mirrors the database,
+     where 0006 redefines app_is_signed_in() to exclude kiosk for exactly the
+     same reason. */
+  function appRoleTier(){
+    if (!_appToken) return null;
+    try {
+      var p = _appToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return (JSON.parse(atob(p)) || {}).role_tier || null;
+    } catch(_){ return null; }
+  }
+  function isKioskSession(){ return appRoleTier() === 'kiosk'; }
+  function isStaff(){ return !!_appToken && !isKioskSession(); }
+
   /* 60s skew buffer so we never hand PostgREST a token that dies mid-flight. */
   function appTokenExpired(){
     if (!_appToken) return true;
@@ -2877,7 +2896,7 @@
            and deleted_at. That matters. fromSupabase would otherwise default
            audit_log to [], and the next Manage Team save would write that []
            straight over the server's real audit history. */
-        var signedIn = !!getAppToken();
+        var signedIn = isStaff();   /* kiosk is NOT staff - see isStaff() */
         var src = signedIn ? 'trainers' : 'trainer_directory';
         var q = supabaseClient.from(src).select('*').order('name', { ascending: true });
         if (signedIn) q = q.eq('is_active', true);   /* the view already filters */
@@ -6933,7 +6952,10 @@
          So: signed out, load only the sign-in roster. Everything else stays
          empty, which is also correct - there is nothing to show pre-auth. The
          real load fires on the auth flip. */
-      if (STORAGE_MODE === 'supabase' && !getAppToken()) {
+      if (STORAGE_MODE === 'supabase' && !isStaff()) {
+        /* !isStaff() covers BOTH the signed-out visitor and the kiosk. The
+           kiosk has a token but can only INSERT; asking it to load clients
+           would 401 and dump a member on the error screen mid-orientation. */
         storage.trainers.load().then(function(profiles){
           var t = profiles || [];
           /* Hydrate EVERY dirty-check ref, not just trainers.
@@ -7069,6 +7091,12 @@
       if (STORAGE_MODE !== 'supabase') return;
       if (!session) return;
       function check(){
+        /* Kiosk sessions are short and PIN-less; a "please enter your PIN"
+           toast at a member would be nonsense. They just get returned home. */
+        if (isKioskSession()) {
+          if (appTokenExpired()) setSession(null);
+          return;
+        }
         if (!getAppToken() || appTokenExpired()) {
           console.info('[auth] token expired; forcing re-auth');
           try { ctx.toast('Session expired. Please enter your PIN again.', 'error'); } catch(_){}
@@ -10904,6 +10932,27 @@
 
     var profiles = (ctx.trainerProfiles || []).filter(function(p){ return p.is_active !== false; });
 
+    /* The two public tiles (Weight Room Orientation, Book a Consultation) are
+       no-PIN, member-facing flows. Under identity RLS they still need SOMETHING
+       to write with, so we mint a kiosk token first: 30 minutes, INSERT-only on
+       wros and clients, and read access to nothing at all (0006).
+
+       Without this the member fills in the whole form and the save 401s. */
+    function startKioskFlow(then){
+      supabaseClient.rpc('sign_in_kiosk', {})
+        .then(function(res){
+          if (res.error) throw res.error;
+          var d = res.data || {};
+          if (!d.token) throw new Error('sign_in_kiosk returned no token');
+          setAppToken(d.token, d.expires_at || 0);
+          then();
+        })
+        .catch(function(err){
+          console.error('[kiosk] sign_in_kiosk failed:', err);
+          ctx.toast('Sorry, that is unavailable right now. Please see the front desk.', 'error');
+        });
+    }
+
     function startSignIn(profile){
       if (!profile.pin_set) {
         ctx.toast('PIN not yet set. Ask an admin to set your PIN.', 'error');
@@ -10941,12 +10990,12 @@
           e('button', {
             className: 'btn btn-gold',
             style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
-            onClick: function(){ ctx.setSession({ role: 'kiosk_wro' }); }
+            onClick: function(){ startKioskFlow(function(){ ctx.setSession({ role: 'kiosk_wro' }); }); }
           }, '🏋  Weight Room Orientation Sign-Up'),
           e('button', {
             className: 'btn btn-gold',
             style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
-            onClick: function(){ setConsultBookingOpen(true); }
+            onClick: function(){ startKioskFlow(function(){ setConsultBookingOpen(true); }); }
           }, '💬  Book a Consultation')
         )
       ),

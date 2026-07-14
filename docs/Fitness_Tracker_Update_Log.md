@@ -136,6 +136,44 @@ against a locked-down database.
   Worth stating plainly: the lockdown caught a data-loss bug that the open
   database would have silently executed.
 
+### A fifth bug, caught at the go-live gate
+
+Found while doing the final pre-flight read of the login screen, minutes before
+the flip. The lockdown would have broken both PUBLIC member-facing tiles:
+
+    "Weight Room Orientation Sign-Up"  -> setSession({role:'kiosk_wro'}) -> writes `wros`
+    "Book a Consultation"              -> auditedUpsertClient()          -> writes `clients`
+
+Both are no-PIN, member-operated self-service flows. The app even documents the
+intent (`Front Desk attribution when no session is active`). Under 0005 both run
+with no token, so both return `permission denied`. A member fills in the entire
+orientation form, taps submit, and gets an error.
+
+Granting anon the access back was not an option: the saves use
+`.upsert(..., {onConflict:'id'})`, which needs INSERT **and** UPDATE, and handing
+anon INSERT+UPDATE on `clients` is most of the door we just shut.
+
+Fixed in **`0006_kiosk_public_writes.sql`** with a write-only kiosk identity:
+
+- `sign_in_kiosk()` mints a 30-minute token with `role_tier='kiosk'` and a
+  sentinel trainer_id. No PIN, because these are public tiles.
+- **The load-bearing line:** `app_is_signed_in()` is redefined to mean "signed in
+  AS A TEAM MEMBER" (`trainer_id IS NOT NULL AND role_tier <> 'kiosk'`). Every
+  policy in 0005 keys on that function, so all of them - every SELECT, UPDATE and
+  DELETE - stop applying to the kiosk instantly, without editing a single policy.
+- Exactly two permissive INSERT policies are added back: `wros` and `clients`.
+- A kiosk that sends an EXISTING row id is still safe: ON CONFLICT DO UPDATE then
+  evaluates the UPDATE policy, the kiosk has none, and the write is rejected. It
+  cannot overwrite a real client by guessing a uuid.
+- App: the two tiles now call `sign_in_kiosk()` before entering the flow, and
+  `isStaff()` (not "do we have a token") gates the loaders, so the kiosk takes the
+  pre-auth path and never tries to read tables it cannot see.
+
+Verified on a branch: kiosk submits a WRO and books a consult client; reads
+clients, wros and settings all return 0; update and delete both affect 0 rows; and
+a trainer then sees exactly what the kiosk submitted. The member-to-trainer
+workflow survives intact while the kiosk reads nothing.
+
 ### Changes
 
 **Deploy 1 - PIN hashing and pipeline lockdown (tested, ready)**
