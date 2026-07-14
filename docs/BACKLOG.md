@@ -154,6 +154,10 @@ pass - do NOT touch app code for them mid-feature.
 Open questions that code review cannot settle. Each one names the exact check
 that answers it. Do not close any of these by reasoning about them.
 
+The Selisa-facing version of these lives in `docs/DEVICE_CHECKS.md` - same checks,
+written to be run by someone who is not going to read this file. Keep the two in
+sync: when a check passes there, close it here.
+
 - **P1 - Are pre-auth realtime channels re-authorized on sign-in?**
   (opened 2026-07-14, v4.48)
 
