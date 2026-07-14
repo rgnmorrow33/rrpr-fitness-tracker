@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.47** (RLS fallout fix, deployed July 14, 2026)
+**Live version: v4.48** (realtime guard + docs correction, deployed July 14, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,8 +13,8 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 14, 2026
 
-- **Live version: v4.47**, tagged and pushed; Netlify prod (pardfitnesstracker2)
-  auto-deployed. Tracker file: 31,371 lines / 1.4 MB. `node --check` on the
+- **Live version: v4.48**, tagged and pushed; Netlify prod (pardfitnesstracker2)
+  auto-deployed. Tracker file: 31,380 lines / 1.4 MB. `node --check` on the
   embedded JS: PASS.
 - **v4.47 closed the first piece of v4.46 fallout.** The post-deploy smoke suite
   went fully red (9 of 9 views) within hours of the v4.46 flip. Not one was an
@@ -55,20 +55,140 @@ Newest version at the top; append new sections above the older ones.
   attendance live inside JSONB blobs on the parent row (ADR-0004), so "log a
   session" IS "UPDATE the whole clients row". Unwinding that is a separate
   project. Acceptable for an internal team tool; revisit before APC.
-- **The smoke suite's realtime recovery gate is decorative.** `consoleGuard`
-  computes `realtimeRecovered` from `[realtime] subscribed` OR
-  `[realtime] reconnected`, but `subscribeWithReconnect` logs
-  `[realtime] subscribed` unconditionally at channel open, BEFORE `.subscribe()`
-  is called. So `realtimeRecovered` is always true, so every `status=CLOSED` and
-  `scheduling reconnect` warning is dropped unconditionally. The comment claims
-  "a genuine UNrecovered drop still fails the suite." It cannot. Gate recovery on
-  `[realtime] reconnected` only. Found 2026-07-14 during the v4.47 pass.
+- **UNVERIFIED: do realtime events actually flow after sign-in on a channel that
+  was opened pre-auth?** The realtime useEffect has `[]` deps, so all 4 entity
+  channels are opened while signed OUT, as anon. `realtime.setAuth()` fires on the
+  auth flip and SHOULD re-authorize them. If it does not, live cross-device sync
+  for clients / classes / leads is silently dead since the v4.46 flip, and the app
+  would look fine (data still converges on reload and wake sweep). This is now the
+  single highest-value open item. Settle it with the two-iPad sub-coverage check:
+  drop a class on one iPad, watch it appear on a second WITHOUT reloading. If it
+  only appears after a reload, channels are not re-authorizing and the fix is to
+  add `authVersion` to the effect's deps so channels open WITH a token.
 - `intake-import/README.md` still documents the retired no-write posture.
   SCHEMA.md autogen regions miss `pt_discharge` and `intake_paperwork`.
   Test-FMS cleanup SQL is committed but never run.
 - `scripts/staging/rls_staging_test.py` asserts `PASS anon can select clients`,
   which was correct for the retired 0003 model and is a critical failure under the
   shipped model. `rls_identity_test.py` supersedes it. Retire the old one.
+
+---
+
+## v4.48 - July 14, 2026
+
+Makes the smoke suite's realtime guard real, and corrects a CLAUDE.md claim that
+was wrong in the dangerous direction. Both found while closing out v4.47.
+
+### Trigger
+
+Auditing the v4.47 fix surfaced that the guard which caught it was itself broken,
+and that the file Claude reads at the start of every session says the opposite of
+what the database actually does.
+
+### Goal
+
+A realtime channel that drops and never comes back fails the suite. And nobody
+designs the next feature off a false statement about which tables sync live.
+
+### File version
+
+v4.48 - 31,380 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+**1. The recovery gate was decorative.** `consoleGuard` computed:
+
+    const realtimeRecovered = messages.some(
+      (m) => m.text.startsWith('[realtime] reconnected') ||
+             m.text.startsWith('[realtime] subscribed'),
+    );
+
+`subscribeWithReconnect` logs `[realtime] subscribed <key>` unconditionally at
+channel open, BEFORE `.subscribe()` is called. So `realtimeRecovered` was ALWAYS
+true, so `isRealtimeTransient(...) && realtimeRecovered` dropped every
+`status=CLOSED` and `scheduling reconnect` warning, unconditionally. The comment
+above it claimed *"a genuine UNrecovered drop still fails the suite."* It could
+not. That is precisely the "subs actually drop in production" P1 the guard exists
+to catch.
+
+Deleting the `subscribed` clause alone would NOT have fixed it - it would have
+made the suite flaky. `[realtime] reconnected` only prints when
+`backoffMs !== BACKOFF_INITIAL_MS`, and `sweepReconnectChannels` RESETS
+`backoffMs` to INITIAL before reconnecting. Whether it prints at all depends on a
+race between the torn-down channel's CLOSED and the new channel's SUBSCRIBED. The
+app had no deterministic "this channel is live" signal to gate on. So the app had
+to change first.
+
+**2. CLAUDE.md was wrong about the publication.** It said the
+`supabase_realtime` publication held 2 tables (`notifications`,
+`trainer_time_off`, "verified June 17") and that "every other entity converges
+only on reload, not live push." Queried against the live database:
+
+    classes, clients, leads, notifications, trainer_time_off
+
+Five tables. `clients`, `classes` and `leads` DO push live. v4.42 already noted
+the contradiction and nobody went back and fixed the file. It also still described
+the single `app-changes` channel that v4.33 replaced with per-table channels.
+
+### Changes
+
+**App**
+
+- **`_handleChannelStatus` emits `[realtime] live <key>` on every SUBSCRIBED**,
+  unconditionally. Deterministic per-channel liveness signal, no race.
+
+**Tests**
+
+- **`consoleGuard` gates recovery PER CHANNEL.** New `transientChannelKey()`
+  extracts the channel key from a CLOSED / scheduling-reconnect warning; the
+  transient is dropped only if that key later appears in a `[realtime] live`
+  message. A channel that drops and never returns keeps its warning and fails.
+- `status=CHANNEL_ERROR` and `status=TIMED_OUT` remain non-transient. They are
+  never dropped, recovered or not.
+
+**Docs**
+
+- **CLAUDE.md realtime section rewritten** against the live publication, with the
+  verification query inline so the next person can re-check in one paste.
+
+### Test results
+
+- `node --check` on the working-tree embedded JS - PASS
+- Publication verified by direct query against the live database
+  (`pg_publication_tables`), not from memory or from CLAUDE.md.
+- Corrupt-artifact question from v4.47 CLOSED: the `upload-artifact` step has no
+  `continue-on-error`, so a failed upload fails the job. Run #46 concluded
+  `success`, therefore the artifact uploaded cleanly. The zip errors in the failing
+  run attached to test 8 RETRY 1 - a truncated trace from a retrying test, not an
+  independent bug. Green suite, no retries, no recurrence.
+- Tagged v4.48 before push per tag-on-release.
+
+### Deferred
+
+- **The one that matters: are pre-auth channels re-authorized on sign-in?** See
+  Still open. If they are not, live sync for clients / classes / leads has been
+  silently dead since v4.46 and only the two-iPad check will reveal it.
+
+### iPad test checklist for v4.48 specifically
+
+- Load the site and sign in. Console shows `[realtime] live table-changes-<table>`
+  for clients, classes, leads and trainer_time_off. Four of them.
+- **Drop a class for sub coverage on one iPad. It should appear on a second iPad
+  WITHOUT reloading.** If it only shows up after a reload, live sync is broken and
+  the pre-auth channel question above is answered: badly.
+
+### The lesson
+
+The guard that caught v4.47 was itself broken, and it had been broken the whole
+time it was passing. It reported a real bug accurately while being incapable of
+reporting the specific bug it was written for.
+
+Two safety nets have now been found decorative in one day: this one, and CLAUDE.md
+itself, which confidently stated the opposite of what the database does. Both read
+as verified. Neither was. v4.42 even noticed the CLAUDE.md contradiction, wrote it
+down in a version entry, and moved on without fixing the file.
+
+Noticing is not fixing. Write it down AND go change the thing.
 
 ---
 

@@ -2327,6 +2327,15 @@
     if (!entry) return;
     entry.lastStatus = status;
     if (status === 'SUBSCRIBED') {
+      /* v4.48: unconditional per-channel liveness signal. The smoke suite's
+         consoleGuard needs to know a channel that emitted status=CLOSED came
+         back. It used to infer that from '[realtime] reconnected', but that
+         line only prints when backoffMs !== BACKOFF_INITIAL_MS, and
+         sweepReconnectChannels RESETS backoffMs to INITIAL before reconnecting.
+         So whether 'reconnected' prints depends on a race between the torn-down
+         channel's CLOSED and the new channel's SUBSCRIBED. This line always
+         prints, so recovery is observable per key with no race. */
+      console.info('[realtime] live ' + key);
       if (entry.backoffMs !== BACKOFF_INITIAL_MS) {
         console.info('[realtime] reconnected ' + key);
       }
@@ -31365,7 +31374,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.47 */
+/* v4.48 */
 </script>
 </body>
 </html>

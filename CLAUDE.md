@@ -131,17 +131,37 @@ network writes on unchanged data.
 
 ## Real-time subscriptions
 
-CRITICAL GOTCHA - most tables do NOT sync live. The app attaches
-postgres_changes listeners for 12 entity tables on the 'app-changes'
-channel, but the supabase_realtime publication contains only 2 tables
-(notifications and trainer_time_off, verified June 17). A listener
-receives nothing unless its table is in the publication. Net effect:
-only trainer_time_off syncs live on app-changes; notifications syncs
-live on its own per-trainer channel; every other entity converges only
-on reload (navigation / mount-fetch / wake sweep), not live push. To
-make a table sync live you must ADD IT TO the publication - attaching a
-client listener alone does nothing. Do not design a feature assuming a
-table pushes live without confirming it is in the publication.
+CRITICAL GOTCHA - a listener receives NOTHING unless its table is in the
+supabase_realtime publication. Attaching a client listener alone does nothing.
+To make a table sync live you must ADD IT TO the publication. Do not design a
+feature assuming a table pushes live without confirming it is in the
+publication.
+
+The publication (verified 2026-07-14 against the live database) contains
+exactly 5 tables:
+
+    classes, clients, leads, notifications, trainer_time_off
+
+The app matches this. PUBLISHED_TABLES (in the realtime useEffect) gates live
+channels to the 4 entity tables - clients, classes, leads, trainer_time_off -
+and notifications rides its own per-trainer channel. The other 8 entities stay
+in the `subs` list for the wake catch-up refetch but get NO channel, because a
+channel on an unpublished table receives nothing and only adds
+subscribe/sweep/reconnect traffic.
+
+Channels are PER TABLE ('table-changes-<table>'), not one shared channel.
+supabase-js v2 does not reliably fan multiple postgres_changes bindings out on
+one channel - the old single 'app-changes' channel reached SUBSCRIBED and
+delivered zero events (fixed v4.33).
+
+Prior versions of this file claimed the publication held only 2 tables
+(notifications, trainer_time_off, "verified June 17") and that clients /
+classes / leads converge only on reload. That was wrong, and it was wrong in
+the dangerous direction: those three DO push live. Corrected v4.48 by querying
+pg_publication_tables directly. Re-verify with:
+
+    select tablename from pg_publication_tables
+    where pubname = 'supabase_realtime' order by tablename;
 
 Full mechanics (reload chain, self-write echo tolerance, reconnect,
 wake sweeps, notifications channel, sync indicator) live in

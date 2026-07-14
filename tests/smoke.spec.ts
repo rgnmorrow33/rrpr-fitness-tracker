@@ -31,6 +31,7 @@ import { test as base, expect, type Page } from '@playwright/test';
  * ------------------------------------------------------------------ */
 const CONSOLE_ALLOWLIST: string[] = [
   '[realtime] subscribed',   // per-table subscribe confirmation on load (one per channel)
+  '[realtime] live',         // v4.48: per-channel SUBSCRIBED confirmation (drives recovery gating)
   '[realtime] reconnected',  // benign recovery confirmation after the sweep
   '[realtime] sweep',        // benign pageshow/visibility resubscribe trigger
   'migrate_',                // lazy package migrations - idempotent, log-only when clean
@@ -47,14 +48,28 @@ function isAllowed(text: string): boolean {
   return CONSOLE_ALLOWLIST.some((p) => text.startsWith(p));
 }
 
-/** Transient realtime warnings emitted by the on-load pageshow sweep.
- *  v4.33: channels are now per-table ('table-changes-<table>') rather than a
- *  single 'app-changes' channel, so the sweep emits one CLOSED warn per table. */
-function isRealtimeTransient(text: string): boolean {
-  return (
-    (text.startsWith('[realtime] table-changes-') && text.includes('status=CLOSED')) ||
-    text.startsWith('[realtime] scheduling reconnect')
-  );
+const REALTIME_LIVE_PREFIX = '[realtime] live ';
+
+/**
+ * If `text` is a benign on-load sweep transient, return the channel key it
+ * refers to; otherwise null. The key lets the guard decide recovery PER CHANNEL
+ * (v4.48) rather than with one global boolean that was always true.
+ *
+ * Two shapes, both emitted by the pageshow sweep:
+ *   [realtime] table-changes-clients status=CLOSED
+ *   [realtime] scheduling reconnect for table-changes-clients in 1000ms
+ *
+ * NOTE: status=CHANNEL_ERROR and status=TIMED_OUT are deliberately NOT
+ * transients. They are never dropped, recovered or not.
+ */
+function transientChannelKey(text: string): string | null {
+  const closed = /^\[realtime\] (\S+) status=CLOSED$/.exec(text);
+  if (closed) return closed[1];
+
+  const sched = /^\[realtime\] scheduling reconnect for (\S+) in \d+ms$/.exec(text);
+  if (sched) return sched[1];
+
+  return null;
 }
 
 type ConsoleMsg = { type: string; text: string };
@@ -80,18 +95,35 @@ const test = base.extend<{ consoleGuard: ConsoleMsg[] }>({
 
       await use(messages);
 
-      // The realtime channel is considered healthy if a "reconnected" (or the
-      // initial "subscribed") confirmation appears - i.e. the sweep recovered.
-      const realtimeRecovered = messages.some(
-        (m) => m.text.startsWith('[realtime] reconnected') || m.text.startsWith('[realtime] subscribed'),
+      // v4.48: recovery is now tracked PER CHANNEL, not as one global boolean.
+      //
+      // The old gate was decorative. It computed realtimeRecovered from
+      // '[realtime] reconnected' OR '[realtime] subscribed' - but the app logs
+      // '[realtime] subscribed <key>' unconditionally at channel open, BEFORE
+      // .subscribe() is even called. So realtimeRecovered was ALWAYS true, so
+      // every status=CLOSED and scheduling-reconnect warning was dropped
+      // unconditionally. The comment above the allowlist claimed "a genuine
+      // UNrecovered drop still fails the suite." It could not. That is the exact
+      // "subs actually drop in production" P1 this guard exists to catch.
+      //
+      // The app now emits '[realtime] live <key>' on every SUBSCRIBED. A
+      // transient for channel K is dropped only if K later came live. A channel
+      // that drops and never returns keeps its warning and fails the test.
+      const liveKeys = new Set(
+        messages
+          .filter((m) => m.text.startsWith(REALTIME_LIVE_PREFIX))
+          .map((m) => m.text.slice(REALTIME_LIVE_PREFIX.length).trim()),
       );
 
       const offenders = messages
         .filter((m) => m.type === 'error' || m.type === 'warning' || m.type === 'pageerror')
         .filter((m) => !isAllowed(m.text))
-        // Drop the benign on-load sweep transient ONLY when the channel
-        // actually recovered. An unrecovered drop (no reconnected) still fails.
-        .filter((m) => !(isRealtimeTransient(m.text) && realtimeRecovered));
+        // Drop the benign on-load sweep transient ONLY for a channel that
+        // actually came back live. An unrecovered drop still fails.
+        .filter((m) => {
+          const key = transientChannelKey(m.text);
+          return !(key !== null && liveKeys.has(key));
+        });
 
       expect(
         offenders,
