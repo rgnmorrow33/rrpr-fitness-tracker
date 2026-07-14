@@ -149,6 +149,40 @@ pass - do NOT touch app code for them mid-feature.
   `trainer_id` row in `trainers`, or route Front Desk into a separate
   notification queue. See ARCHITECTURE.md section 4 for the gap.
 
+## NEEDS VERIFICATION ON A REAL DEVICE
+
+Open questions that code review cannot settle. Each one names the exact check
+that answers it. Do not close any of these by reasoning about them.
+
+- **P1 - Are pre-auth realtime channels re-authorized on sign-in?**
+  (opened 2026-07-14, v4.48)
+
+  The realtime useEffect has `[]` deps, so it mounts once while signed OUT and
+  opens all 4 entity channels (clients, classes, leads, trainer_time_off) as
+  **anon**. Since v4.46, RLS denies anon on every one of those tables.
+  `realtime.setAuth()` fires on the auth flip and SHOULD re-authorize the joined
+  channels. Nobody has confirmed that it does.
+
+  If it does not, **live cross-device sync has been silently dead since the
+  v4.46 flip.** The app would look completely fine: data still converges via
+  reload, mount-fetch, and the wake sweep. Two trainers on two iPads would just
+  never see each other's changes in real time, and nothing would log an error.
+
+  This is not theoretical. All three of clients/classes/leads ARE in the
+  supabase_realtime publication (verified 2026-07-14), so they are supposed to
+  push live.
+
+  THE CHECK: drop a class for sub coverage on one iPad. It must appear on a
+  second, already-open iPad **without reloading it**. If it only appears after a
+  reload, channels are not re-authorizing.
+
+  THE FIX IF IT FAILS: add `authVersion` to the realtime useEffect's dependency
+  array so channels are torn down and reopened WITH a token on the auth flip.
+  Note this changes channel lifecycle and interacts with the `_activeChannels`
+  reconnect registry - plan it, do not patch it blind.
+
+---
+
 ## Subscription performance
 
 - The per-entity realtime debounce is set at 100ms. Tuning may be needed if
