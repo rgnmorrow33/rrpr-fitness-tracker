@@ -7196,6 +7196,19 @@
         /* Patch X: 100ms trailing-edge debounce per entity. A burst of inserts
            on one table coalesces into one reload (preserved per-channel). */
         var reload = debounce(function(){
+          /* Fix (v4.47): signed out (or kiosk), identity RLS (0005) denies every
+             table in `subs` except trainers (readable via trainer_directory).
+             This effect mounts with [] deps - i.e. while signed OUT - and
+             registers a pageshow listener. pageshow fires on every normal
+             navigation, not just BFCache restore, so wakeCatchUp() fired all 12
+             reloaders on EVERY page load of the login screen: 11 guaranteed
+             42501s per device, all day, plus the same burst on every wake.
+             loadAll() already gates on isStaff() for exactly this reason; the
+             reload path did not. Gating HERE (not in wakeCatchUp) covers BOTH
+             call paths, since the channel event handler funnels through reload()
+             too. No data is missed on sign-in: loadAll re-runs on [authVersion]
+             and pulls every entity fresh. */
+          if (!isStaff()) return;
           storage[entity].load().then(function(fresh){
             if (fresh == null) return;
             /* Fix A (v4.41): hydrate the dirty-check ref BEFORE setState so the
@@ -31352,7 +31365,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.46 */
+/* v4.47 */
 </script>
 </body>
 </html>

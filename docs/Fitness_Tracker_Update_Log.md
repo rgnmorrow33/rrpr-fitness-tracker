@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.46** (security pass, deployed July 14, 2026)
+**Live version: v4.47** (RLS fallout fix, deployed July 14, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,9 +13,14 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 14, 2026
 
-- **Live version: v4.46**, tagged and pushed; Netlify prod (pardfitnesstracker2)
-  auto-deployed. Tracker file: 31,358 lines / 1.4 MB. `node --check` on the
+- **Live version: v4.47**, tagged and pushed; Netlify prod (pardfitnesstracker2)
+  auto-deployed. Tracker file: 31,371 lines / 1.4 MB. `node --check` on the
   embedded JS: PASS.
+- **v4.47 closed the first piece of v4.46 fallout.** The post-deploy smoke suite
+  went fully red (9 of 9 views) within hours of the v4.46 flip. Not one was an
+  assertion failure - every view rendered. The realtime `reload()` path had no
+  `isStaff()` gate, so the signed-out login screen fired all 12 entity reloaders
+  on every page load and every wake, and 11 came back 42501. Gated. Suite green.
 - **The public exposure is closed.** Verified from a signed-out browser against
   the live production site after deploy:
 
@@ -50,12 +55,144 @@ Newest version at the top; append new sections above the older ones.
   attendance live inside JSONB blobs on the parent row (ADR-0004), so "log a
   session" IS "UPDATE the whole clients row". Unwinding that is a separate
   project. Acceptable for an internal team tool; revisit before APC.
+- **The smoke suite's realtime recovery gate is decorative.** `consoleGuard`
+  computes `realtimeRecovered` from `[realtime] subscribed` OR
+  `[realtime] reconnected`, but `subscribeWithReconnect` logs
+  `[realtime] subscribed` unconditionally at channel open, BEFORE `.subscribe()`
+  is called. So `realtimeRecovered` is always true, so every `status=CLOSED` and
+  `scheduling reconnect` warning is dropped unconditionally. The comment claims
+  "a genuine UNrecovered drop still fails the suite." It cannot. Gate recovery on
+  `[realtime] reconnected` only. Found 2026-07-14 during the v4.47 pass.
 - `intake-import/README.md` still documents the retired no-write posture.
   SCHEMA.md autogen regions miss `pt_discharge` and `intake_paperwork`.
   Test-FMS cleanup SQL is committed but never run.
 - `scripts/staging/rls_staging_test.py` asserts `PASS anon can select clients`,
   which was correct for the retired 0003 model and is a critical failure under the
   shipped model. `rls_identity_test.py` supersedes it. Retire the old one.
+
+---
+
+## v4.47 - July 14, 2026
+
+The first piece of v4.46 fallout. The security pass locked the database down
+correctly; it did not teach the whole app that it was locked down. The realtime
+reload path kept reading tables that anon can no longer touch, from the one
+screen where nobody is signed in - the login screen, which is where every iPad
+sits most of the day.
+
+### Trigger
+
+The post-deploy smoke suite went red on all 9 admin views within hours of the
+v4.46 flip. The failure list read like nine separate regressions. It was one bug,
+and the suite was reporting it correctly.
+
+### Goal
+
+A signed-out iPad sitting on the login screen issues zero requests the database
+is guaranteed to refuse.
+
+### File version
+
+v4.47 - 31,371 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+Nine failing tests, zero failing assertions. Every view rendered. Every failure
+came from the `consoleGuard` auto-fixture, which fails any test that prints
+console output outside the allowlist. The console was printing this, eleven times
+over, on every test:
+
+    Subscription reload failed for clients: {code: 42501,
+      hint: ...GRANT SELECT ON public.clients TO anon,
+      message: permission denied for table clients}
+
+The role in those errors is **anon**, not `authenticated`. Post-login the custom
+`global.fetch` attaches the JWT, so these were firing while signed OUT.
+
+The realtime subscription effect ends with `}, []);`. Empty deps: it mounts once,
+while signed out, and never re-runs on the auth flip. Inside it, `wakeCatchUp()`
+fires all 12 entity reloaders with no gate, and it is wired to three listeners -
+`online`, `visibilitychange`, and `pageshow`.
+
+**`pageshow` fires on every normal navigation, not just BFCache restore.** So this
+was never a wake-only edge case. Every single page load of the login screen fired
+12 reads as anon. Eleven came back 42501; the twelfth (`trainers`) survives
+because anon can read it through the `trainer_directory` view. The report showed
+exactly 11 denied tables. That is the whole mystery.
+
+`loadAll()` already gates on `isStaff()` - v4.46 added that gate for precisely
+this reason. The `reload()` path did not get one. Same blind spot as v4.41, where
+`reload()` was also the function that missed what `loadAll()` already did.
+
+### Changes
+
+**App**
+
+- **`reload()` now gates on `isStaff()`** (one line, inside the debounced body).
+  Gating there rather than in `wakeCatchUp()` covers BOTH call paths, since the
+  postgres_changes event handler funnels through `reload()` too. No data is missed
+  on sign-in: `loadAll` re-runs on `[authVersion]` and pulls every entity fresh.
+
+**Tests**
+
+- **New smoke test `0. signed-out login screen fires no RLS-denied reads`.** Loads
+  the login screen signed out, dispatches all three wake events by hand (rather
+  than hoping the browser emits one), and asserts zero `permission denied` /
+  `Subscription reload failed` console output. The `consoleGuard` fixture would
+  also catch a regression here, but as an anonymous wall of noise. This test names
+  the bug.
+
+### Test results
+
+- `node --check` on the embedded JS - PASS
+- Working-tree JS extracted and checked directly, NOT via the pre-push gate. The
+  gate checks HEAD (the content a push would ship), so running it against an
+  uncommitted change validates the wrong file. See The lesson.
+- Tagged v4.47 before push per tag-on-release.
+
+### Deferred
+
+- **The smoke suite's realtime recovery gate is decorative.** See Still open.
+- **Corrupt report artifact.** Both zip errors in the failing run
+  (`End of central directory record signature not found`) attach to test 8 retry 1
+  specifically, as test errors with an `error-context` attachment - not to the
+  `upload-artifact` step, whose config is correct. Reads as a truncated trace on
+  one retry, not a systematic break. Re-check on the next run; if it recurs on
+  test 8 and only test 8, dig then.
+- **Anon realtime channels open pre-auth.** The four published-table channels are
+  opened while signed out, as anon. Evidence says this is benign: `CHANNEL_ERROR`
+  is not matched by `isRealtimeTransient`, so it would have surfaced as an
+  offender, and ZERO `[realtime]` errors appear anywhere in the failing run. The
+  channels join, deliver nothing under RLS, and `realtime.setAuth()` re-authorizes
+  them on sign-in. What is NOT proven from the report: that events actually flow
+  on a channel opened pre-auth. Verify with the two-iPad sub-coverage check in the
+  v4.46 checklist.
+
+### iPad test checklist for v4.47 specifically
+
+- Load the site signed out and open devtools. The console should be quiet. Before
+  this fix it filled with `permission denied for table` on every load.
+- Reload the page three or four times signed out. Still quiet.
+- Sign in. Data loads normally (this is `loadAll` on the auth flip, not `reload`).
+- Drop a class for sub coverage on one iPad, claim it on a second. Live sync still
+  works - the gate must not have broken the post-auth reload path.
+- Background the app, wait, bring it back. The wake catch-up still converges.
+
+### The lesson
+
+The smoke suite did its job perfectly and still nearly got blamed. Nine red views
+looked like nine regressions and read like a stale test suite that needed
+updating to match the new auth model. The correct move was the opposite: not one
+assertion had failed, the app was fine, and the suite was reporting a real bug in
+the app with total accuracy.
+
+The tempting fix was to add `42501` to the console allowlist and go green. That
+would have deleted the only thing that caught this, and it is the same move v4.46
+warned about: *"the linter would have gone green and the database would have
+stayed wide open. That is the worst outcome available: believing you are done."*
+
+When the tests go red right after a big change, the reflex is that the tests are
+stale. Check which assertion failed before you believe it. Here, none had.
 
 ---
 

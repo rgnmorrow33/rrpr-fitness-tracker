@@ -140,6 +140,59 @@ async function clickNav(page: Page, label: string): Promise<void> {
  * Tests - admin-reachable views (1111 / Front Desk)
  * ------------------------------------------------------------------ */
 
+/**
+ * v4.47 regression. The signed-out login screen must not read any table that
+ * identity RLS (migration 0005) denies to anon.
+ *
+ * The bug: the realtime subscription effect mounts with [] deps - i.e. while
+ * signed OUT - and registers a pageshow listener. pageshow fires on EVERY
+ * normal navigation, not just BFCache restore, so wakeCatchUp() fired all 12
+ * entity reloaders on every single page load of the login screen. Eleven came
+ * back 42501 (the twelfth, trainers, is readable via the trainer_directory
+ * view). That is 11 guaranteed-to-fail requests per device per load, all day,
+ * plus the same burst on every wake - and it is what took the whole suite red
+ * on 2026-07-14 through the consoleGuard fixture.
+ *
+ * loadAll() already gated on isStaff(); reload() did not. This asserts the gate
+ * stays put. It does NOT rely on the browser happening to emit a wake event -
+ * it fires all three wake paths by hand.
+ *
+ * The consoleGuard fixture would also catch a regression here, but as an
+ * anonymous wall of noise. This test names the bug.
+ */
+test('0. signed-out login screen fires no RLS-denied reads', async ({ page }) => {
+  const denied: string[] = [];
+  page.on('console', (msg) => {
+    const text = msg.text();
+    if (
+      text.includes('permission denied for table') ||
+      text.startsWith('Subscription reload failed')
+    ) {
+      denied.push(text);
+    }
+  });
+
+  await page.goto('/');
+  await expect(page.getByTestId('view-login')).toBeVisible();
+
+  // Fire every wake path that calls wakeCatchUp(). onVisible() re-reads
+  // document.visibilityState itself, so dispatching the bare event is enough.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('pageshow'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('online'));
+  });
+
+  // reload() is debounced 100ms; give the (blocked) requests room to land.
+  await page.waitForTimeout(1500);
+
+  expect(
+    denied,
+    'Signed-out page issued reads that RLS denies. reload() lost its isStaff() ' +
+      'gate (v4.47):\n' + denied.map((d) => `  ${d}`).join('\n'),
+  ).toEqual([]);
+});
+
 test('1. login lands on admin overview', async ({ page }) => {
   await loginAsFrontDesk(page);
   await expect(page.getByTestId('view-admin-overview')).toBeVisible();
