@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.45. Staged and not yet deployed: v4.46 (security).**
+**Live version: v4.46 (security pass, deployed July 14, 2026).**
 
 Newest version at the top; append new sections above the older ones.
 
@@ -11,7 +11,47 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - audited July 13, 2026
+## Current standing - v4.46 DEPLOYED July 14, 2026
+
+- **The exposure is closed.** Verified from a signed-out browser against the live
+  production site immediately after deploy:
+
+      await supabaseClient.from('clients').select('*')
+      -> BLOCKED: permission denied for table clients
+
+  That is the exact line that returned all 15 client records, including 4 PAR-Q
+  health questionnaires, earlier the same day. Reads of `leads` and anon writes
+  to `clients` are blocked the same way. `trainer_directory` (17 names, no PINs,
+  no hashes) is the only thing anyone on the internet can now see.
+- Data intact through the flip: 15 clients, 10 leads, 132 classes, 21 trainers.
+- 13 plaintext PINs destroyed and bcrypt-hashed. Admin PIN hashed. RLS enabled on
+  19 tables. Zero `allow all` policies survive. Supabase linter: zero
+  `rls_disabled_in_public` errors.
+- Both public member tiles (Weight Room Orientation, Book a Consultation) render
+  and work, on a write-only kiosk token that can read nothing.
+- Migrations applied to production: 0002, 0004, 0005, 0006, 0007.
+  **0003 was retired and never run.**
+- **SEVEN bugs were caught before or during this go-live.** Five in staging (the
+  `allow all` policies, the crypt search_path lockout, the rest.headers token
+  failure, the empty-array upsert data-loss bug, the kiosk regression) and one
+  during the flip itself (0007: PUBLIC execute on the PIN setters, caught by the
+  Supabase linter after I had asserted it was revoked). Every one of them was
+  found by actually running the thing rather than reasoning about it.
+
+### STILL OPEN - do this before 5am
+
+- **`SUPABASE_SERVICE_ROLE_KEY` must be set on the machine running the 5am intake
+  and 8am purchase imports.** anon no longer has write grants, so both pipelines
+  will fail until this is done. Same place `SUPABASE_ANON_KEY` lives today; key
+  from prod Project Settings > API.
+- Rotate the Supabase key pasted into chat on July 10. Now that RLS is on, the
+  anon key is genuinely safe to be public, so this is hygiene rather than urgency.
+- Row ownership remains app-side (`ctx.can()`), not enforced by RLS. Structural:
+  sessions/packages live in JSONB on the parent row. Separate project.
+
+---
+
+## Superseded standing - audited July 13, 2026
 
 - **Live version is still v4.45.** Nothing in v4.46 has touched production. The
   production database was audited on July 13 and is byte-for-byte where it
@@ -46,7 +86,7 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## v4.46 - July 13, 2026 - STAGED, NOT DEPLOYED
+## v4.46 - July 14, 2026 - DEPLOYED
 
 The security pass. Takes the database from "anyone on the internet can read every
 client record" to "you must be a signed-in team member, and the database checks."
