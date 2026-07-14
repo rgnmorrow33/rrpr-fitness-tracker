@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Current version: v4.45**
+**Live version: v4.45. Staged and not yet deployed: v4.46 (security).**
 
 Newest version at the top; append new sections above the older ones.
 
@@ -11,7 +11,277 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - audited July 10, 2026
+## Current standing - audited July 13, 2026
+
+- **Live version is still v4.45.** Nothing in v4.46 has touched production. The
+  production database was audited on July 13 and is byte-for-byte where it
+  started: 13 plaintext PINs, 15 clients, 12 policies, RLS off on all 17 tables.
+- **v4.46 is the security pass. Fully staged, tested, not shipped.** It closes the
+  exposure this log has been escalating since July 10. It ships as two deploys, in
+  order, and the order is not optional (see the v4.46 entry).
+- **The exposure, stated plainly, because it is still live right now:** the anon
+  key is committed in the app, the app is public, the repo is public, and RLS is
+  off. Anyone who opens the production URL and devtools can read and write every
+  table. That currently includes 15 client records (all 15 with email and phone,
+  4 with PAR-Q health answers, 7 with session history), 10 leads, and 13 team PINs
+  in plaintext.
+- **Decision made July 13: client data must not be publicly viewable.** This
+  retires the previously-staged plan, which enabled RLS but kept
+  `anon USING (true)` on the operational tables and deferred real per-user auth to
+  the APC gate (April 2027). Under that plan `clients` stayed world-readable after
+  go-live. Migrations `0004` + `0005` replace it with identity-based policies.
+- **Two live-fire bugs were found in the previously-staged work.** Either would
+  have caused an incident on go-live morning. Both are written up in the v4.46
+  entry. Neither would have been caught without actually running the migrations,
+  which is the lesson.
+- Both import pipelines still auto-write to prod through the public anon key. They
+  move to `service_role` as part of v4.46 Deploy 1.
+- **Credential hygiene:** the Supabase key pasted into chat on July 10 is still
+  unrotated. Note that rotation alone fixes nothing while RLS is off - the key
+  ships to every browser regardless. RLS is what makes the key safe to publish.
+- Still open from July 10: `intake-import/README.md` documents the retired
+  no-write posture; `purchase-import/` has no README; no ADR captures either
+  auto-write pipeline; SCHEMA.md autogen regions miss `pt_discharge` and
+  `intake_paperwork`; Test-FMS cleanup SQL is committed but never run.
+
+---
+
+## v4.46 - July 13, 2026 - STAGED, NOT DEPLOYED
+
+The security pass. Takes the database from "anyone on the internet can read every
+client record" to "you must be a signed-in team member, and the database checks."
+Hashes every PIN, moves PIN verification server-side, gives the database a real
+identity to key on, and enables RLS with policies that key on that identity rather
+than on `true`.
+
+Nothing here has touched production. Two bugs in the previously-staged work were
+found by running it for real against a throwaway Supabase branch. Both would have
+caused a production incident.
+
+### Trigger
+A review of the Supabase security posture. The audit found no Supabase Auth in the
+codebase at all - no `supabase.auth.*` call anywhere - which meant `auth.uid()` was
+always null and RLS had no identity to key on. "Turn RLS on" was never actually
+available as a move; the real work was giving the database an identity first.
+
+### Goal
+Client names, emails, phones, and PAR-Q health answers are not readable by the
+public internet. The team signs in the way they always have (tap name, type PIN, on
+a shared iPad) and notices nothing different.
+
+### File version
+v4.46 - staging file 31,265 lines, 1.40 MB
+(`staging/RoundRock_Fitness_Tracker.staging.html`). Prod file untouched at v4.45 /
+30,966 lines.
+
+### The two bugs found
+
+- **The `allow all` policies. RLS would have been cosmetic.** Twelve tables already
+  carried a policy named `allow all` (`FOR ALL TO anon USING (true) WITH CHECK
+  (true)`), inert only because RLS was off. `0003_rls_policies.sql` never dropped
+  them. Postgres OR's permissive policies together, so enabling RLS would have
+  activated them and changed nothing: anon keeps full read/write, DELETE included.
+  The Supabase linter would have gone green and the database would have stayed wide
+  open. Reproduced on a throwaway table: with `allow all` sitting alongside
+  `anon_select ... USING (key <> 'admin_pin')`, anon still read the admin_pin row;
+  dropping `allow all` and changing nothing else, anon read zero. Without the fix,
+  three of that migration's four stated wins silently failed (hard-deletes-closed,
+  admin_pin-unreachable, queue-closed). Fixed with a STEP 0 drop block plus a
+  `DO $$` assertion that aborts the migration if any `allow all` survives.
+
+- **The `crypt()` search_path bug. Total, unrecoverable sign-in lockout.** The four
+  PIN functions in `0002_pin_hashing.sql` declared `SET search_path = public,
+  pg_temp`, but `pgcrypto` is installed in the `extensions` schema on Supabase
+  (verified on prod and on a test branch), so `crypt()` is not resolvable at
+  runtime. The migration *appears* to succeed: the backfill works (migrations run
+  with a wide search_path), `UPDATE trainers SET pin = NULL` destroys every
+  plaintext PIN, and it commits green. Then the first person taps their tile and
+  gets `function crypt(text, text) does not exist`.
+  `rls_emergency_rollback.sql` does not save you - it explicitly assumes "the PIN
+  RPCs keep working," and they do not; the failure is independent of RLS. The old
+  HTML cannot be redeployed either, because it compares plaintext PINs that step 2
+  just deleted. Net: every production iPad locked out, no path back, recoverable
+  only by hand-writing SQL under pressure, on a morning chosen because Selisa was
+  available. Fixed by adding `extensions` to the search_path, plus a SELF-TEST
+  block that calls the RPCs for real before COMMIT, so a broken PIN path can never
+  reach production silently again.
+
+### Two more bugs, found only in a real browser
+
+The SQL layer was green and the migrations were provably correct. Both of these
+still got through, and neither would ever have surfaced without loading the app
+against a locked-down database.
+
+- **The token never reached PostgREST.** The first cut of the app wiring set
+  `supabaseClient.rest.headers.Authorization`, on the assumption that supabase-js
+  reads that object at query time. It does not. Every request kept going out as
+  anon and the app died on `permission denied for table trainers ... TO anon`.
+  Fixed by injecting the token through a custom `global.fetch` passed to
+  `createClient` - public, supported API, runs on every PostgREST and RPC call,
+  reads the token live, so an auth flip needs no client recreation and orphans no
+  realtime channel.
+
+- **Spurious empty-array upserts. This one was a data-loss bug.** The entity
+  dirty-check refs initialise to `useRef(null)`, and `_saveIfDirty` treats
+  `null` vs `[]` as dirty. The new pre-auth `loadAll` path hydrated only
+  `trainerProfilesRef` and returned early, so the instant `loading` flipped false
+  the app fired a SAVE for the other twelve entities - upserting **empty arrays
+  over the server's data**. RLS is the only reason nothing happened; the console
+  filled with `Save clients failed: permission denied`. On production, where anon
+  can still write, those upserts would have LANDED. Fixed: the pre-auth path now
+  hydrates all thirteen refs, and doubles as the sign-out flush (entities reset to
+  a shared `EMPTY` reference the refs also point at, so the identity check
+  short-circuits and no save fires).
+
+  Worth stating plainly: the lockdown caught a data-loss bug that the open
+  database would have silently executed.
+
+### Changes
+
+**Deploy 1 - PIN hashing and pipeline lockdown (tested, ready)**
+
+- **`migrations/0002_pin_hashing.sql`** (fixed) - bcrypt-hashes every PIN into a
+  `trainer_pins` table with no anon access, hashes the Front Desk PIN in place,
+  moves verification into `verify_trainer_pin` / `verify_admin_pin` RPCs with a
+  5-failures-in-15-minutes lockout, and drops the plaintext `trainers.pin` column.
+  Now carries the search_path fix and the self-test.
+- **`migrations/0003_rls_policies.sql`** (fixed) - adds the STEP 0 `allow all` drop
+  and the abort assertion. **Superseded by 0005 and should NOT be run** under the
+  July 13 decision: every policy in it is `anon USING (true)`, which leaves
+  `clients` world-readable. Kept for history.
+- **Both import pipelines** move off the anon key to `service_role`.
+
+**Deploy 2 - identity RLS (the pass that actually closes client data)**
+
+- **`migrations/0004_auth_identity.sql`** (new) - gives the database an identity.
+  `sign_in(trainer_id, pin)` delegates the PIN check to the existing
+  `verify_trainer_pin` (inheriting the lockout for free) and returns a signed
+  12-hour JWT carrying `trainer_id` and `role_tier`. HS256, signed in Postgres over
+  pgcrypto's `hmac()`, with the project JWT secret held in Supabase Vault. **No
+  Edge Function**: no Deno, no `supabase functions deploy`, no second deploy target,
+  no function secret to rotate. Everything stays in a migration, which matches how
+  this repo works. Ships `app_trainer_id()`, `app_role_tier()`, `app_is_admin()`,
+  `app_is_signed_in()` claim accessors, all fail-closed.
+- **`sign_in_front_desk(pin)`** (new) - Front Desk is a shared seat with no row in
+  `trainers`, so `sign_in(trainer_id, pin)` had nothing to key on. Without this,
+  switching on identity RLS would have locked Front Desk out of its own app. Mints
+  a token against the nil UUID with `role_tier=admin`.
+- **`migrations/0005_rls_identity_policies.sql`** (new) - replaces 0003's anon
+  policy set. Every policy keys on the JWT claims. anon loses all table grants.
+  SELECT/INSERT/UPDATE require a signed-in team member; DELETE requires admin;
+  `settings` (which holds the admin PIN hash) becomes admin-only, closing a
+  self-escalation path; notifications are per-trainer.
+- **`trainer_directory` view** (new) - the chicken-and-egg fix. You must pick your
+  name before you can have a token, but you cannot read `trainers` without one. A
+  definer view exposing names only (no PIN, no hash, no audit_log). It is the single
+  thing anon may read anywhere in the database. Includes the legacy `role` column
+  deliberately: omit it and the pre-auth roster load hydrates every profile with
+  `role='trainer'`, and the next Manage Team save silently downgrades every admin's
+  role column.
+- **`set_trainer_pin` / `set_admin_pin` become admin-gated.** 0002 shipped these
+  with the note "not server-gated beyond the anon key ... tighten with real auth."
+  This is that tightening. Without it, anyone holding the public key could reset any
+  team member's PIN and sign in as them. A `service_role` branch is the bootstrap
+  and recovery door - without it, admin-only is a deadlock waiting for the day every
+  admin forgets their PIN.
+- **App: auth token module** - carries the JWT on both surfaces that need it.
+  PostgREST (by overwriting `client.rest.headers.Authorization`, which supabase-js
+  re-reads per call, so no client recreation and no orphaned channels) and Realtime
+  (via `realtime.setAuth`, which is enforced separately - miss it and
+  `notifications` / `trainer_time_off`, the only two tables in the
+  supabase_realtime publication, silently stop delivering with no error anywhere).
+- **App: `loadAll` re-runs on auth change and has a pre-auth path.** Signed out,
+  every table except `trainer_directory` is denied, so the old unconditional
+  `Promise.all` would reject on the first blocked table and drop the user on the
+  "Couldn't connect to the server" error screen instead of the login screen. The app
+  would look broken to someone who simply had not signed in yet.
+- **App: sign-out clears the token, centrally in `setSession`.** There are a dozen
+  `setSession(null)` call sites. Leave the token behind at any one of them and the
+  next person to pick up the iPad inherits the previous user's database credential
+  for up to 12 hours.
+- **App: token expiry watchdog.** An iPad left signed in overnight would keep
+  rendering as signed-in after the 12-hour token lapsed, while every read returned
+  empty and every write was rejected with no error the user ever sees. A trainer
+  could log a whole morning of sessions into a void. Now it signs out loudly and
+  asks for the PIN again. Checked on an interval and on wake, because a sleeping
+  iPad's timers do not fire.
+
+### Test results
+
+Verified against a real Supabase branch seeded to mirror prod's exact starting
+state (12 `allow all` policies, plaintext PINs, plaintext admin PIN):
+
+- `node --check` on the embedded JS - PASS
+- **Full three-seat verification in a real browser against a real database**
+  (Chrome, app served from `staging/local-branch.html` against a Supabase branch):
+
+  | | stranger (public key) | trainer | admin |
+  |---|---|---|---|
+  | read clients | DENIED | yes | yes |
+  | write clients | DENIED | yes | yes |
+  | delete client | DENIED | DENIED | yes |
+  | read admin PIN hash | DENIED | DENIED | yes |
+  | reset a PIN | forbidden | forbidden | yes |
+  | sign-in roster | yes (names only) | yes | yes |
+
+  Same code, same public key, same browser. Production today answers "yes" to
+  every cell in the stranger column.
+- `sign_in` wrong PIN returns `wrong` and issues no token - PASS
+- The anon seat, over real PostgREST: `anon CANNOT read clients` (permission
+  denied), `anon CAN read trainer_directory` (login screen works) - PASS
+- The trainer seat: reads clients, inserts, updates - PASS. Cannot DELETE, cannot
+  read `settings`, cannot reset another PIN, cannot see another trainer's
+  notifications - PASS
+- The admin seat: reads `settings`, deletes clients, resets PINs - PASS
+- `sign_in` mints a 3-segment JWT; claims decode to `role=authenticated`,
+  `trainer_id`, `role_tier`, 12-hour exp - PASS
+- Lockout: 5 failures returns `locked`, and a *correct* PIN while locked still
+  returns `locked` (it does not leak) - PASS
+- Deploy 1 over real PostgREST via `rls_staging_test.py`: 27 passed. anon cannot
+  read admin_pin / trainer_pins / pin_attempts / packages / package_participants /
+  queue - PASS. Both bug fixes confirmed through the real HTTP layer, not just SQL.
+- Production confirmed untouched after all of it: 13 plaintext PINs, 15 clients,
+  12 policies, 0 tables with RLS on
+
+### Deferred
+
+- **Row ownership.** Any signed-in trainer can still update any client's row.
+  Structural, not laziness: sessions, packages, and attendance live inside JSONB
+  blobs on the parent row (ADR-0004), so "log a session" IS "UPDATE the whole
+  clients row." RLS cannot tell that apart from an edit to someone else's client.
+  Unwinding the JSONB model is a separate project. Intra-team boundaries stay in
+  `ctx.can()`. This is an acceptable trust boundary for an internal team tool; it was
+  never acceptable for the open internet, which is what this pass closes.
+- **Class structure edits.** Marking attendance and editing class structure are both
+  UPDATE on the same row, so RLS cannot distinguish them. Structure-edit remains an
+  app-side `ctx.can()` gate.
+- Anon key rotation (worth doing at cutover for hygiene, but it changes nothing on
+  its own - the key is public by design and ships in the HTML either way; RLS is what
+  makes it safe to publish).
+- README + ADR for both auto-write pipelines.
+- `rls_staging_test.py` still asserts `PASS anon can select clients`, correct for the
+  Deploy 1 model and a critical failure under the Deploy 2 model.
+  `rls_identity_test.py` supersedes it. Retire the old one after cutover.
+
+### iPad test checklist for v4.46 specifically
+
+- Load the site signed out. The trainer name list appears (that is
+  `trainer_directory`). Open devtools and try to query `clients` - expect zero rows
+  or a permission error. **If that returns client data, the lockdown failed. Stop and
+  roll back.**
+- Sign in with a PIN. Wrong PIN five times trips the lockout toast, and the *correct*
+  PIN still says locked until it clears.
+- Log a PT session, sign it, reload the page. It survives.
+- Drop a class for sub coverage on one iPad, claim it on a second. Confirms realtime
+  is still authorized (`realtime.setAuth` is wired).
+- As a non-admin, try to delete a client. The app blocks it, and so does the database.
+- As an admin, change a team member's PIN in Manage Team, then sign in with it.
+- Leave an iPad signed in overnight. Next morning it should ask for the PIN again
+  rather than silently failing every write.
+
+---
+
+## Standing as of July 10, 2026 (superseded by the July 13 audit above)
 
 - **Live version: v4.45**, tagged and pushed; Netlify prod (pardfitnesstracker2)
   auto-deployed. Tracker file: 30,966 lines / 1.32 MB. `node --check` on the

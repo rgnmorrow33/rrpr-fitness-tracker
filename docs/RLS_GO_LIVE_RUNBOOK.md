@@ -57,7 +57,88 @@ before go-live.
    - Log a session, add a lead, check the WRO board (anon writes under RLS).
 6. Do NOT commit the staging keys. The placeholders stay placeholders in git.
 
-## Phase 2 - Go-live (after Hawaii, calendared, Selisa on deck)
+## Phase 2 - GO-LIVE (SUPERSEDED - use this, not the older list below)
+
+Rewritten 2026-07-14. The original sequence ran 0002 then 0003. **0003 is retired**
+(every policy in it is `anon USING (true)`, which leaves `clients` world-readable).
+The live sequence is 0002 -> 0004 -> 0005.
+
+Everything below is verified: three-seat browser test against a Supabase branch,
+plus the SQL acceptance suite. Nothing has touched production.
+
+### Before you start
+
+- Pick a LOW-TRAFFIC window. Sign-in is broken for about 60-90 seconds between
+  step 3 and step 5. On a Tuesday mid-morning, the team is on the floor.
+- Selisa available to hard-reload the iPads.
+- `sql/rls_emergency_rollback.sql` open in a second SQL editor tab.
+- `git status` clean.
+
+### The sequence. Order is not optional.
+
+**1. Put the PRODUCTION JWT secret in Vault.**
+Dashboard > project `ofezaezijafglyjmisgz` > Project Settings > JWT Keys >
+Legacy JWT Secret. Reveal, copy. Then in the prod SQL editor:
+
+    select vault.create_secret('<the real secret>', 'app_jwt_secret');
+
+**2. PROVE the secret is right. Do not skip.**
+
+    select verify_jwt_secret('<paste the prod anon key>');
+
+Must return `true`. A wrong secret does not error: sign_in mints tokens, PostgREST
+rejects every one, and the app comes up looking fine with every screen empty and no
+error anywhere. This happened once already on the branch. Ninety seconds here saves
+an hour of confusion.
+
+**3. Run the migrations, prod SQL editor, in this order:**
+
+    migrations/0002_pin_hashing.sql        -- plaintext PINs are destroyed here
+    migrations/0004_auth_identity.sql      -- sign_in() + claim accessors
+    migrations/0005_rls_identity_policies.sql  -- anon loses everything
+
+Each has a self-test that aborts rather than committing something broken.
+**Sign-in is now broken until step 5.** The deployed app still speaks the old
+plaintext-PIN protocol and the PINs no longer exist.
+
+**4. Do NOT run `migrations/0003_rls_policies.sql`.** Retired. Kept for history.
+
+**5. Ship the app.**
+
+    git push
+    git tag v4.46 && git push origin v4.46
+
+Netlify auto-deploys in ~30s. Sign-in works again the moment it lands.
+
+**6. Selisa: HARD-reload every iPad.** The wake sweep reloads data, not code. A
+normal refresh may serve the cached bundle.
+
+**7. Move the importers to `service_role`.** Set `SUPABASE_SERVICE_ROLE_KEY` in the
+environment on the machine running the 5am/8am scheduled tasks (same place
+`SUPABASE_ANON_KEY` lives today). Key from prod Project Settings > API.
+**If you skip this, tomorrow's 5am intake import and 8am purchase import both fail
+silently** - anon has no write grants anymore.
+
+**8. Verify, from a signed-out browser on the production URL:**
+
+    await supabaseClient.from('clients').select('*')
+
+Must be denied. If it returns client rows, the lockdown failed. Roll back.
+
+**9. Close it out.** Update-log entry + version tag per house rules.
+
+### Rollback
+
+`sql/rls_emergency_rollback.sql` disables RLS and re-grants anon. Note it does NOT
+un-hash the PINs, and does not need to: the app after v4.46 signs in via
+`sign_in()`, which works with RLS on or off. Do not redeploy the pre-v4.46 HTML -
+it expects plaintext PINs that no longer exist.
+
+---
+
+## Phase 2 (ORIGINAL, SUPERSEDED - do not follow)
+
+### The old list, kept for reference
 
 Pick a low-traffic morning. Sequence matters because the old app compares
 plaintext PINs that 0002 deletes - sign-in is briefly broken between steps 2

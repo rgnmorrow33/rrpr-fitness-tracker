@@ -2129,9 +2129,108 @@
   var STORAGE_MODE = 'supabase'; /* 'localStorage' | 'supabase' */
   var SUPABASE_URL = 'https://YOUR-STAGING-PROJECT-REF.supabase.co';
   var SUPABASE_ANON_KEY = 'PASTE-STAGING-ANON-KEY-HERE';
+  /* ============ APP AUTH TOKEN (identity RLS, 0004/0005) ============
+     The DB moved from "anon can do anything" to "present a signed token".
+     sign_in(trainer_id, pin) returns a 12-hour JWT carrying trainer_id +
+     role_tier; every RLS policy keys on those claims. This carries it.
+
+     TWO surfaces need the token, and they are easy to forget separately:
+
+       1. PostgREST. A custom global.fetch stamps the Authorization header on
+          every request (see _authedFetch). `apikey` stays the anon key: that
+          is the project identifier, not the credential.
+
+       2. Realtime. postgres_changes enforces RLS against the token given to
+          realtime.setAuth(), NOT the REST one. Miss it and notifications /
+          trainer_time_off (the only two tables in the supabase_realtime
+          publication) silently stop delivering, with no error anywhere.
+          See ARCHITECTURE.md section 6.
+
+     Signed out we fall back to the bare anon key, which under 0005 can read
+     exactly one thing: trainer_directory, the sign-in roster. */
+  var APP_TOKEN_KEY = 'rrpr_token_v1';
+  var _appToken = null;
+  var _appTokenExp = 0;      /* epoch seconds */
+  var _onAuthChange = null;  /* set by App; re-runs loadAll on an auth flip */
+
+  /* The token rides on a custom fetch, NOT on the client's internal header
+     objects.
+
+     The first cut of this mutated supabaseClient.rest.headers.Authorization.
+     It silently did nothing: every request still went out as anon and the app
+     died on "permission denied for table trainers ... TO anon". Whatever
+     supabase-js does internally, that object is not what ends up on the wire.
+
+     global.fetch is public, supported API. It runs on EVERY PostgREST and RPC
+     call and reads _appToken live, so an auth flip needs no client recreation
+     and orphans no realtime channel. apikey stays the anon key (that is the
+     project identifier); Authorization is the actual credential. */
+  function _authedFetch(input, init){
+    init = init || {};
+    var h = new Headers(init.headers || {});
+    h.set('apikey', SUPABASE_ANON_KEY);
+    h.set('Authorization', 'Bearer ' + (_appToken || SUPABASE_ANON_KEY));
+    init.headers = h;
+    return fetch(input, init);
+  }
+
   var supabaseClient = (STORAGE_MODE === 'supabase' && typeof supabase !== 'undefined')
-    ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: _authedFetch } })
     : null;
+
+  function _applyToken(tok){
+    /* REST needs nothing here: _authedFetch reads _appToken on every call.
+       Realtime is a websocket and does NOT go through fetch, so it must be told
+       separately. Miss this and postgres_changes silently stops delivering with
+       no error anywhere. */
+    if (!supabaseClient) return;
+    try { supabaseClient.realtime.setAuth(tok || SUPABASE_ANON_KEY); }
+    catch(err){ console.error('[auth] realtime.setAuth failed:', err); }
+  }
+
+  function getAppToken(){ return _appToken; }
+
+  /* 60s skew buffer so we never hand PostgREST a token that dies mid-flight. */
+  function appTokenExpired(){
+    if (!_appToken) return true;
+    if (!_appTokenExp) return false;
+    return (Date.now() / 1000) >= (_appTokenExp - 60);
+  }
+
+  function setAppToken(tok, expEpoch){
+    _appToken = tok || null;
+    _appTokenExp = expEpoch || 0;
+    try {
+      if (tok) localStorage.setItem(APP_TOKEN_KEY, JSON.stringify({ t: tok, e: _appTokenExp }));
+      else localStorage.removeItem(APP_TOKEN_KEY);
+    } catch(_){}
+    _applyToken(_appToken);
+    /* Channels opened under the old auth must re-handshake. */
+    try { sweepReconnectChannels('auth-change'); } catch(_){}
+    if (_onAuthChange) { try { _onAuthChange(); } catch(_){} }
+  }
+
+  /* Rehydrate before the first query fires, so a mid-shift reload doesn't
+     bounce the user back to login. An expired token is dropped here rather
+     than sent and silently returning empty result sets. */
+  (function(){
+    try {
+      var raw = localStorage.getItem(APP_TOKEN_KEY);
+      if (!raw) { _applyToken(null); return; }
+      var o = JSON.parse(raw);
+      if (!o || !o.t) { _applyToken(null); return; }
+      if (o.e && (Date.now() / 1000) >= o.e) {
+        console.info('[auth] stored token expired; clearing');
+        localStorage.removeItem(APP_TOKEN_KEY);
+        localStorage.removeItem('rrpr_session_v1');  /* no ghost session */
+        _applyToken(null);
+        return;
+      }
+      _appToken = o.t;
+      _appTokenExp = o.e || 0;
+      _applyToken(_appToken);
+    } catch(_){ _applyToken(null); }
+  })();
 
   /* Current sign-in name accessor. Used by translators that need to
      populate a created_by column when no local equivalent exists.
@@ -2768,13 +2867,24 @@
   var trainersStorage = {
     load: function(){
       if (STORAGE_MODE === 'supabase') {
-        return supabaseClient.from('trainers').select('*')
-          .eq('is_active', true)
-          .order('name', { ascending: true })
-          .then(function(res){
-            if (res.error) throw res.error;
-            return (res.data || []).map(translate.trainers.fromSupabase);
-          });
+        /* Identity RLS (0005): `trainers` needs a token, but the login screen
+           must render the roster BEFORE anyone can get one. That's the
+           chicken-and-egg. trainer_directory is a definer view exposing names
+           only (no PIN, no hash, no audit_log) and is the single thing anon may
+           read anywhere in the database.
+
+           Signed in, go back to the base table: the full row carries audit_log
+           and deleted_at. That matters. fromSupabase would otherwise default
+           audit_log to [], and the next Manage Team save would write that []
+           straight over the server's real audit history. */
+        var signedIn = !!getAppToken();
+        var src = signedIn ? 'trainers' : 'trainer_directory';
+        var q = supabaseClient.from(src).select('*').order('name', { ascending: true });
+        if (signedIn) q = q.eq('is_active', true);   /* the view already filters */
+        return q.then(function(res){
+          if (res.error) throw res.error;
+          return (res.data || []).map(translate.trainers.fromSupabase);
+        });
       }
       try {
         var raw = localStorage.getItem('cmrc_trainers_v4');
@@ -6813,6 +6923,58 @@
     function loadAll(){
       setLoading(true);
       setLoadError(null);
+
+      /* Identity RLS (0005): signed out, EVERY table except trainer_directory
+         is denied. Firing the full Promise.all here would reject on the first
+         blocked table and drop the user on the "Couldn't connect to the server"
+         error screen instead of the login screen - the app would look broken to
+         someone who simply hasn't signed in yet.
+
+         So: signed out, load only the sign-in roster. Everything else stays
+         empty, which is also correct - there is nothing to show pre-auth. The
+         real load fires on the auth flip. */
+      if (STORAGE_MODE === 'supabase' && !getAppToken()) {
+        storage.trainers.load().then(function(profiles){
+          var t = profiles || [];
+          /* Hydrate EVERY dirty-check ref, not just trainers.
+             The refs init to useRef(null). _saveIfDirty compares state to ref
+             and treats null-vs-[] as dirty. The first cut of this returned early
+             after hydrating only trainerProfilesRef, so the moment `loading`
+             flipped false the app fired a SAVE for every other entity - upserting
+             empty arrays over the server's data. RLS blocked it on the branch and
+             we saw a wall of "Save clients failed". On an open database (which is
+             what production is today) those writes would have LANDED.
+
+             Sign-out also lands here, so entities are cleared to a shared EMPTY
+             reference and the refs point at that same reference. _saveIfDirty's
+             identity check (ref.current === current) then short-circuits and no
+             save fires. One user's data does not sit in memory for whoever picks
+             up the iPad next. */
+          var EMPTY = [];
+          trainerProfilesRef.current = t;              setTrainerProfiles(t);
+          clientsRef.current = EMPTY;                  setClients(EMPTY);
+          classesRef.current = EMPTY;                  setClasses(EMPTY);
+          closuresRef.current = EMPTY;                 setClosures(EMPTY);
+          wrosRef.current = EMPTY;                     setWros(EMPTY);
+          referralsRef.current = EMPTY;                setReferrals(EMPTY);
+          itemsRef.current = EMPTY;                    setItems(EMPTY);
+          queueRef.current = EMPTY;                    setQueue(EMPTY);
+          contactsRef.current = EMPTY;                 setContacts(EMPTY);
+          schedVersionsRef.current = EMPTY;            setScheduleVersions(EMPTY);
+          timeOffRef.current = EMPTY;                  setTimeOff(EMPTY);
+          announcementBannersRef.current = EMPTY;      setAnnouncementBanners(EMPTY);
+          /* adminPin is not an array; leave the value alone and just park the
+             ref on it so the dirty-check sees no change. */
+          pinRef.current = pin;
+          setLoading(false);
+        }).catch(function(err){
+          console.error('Roster load failed:', err);
+          setLoadError(err && err.message ? err.message : 'Unknown error');
+          setLoading(false);
+        });
+        return;
+      }
+
       Promise.all([
         storage.trainers.load(),
         storage.clients.load(),
@@ -6878,7 +7040,51 @@
       });
     }
 
-    useEffect(function(){ loadAll(); }, []);
+    /* Identity RLS: loadAll must re-run whenever the token changes, not only on
+       mount. Pre-auth it fetches just the roster; the moment sign_in mints a
+       token the real data becomes reachable and has to be pulled. Same in
+       reverse on sign-out, so one user's data isn't left on screen for whoever
+       picks up the iPad next. setAppToken() drives this. */
+    var authVersionTuple = useState(0);
+    var authVersion = authVersionTuple[0];
+    var setAuthVersion = authVersionTuple[1];
+    useEffect(function(){
+      _onAuthChange = function(){ setAuthVersion(function(v){ return v + 1; }); };
+      return function(){ _onAuthChange = null; };
+    }, []);
+
+    useEffect(function(){ loadAll(); }, [authVersion]);
+
+    /* Token expiry watchdog.
+       The failure this prevents: an iPad left signed in overnight. The 12-hour
+       token lapses but the localStorage session does not, so the app still
+       renders as signed-in - while every read returns empty and every write is
+       rejected by RLS with no error the user ever sees. A trainer could log a
+       whole morning of sessions into a void.
+
+       So we watch. On expiry, sign out loudly and send them back to the PIN
+       screen. Interval AND wake events, because a sleeping iPad's timers do
+       not fire. */
+    useEffect(function(){
+      if (STORAGE_MODE !== 'supabase') return;
+      if (!session) return;
+      function check(){
+        if (!getAppToken() || appTokenExpired()) {
+          console.info('[auth] token expired; forcing re-auth');
+          try { ctx.toast('Session expired. Please enter your PIN again.', 'error'); } catch(_){}
+          setSession(null);   /* clears the token; authVersion reloads */
+        }
+      }
+      var id = setInterval(check, 60 * 1000);
+      document.addEventListener('visibilitychange', check);
+      window.addEventListener('focus', check);
+      check();
+      return function(){
+        clearInterval(id);
+        document.removeEventListener('visibilitychange', check);
+        window.removeEventListener('focus', check);
+      };
+    }, [session && session.trainer_id, session && session.signed_in_at]);
 
     /* Real-time subscriptions. Mounts once, tears down on unmount. Each
        table subscription reloads its entity on any change event. The
@@ -7576,6 +7782,13 @@
         if (next == null) localStorage.removeItem('rrpr_session_v1');
         else localStorage.setItem('rrpr_session_v1', JSON.stringify(next));
       } catch(_){}
+      /* Identity RLS: sign-out must drop the token too, and centrally. There
+         are a dozen setSession(null) call sites (Sign out buttons, kiosk
+         timeout, WRO cancel); clearing the token at each is a bug waiting to
+         happen. Leave it behind and the next person to pick up the iPad
+         inherits the previous user's DB credential for up to 12 hours.
+         setAppToken(null) also re-runs loadAll, flushing their data off screen. */
+      if (next == null && getAppToken()) setAppToken(null, 0);
     }
 
     /* Lead view-mode toggle. Lead-tier users can flip between the lead
@@ -10761,8 +10974,21 @@
         /* RLS pass: server-side verify. The entered digits go to the RPC
            and nowhere else - never stored, never logged. */
         verify: function(p){
-          return supabaseClient.rpc('verify_trainer_pin', { p_trainer_id: pinTarget.id, p_pin: p })
-            .then(function(res){ if (res.error) throw res.error; return res.data; });
+          /* Identity RLS: sign_in() replaces verify_trainer_pin(). Same PIN
+             check underneath (same 5-failure lockout), but it returns a signed
+             12-hour JWT instead of just 'ok'. That token is the app's entire
+             authority to read or write anything from here on. */
+          return supabaseClient.rpc('sign_in', { p_trainer_id: pinTarget.id, p_pin: p })
+            .then(function(res){
+              if (res.error) throw res.error;
+              var d = res.data || {};
+              if (d.status !== 'ok') return d.status || 'wrong';
+              if (!d.token) throw new Error('sign_in returned ok with no token');
+              /* Install the token BEFORE the session flips, so the loadAll the
+                 auth change triggers already carries it. */
+              setAppToken(d.token, d.expires_at || 0);
+              return 'ok';
+            });
         },
         onSuccess: function(){
           var p = pinTarget;
@@ -10789,8 +11015,20 @@
         onClose: function(){ setFrontDeskOpen(false); },
         /* RLS pass: server-side verify against the hashed settings row. */
         verify: function(p){
-          return supabaseClient.rpc('verify_admin_pin', { p_pin: p })
-            .then(function(res){ if (res.error) throw res.error; return res.data; });
+          /* Identity RLS: Front Desk is a shared seat with no row in `trainers`,
+             so sign_in(trainer_id, pin) has nothing to key on. sign_in_front_desk
+             verifies the same hashed admin PIN (same lockout) and mints a token
+             against the nil UUID with role_tier=admin. Without this, switching on
+             RLS would lock Front Desk out of its own app. */
+          return supabaseClient.rpc('sign_in_front_desk', { p_pin: p })
+            .then(function(res){
+              if (res.error) throw res.error;
+              var d = res.data || {};
+              if (d.status !== 'ok') return d.status || 'wrong';
+              if (!d.token) throw new Error('sign_in_front_desk returned ok with no token');
+              setAppToken(d.token, d.expires_at || 0);
+              return 'ok';
+            });
         },
         onSuccess: function(){
           setFrontDeskOpen(false);
@@ -27152,6 +27390,11 @@
           return supabaseClient.rpc('set_trainer_pin', { p_trainer_id: original.id, p_new: pinTrimmed })
             .then(function(res){
               if (res.error) throw res.error;
+              /* 0005 gates this RPC on admin server-side. 'forbidden' means the
+                 DB rejected the caller's token. Previously the only gate was
+                 client-side ctx.can('canSetPINs'), which anyone holding the
+                 public key could bypass entirely. */
+              if (res.data === 'forbidden') throw new Error('Admin access required to set a PIN.');
               if (res.data !== 'ok') throw new Error('PIN update failed (' + res.data + ')');
             });
         });
@@ -27559,6 +27802,9 @@
             ctx.toast('Current PIN is incorrect', 'error');
           } else if (res.data === 'locked') {
             ctx.toast('Too many attempts. Try again in 5 minutes.', 'error');
+          } else if (res.data === 'forbidden') {
+            /* 0005: the DB checks admin now, not just the UI. */
+            ctx.toast('Admin access required to change the Front Desk PIN.', 'error');
           } else {
             ctx.toast('PIN update failed (' + res.data + ')', 'error');
           }

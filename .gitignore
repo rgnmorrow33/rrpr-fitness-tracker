@@ -36,3 +36,7 @@ purchase-import/run_purchase_import.cmd
 purchase-import/purchase_import.task.log
 **/__pycache__/
 docs/Fitness_Tracker_Update_Log.docx
+
+# Local staging copy carrying real branch keys - NEVER commit.
+# The tracked staging/*.staging.html keeps placeholders.
+staging/local-*.html
