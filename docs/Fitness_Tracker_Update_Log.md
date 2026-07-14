@@ -38,12 +38,25 @@ Newest version at the top; append new sections above the older ones.
   Supabase linter after I had asserted it was revoked). Every one of them was
   found by actually running the thing rather than reasoning about it.
 
-### STILL OPEN - do this before 5am
+### Import pipelines - DONE, verified July 14
 
-- **`SUPABASE_SERVICE_ROLE_KEY` must be set on the machine running the 5am intake
-  and 8am purchase imports.** anon no longer has write grants, so both pipelines
-  will fail until this is done. Same place `SUPABASE_ANON_KEY` lives today; key
-  from prod Project Settings > API.
+`SUPABASE_SERVICE_ROLE_KEY` is set in both scheduled-task wrappers
+(`run_intake_import.cmd`, `run_purchase_import.cmd`, both gitignored). Both
+importers already preferred it and fell back to anon, so this was a one-line
+change each.
+
+Proven live against production, not assumed:
+
+    SERVICE_ROLE: read 15 clients  -> imports will work
+    ANON: blocked                  -> the lockdown is working
+
+Worth noting how nearly this was missed: both importers log `nothing to process`
+and return BEFORE calling the API when the dropbox is empty, so "the task ran
+without errors" proves nothing about whether the key is valid. The only real test
+was a direct authenticated read. Two `INFO using service role key` lines looked
+like success and were not.
+
+### STILL OPEN
 - Rotate the Supabase key pasted into chat on July 10. Now that RLS is on, the
   anon key is genuinely safe to be public, so this is hygiene rather than urgency.
 - Row ownership remains app-side (`ctx.can()`), not enforced by RLS. Structural:
