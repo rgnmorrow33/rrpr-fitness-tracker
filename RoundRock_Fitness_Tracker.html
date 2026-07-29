@@ -4765,6 +4765,8 @@
     var day = String(d.getDate()).padStart(2,'0');
     return d.getFullYear() + '-' + m + '-' + day;
   }
+  // addDays(Date, n) -> Date. Date objects only, 30+ call sites (payroll,
+  // week nav, schedule builders). YMD strings: addDaysYMD (5576); day diff: daysBetween (5585).
   function addDays(d, n){
     var out = new Date(d.getTime());
     out.setDate(out.getDate() + n);
@@ -5569,6 +5571,8 @@
 
   /* Sprint M: shift a YMD string by N days. parseYMD + addDays + toYMD
      in one shot for the recurring-series math. */
+  // addDaysYMD(ymd, n) -> YMD string, wraps addDays (4770) for the YMD case.
+  // Date objects: use addDays directly; day-count diff: daysBetween (5585).
   function addDaysYMD(ymd, n){
     var d = parseYMD(ymd);
     if (!d) return ymd;
@@ -5576,6 +5580,8 @@
   }
 
   /* Fix A (v4.49): hoisted from sweepExpiringPackages, unchanged. */
+  // daysBetween(fromYMD, toYMD) -> integer day count, not a shifter.
+  // Date math: addDays (4770); YMD shifting: addDaysYMD (5576).
   function daysBetween(fromYMD, toYMD){
     var a = new Date(fromYMD + 'T00:00:00').getTime();
     var b = new Date(toYMD + 'T00:00:00').getTime();
