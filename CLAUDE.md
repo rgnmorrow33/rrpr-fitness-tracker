@@ -23,6 +23,27 @@ pastes prompts here. Selisa (Assistant Head of Facilities, CMRC) is
 the QA partner. She does not use Claude Code; she runs Supabase
 schema changes and tests on production iPads.
 
+## Before you write or execute a spec
+
+Stale claims in this repo have caused real damage twice. v4.48 found this file
+asserting the opposite of what the database does. On July 29 a spec arrived
+written against a v4.45 copy of a log that had said v4.48 for two weeks, and
+following it literally would have written duplicate version entries into the
+canonical file. Two rules exist to stop a third:
+
+1. **`docs/Fitness_Tracker_Update_Log.md` is the canonical log.** Any
+   `Fitness_Tracker_Update_Log.docx` anywhere - project files, Drive, a chat
+   upload - is a point-in-time snapshot and is probably stale. Never write or
+   execute a spec off one. Confirm live version state from the log header plus
+   `git log --oneline -5` and `git tag | tail -3`, and say out loud which
+   version the work is written against before starting.
+
+2. **Every claim in this file about live database or infrastructure state
+   carries a `Verified: YYYY-MM-DD` stamp and the query that re-checks it.**
+   If you are about to rely on an unstamped claim, re-verify it and stamp it.
+   If a stamp predates the newest file in `migrations/`, treat the claim as
+   unverified until you have run its query.
+
 ## Working conventions
 
 ### Diagnostic before fix
@@ -85,9 +106,10 @@ reads/writes. Two modes: 'localStorage' and 'supabase'. Currently in
 'supabase' mode.
 
 Supabase project: ofezaezijafglyjmisgz.supabase.co
-Anon key is committed in the file (designed-public). RLS is disabled
-project-wide, so the key is NOT RLS-gated - access is open at the DB
-layer. See Security posture.
+Anon key is committed in the file (designed-public). Since v4.46 that is
+actually safe: RLS is enabled on every public table and anon holds exactly
+one privilege in the whole schema. The key identifies a role, it does not
+grant access. See Security posture.
 
 Storage adapter exposes: storage.X.load() / storage.X.save(arr) for
 each entity. Returns Promises in both modes.
@@ -284,16 +306,44 @@ in docs/BACKLOG.md, load on demand.
 
 ## Security posture
 
-RLS is DISABLED across all 17 public tables (verified June 17). Reads
-and writes go through the committed anon key with no RLS gating -
-access is open at the DB layer. Access control is enforced
-client-side in the app via ctx.can('<permission>') - the DB layer is
-open; ctx.can is what actually gates who can do what. Acceptable for
-prototype. Tighten
-(enable RLS, add policies) before APC opens (April 2027) or before any
-clinical PHI flows through the system, whichever first.
+**Verified: 2026-07-29** against the live database. This section said the
+exact opposite until then, having survived unchanged through the v4.46
+lockdown that made it false. Do not trust it without re-running the queries
+below if the stamp is older than the newest file in `migrations/`.
 
-PIN is in the settings table. Plaintext for now. Hash before APC opens.
+**RLS is ENABLED on all 19 public tables.** Zero tables with RLS off, 55
+policies, zero `allow all` policies. Migrations 0002 and 0004 through 0008
+did this; 0003 was retired and never run. Re-verify:
+
+    select count(*) filter (where rowsecurity) as on,
+           count(*) filter (where not rowsecurity) as off
+    from pg_tables where schemaname = 'public';
+
+**anon holds exactly ONE privilege in the entire public schema:**
+`trainer_directory:SELECT`. That view is names only - no PINs, no hashes, no
+client data. Everything else requires an authenticated session. Re-assert
+this after any migration that creates a table or view (see 0008). Re-verify:
+
+    select table_name, privilege_type from information_schema.role_table_grants
+    where table_schema = 'public' and grantee = 'anon';
+
+**PINs are bcrypt, verified server-side.** `trainers.pin` is NULL on every
+row - the column is a vestige, not storage. `trainers.pin_set` is the boolean
+the UI reads. Verification and setting go through
+`verify_trainer_pin` / `verify_admin_pin` / `set_trainer_pin` / `set_admin_pin`
+(supported by `_pin_record` and `_pin_locked`). `settings.admin_pin` holds a
+bcrypt hash. No plaintext PIN and no hash ever returns to the client. PUBLIC
+execute on the setters was revoked in 0007.
+
+**What RLS does NOT do here: row ownership.** Any signed-in trainer can update
+any client's row. That is structural, not laziness - sessions, packages and
+attendance live inside JSONB on the parent row (ADR-0004), so "log a session"
+IS "UPDATE the whole clients row." Acceptable for an internal team tool.
+Revisit before APC.
+
+**Client-side `ctx.can('<permission>')` is still the permission model** for who
+can do what inside the app. The difference since v4.46 is that the DB layer is
+no longer wide open behind it.
 
 ## Out of scope
 

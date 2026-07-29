@@ -9,7 +9,10 @@ point-in-time snapshot and may be stale. Check here.
 - Site: https://pardfitnesstracker2.netlify.app
 - Owner of this list: Reagan
 - Runs the checks: Selisa
-- Last updated: 2026-07-14 (v4.48)
+- Last updated: 2026-07-29 (v4.50). All five checks below are still OPEN and
+  have been for 15 days. v4.49 and v4.50 added nothing to this list: v4.49's
+  lifecycle pills are read-only UI, and v4.50 is behavior-neutral by
+  construction.
 
 ## How to use this
 

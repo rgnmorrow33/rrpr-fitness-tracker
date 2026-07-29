@@ -54,20 +54,34 @@ Not built; not a priority right now.
 
 ## Operational documentation gap
 
-Operational documentation currently lives in Reagan's project context (the
-Update Log .docx file and the Sprint Status doc). Migration of these into
-`/docs` as committed artifacts is queued. Until that happens, the canonical
-version-by-version history and the live sprint backlog are not visible to
-anyone who doesn't have direct access to Reagan's files.
+**Partly closed.** The update log migrated into `/docs` and
+`docs/Fitness_Tracker_Update_Log.md` is now canonical and version-controlled.
+
+What is still open, and it bit on 2026-07-29: **the old
+`Fitness_Tracker_Update_Log.docx` copies still exist outside git**, several of
+them in the Claude project, and a spec got written against one that was three
+versions behind. Following it literally would have written duplicate v4.47 and
+v4.48 entries into the canonical file. Delete those copies or stamp them
+clearly as point-in-time snapshots. See the preflight rules at the top of
+CLAUDE.md.
+
+The Sprint Status doc is still outside `/docs` and unmigrated.
 
 ## Security hardening (deadline-bound)
 
-- **Anon RLS posture.** Per *anon RLS prototype posture* (ADR, proposed). RLS
-  is disabled across all public tables; the committed anon key is the only
-  gate. Tighten before APC opens (April 2027) or before any clinical PHI flows
-  through the system, whichever comes first.
-- **PIN hashing.** Per *PIN storage as plaintext* (ADR, proposed). The PIN in
-  the settings table is plaintext today. Hash before APC.
+Both original entries here - anon RLS posture and PIN hashing - **closed in
+v4.46** and were moved to the audit trail at the bottom of this file on
+2026-07-29. What is left is the part v4.46 did not solve:
+
+- **Row-ownership enforcement.** RLS is on, but any signed-in trainer can
+  update any client's row. Structural rather than lazy: sessions, packages and
+  attendance live inside JSONB on the parent row (ADR-0004), so "log a session"
+  IS "UPDATE the whole clients row." Unwinding it is gated on the ADR-0002 /
+  ADR-0003 Phase 2C normalization. Acceptable for an internal team tool;
+  revisit before APC opens (April 2027) or before any clinical PHI flows,
+  whichever comes first.
+- **Rotate the anon key** pasted into chat on 2026-07-10. Hygiene, not urgency:
+  the key ships to every browser regardless, and RLS is what makes that safe.
 
 ## Open correctness questions
 
@@ -233,3 +247,14 @@ sync: when a check passes there, close it here.
   grep), so the sweep that entry called for has already happened. The
   going-forward "no line-number references in docs" convention lives in
   CLAUDE.md's Working conventions.
+- **Anon RLS posture** (was Security hardening, deadline-bound). Closed by
+  v4.46, verified 2026-07-29: RLS enabled on all 19 public tables, 55
+  policies, zero `allow all`, and anon reduced to a single privilege
+  (`trainer_directory:SELECT`) by migration 0008. The *anon RLS prototype
+  posture* ADR is superseded.
+- **PIN hashing** (was Security hardening, deadline-bound). Closed by v4.46
+  migration 0002, verified 2026-07-29: PINs are bcrypt and verified
+  server-side via `verify_trainer_pin` / `verify_admin_pin`. `trainers.pin` is
+  NULL on every row and `settings.admin_pin` holds a hash. PUBLIC execute on
+  the setters was revoked in 0007. The *PIN storage as plaintext* ADR is
+  superseded.

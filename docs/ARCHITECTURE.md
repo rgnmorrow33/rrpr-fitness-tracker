@@ -6,7 +6,11 @@ pieces fit. The system has been tribal knowledge between Reagan,
 Selisa, and Code Claude for long enough; this document is the
 attempt to make it legible.
 
-**Last updated.** 2026-05-18
+**Last updated.** 2026-07-29 (security posture and section 6 rewritten
+against the live database - both had been stale since v4.46 and v4.33
+respectively). Sections not listed in that pass still carry their
+2026-05-18 vintage; treat any live-state claim here without a verification
+date as unverified.
 
 **Cross-references.**
 - SCHEMA.md is the source of truth for table shapes, column types,
@@ -72,9 +76,20 @@ This document is part of meeting them.
 **Source.** `github.com/rgnmorrow33/rrpr-fitness-tracker`, public
 repo, `main` branch.
 
-**Hosting.** Netlify with auto-deploy from `main`. Two sites:
-- `pardfitnesstracker` (production, Selisa's iPads)
-- `pardfitnesstracker2` / `candid-cendol-66c876` (test)
+**Hosting.** Netlify with auto-deploy from `main`.
+
+**These labels were INVERTED here until 2026-07-29.** This file said
+`pardfitnesstracker` was production and `pardfitnesstracker2` was test. It is
+the other way round, established 2026-07-09 by reading each deployed site's
+served HTML. Acting on the old labels means testing against a dead build and
+pushing at the real iPads believing they are a test site.
+
+- **`pardfitnesstracker2.netlify.app` is PRODUCTION.** Selisa's iPads. Backend
+  is Supabase `ofezaezijafglyjmisgz`. There is no separate staging URL, so
+  every push to `main` is a production deploy.
+- `pardfitnesstracker.netlify.app` is a stale, abandoned v2.x localStorage-only
+  build with no Supabase backend. Do not use it, do not push to it.
+- `candid-cendol-66c876` is dead (404).
 
 **The redirect.** `netlify.toml` rewrites `/` to
 `/RoundRock_Fitness_Tracker.html` with status 200 (rewrite, not
@@ -92,11 +107,12 @@ stale bundles for hours.
 
 **Backend.** Supabase project
 `ofezaezijafglyjmisgz.supabase.co`. The anon key is committed in
-the HTML file by design: it's gating role on the Supabase API, not
-a secret. RLS is currently disabled across all tables per the
-prototype posture (see *anon RLS prototype posture*, proposed).
-Supabase provides
-storage, realtime, and (planned) auth.
+the HTML file by design: it's a role identifier on the Supabase API, not
+a secret. **RLS is enabled on all 19 public tables** (v4.46, verified
+2026-07-29), and anon holds exactly one privilege in the schema:
+`trainer_directory:SELECT`. The *anon RLS prototype posture* ADR that
+described the open-access model is superseded. Supabase provides
+storage, realtime, and auth.
 
 **No build step.** The HTML file is the deployable. React loads
 from `https://unpkg.com/react@18` and
@@ -188,11 +204,16 @@ covered by ADR-0004.
 
 ## 4. Authentication and authorization
 
-**PIN-based per-user auth.** Trainers sign in with a 4-digit PIN
-stored on their row in `trainers.pin`. PINs are plaintext today;
-*PIN storage as plaintext* (proposed) commits to hashing before APC
-opens. The `PinModal` component collects the PIN; the match check
-happens client-side against the loaded trainer row.
+**PIN-based per-user auth.** Trainers sign in with a 4-digit PIN. Since
+v4.46 (verified 2026-07-29) that PIN is bcrypt-hashed and verified
+**server-side**: `PinModal` collects it and calls the `verify_trainer_pin`
+RPC, which returns a session, not a comparison. No hash and no plaintext PIN
+ever reaches the client. `trainers.pin` is NULL on every row - the column is
+a vestige of the old model, and `trainers.pin_set` is the boolean the UI
+reads. Setting goes through `set_trainer_pin` / `set_admin_pin`; PUBLIC
+execute on both was revoked in migration 0007. The *PIN storage as plaintext*
+ADR is superseded, and the client-side match check it describes no longer
+exists.
 
 **Role tiers.** `role_tier` on `trainers` is one of:
 - `trainer`: executes sessions, signs, claims subs, logs contacts.
@@ -328,46 +349,59 @@ pre-allocated).
 
 ## 6. Realtime model
 
-> **Read this first: live sync is mostly not live.** The client attaches
-> 12 `postgres_changes` listeners to the `app-changes` channel, but the
-> Supabase `supabase_realtime` publication contains exactly **2** tables.
-> Only those 2 broadcast. The other 10 listeners are attached and receive
-> nothing - those entities converge on reload, not live push. Do not design
-> a feature that assumes a table syncs live without first confirming that
-> table is in the publication. Details below.
+> **Read this first: a listener receives nothing unless its table is in the
+> publication.** That is the one rule this section exists to teach. Attaching
+> a client listener alone does nothing. Do not design a feature that assumes
+> a table syncs live without first confirming it is in the publication.
+>
+> **This section was rewritten 2026-07-29.** Everything below previously
+> described a single shared `app-changes` channel with 12 listeners and a
+> 2-table publication. Both were wrong: v4.33 replaced the shared channel with
+> per-table channels, and v4.48 established by direct query that the
+> publication holds 5 tables, not 2. The old text survived both.
 
-**Supabase realtime via `postgres_changes`.** The client opens a single
-shared channel named `app-changes` and attaches listeners for 12 entity
-tables (`clients`, `classes`, `wros`, `leads`, `member_contacts`,
-`admin_items`, `referrals`, `closures`, `trainers`, `schedule_versions`,
-`trainer_time_off`, `announcement_banners`). The subscription map is built
-inside the `buildAppChanges` closure of the main realtime `useEffect`;
-each entity registers a `(table, setter, entity)` triple, and the channel
-listener for `event: '*'` calls a per-entity debounced reload that fetches
-fresh data and dispatches the setter.
+**Verified: 2026-07-29.** The `supabase_realtime` publication contains exactly
+five tables:
 
-**Publication gap - only 2 tables actually broadcast.** Attaching a client
-listener does nothing on its own: a table only emits change events if it is
-a member of the Postgres `supabase_realtime` publication. As verified on
-June 17 against the Supabase publications screen, that publication contains
-exactly two tables: `notifications` and `trainer_time_off`. Net effect:
+    classes, clients, leads, notifications, trainer_time_off
 
-- Of the 12 listeners on `app-changes`, only `trainer_time_off` ever fires.
-  The other 11 are attached but never receive an event, because their tables
-  are not in the publication.
-- `notifications` broadcasts live, but on its own dedicated per-trainer
-  channel (see the Notifications channel note below), not on `app-changes`.
-- Every other entity - `clients`, `classes`, `leads`, everything else -
-  converges only on a reload (navigation, mount-fetch, or the wake/online/
-  pageshow sweep below), never on live push.
+Re-verify with:
 
-**To make a table sync live, add it to the publication.** The client-side
-listener already exists for all 12; the missing half is the DB-side
-publication membership. `ALTER PUBLICATION supabase_realtime ADD TABLE
-<table>` is what actually turns on live sync for an entity. (Heads-up for
-readers of the app code: some inline comments still claim convergence "comes
-free via the app-changes channel (clients table)" - that is stale; `clients`
-is not in the publication.)
+    select tablename from pg_publication_tables
+    where pubname = 'supabase_realtime' order by tablename;
+
+**Channels are PER TABLE, not one shared channel.** Each live entity gets its
+own `table-changes-<table>` channel. The old single `app-changes` channel was
+removed in v4.33 because supabase-js v2 does not reliably fan multiple
+`postgres_changes` bindings out on one channel - it reached SUBSCRIBED and
+delivered zero events, which is the worst possible failure shape.
+
+**`PUBLISHED_TABLES` gates which entities get a channel at all.** It holds the
+four entity tables that are actually published - `clients`, `classes`, `leads`,
+`trainer_time_off` - and those are the only ones that open a channel.
+`notifications` broadcasts on its own per-trainer channel (see the
+Notifications channel note below). The remaining eight entities stay in the
+`subs` list so the wake catch-up refetch still covers them, but they get NO
+channel, because a channel on an unpublished table receives nothing and only
+adds subscribe / sweep / reconnect traffic.
+
+**To make a table sync live, add it to the publication.**
+`ALTER PUBLICATION supabase_realtime ADD TABLE <table>` is the DB-side half,
+and the table then needs adding to `PUBLISHED_TABLES` for the client to open a
+channel for it. Both halves are required.
+
+**Per-channel liveness signal.** Since v4.48, `_handleChannelStatus` emits
+`[realtime] live <key>` on every SUBSCRIBED, unconditionally. That is the
+deterministic "this channel is up" signal; the smoke suite's `consoleGuard`
+gates transient-drop forgiveness per channel on it, so a channel that drops and
+never returns fails the suite instead of being silently forgiven.
+
+**Open question, unsettled by code review.** All four entity channels are
+opened while signed OUT, because the realtime `useEffect` has `[]` deps.
+`realtime.setAuth()` fires on the auth flip and SHOULD re-authorize them. If it
+does not, live cross-device sync has been dead since the v4.46 RLS flip and the
+app would look completely normal either way. This is P1 in
+`docs/DEVICE_CHECKS.md` and only the two-iPad check answers it.
 
 **`storage.X.load()` chain pattern.** Realtime events trigger a full
 entity reload rather than incremental patches. The handler is
@@ -573,7 +607,7 @@ SharePoint list (Pass 1) or the Supabase endpoint (Pass 2 future).
 roadmap and the tracker is the operating system for fitness workflows.
 Any future integration discussion lands as a separate ADR.
 
-**Sling continues for scheduling.** Sling handles trainer/staff
+**Sling continues for scheduling.** Sling handles trainer and team
 scheduling and is unchanged by the tracker's existence. No
 integration: the two systems are operationally adjacent but data-
 independent.
@@ -599,9 +633,9 @@ Highlights that shape architecture decisions (see BACKLOG.md for the rest):
 - **Single-file decomposition** (ADR-0005, sequenced via ADR-0003 Phase 2B).
 - **Schema migration discipline** - version-controlled SQL in
   `/sql/migrations/`. Phase 2B blocker.
-- **Security hardening (deadline-bound)** - anon RLS posture and PIN
-  hashing, both due before APC opens (April 2027) or before any clinical
-  PHI flows, whichever first.
+- **Row-ownership enforcement in RLS** - the anon posture and PIN hashing
+  both closed in v4.46, but any signed-in trainer can still update any
+  client's row. Blocked on the ADR-0004 JSONB shape; revisit before APC.
 
 ---
 

@@ -11,6 +11,16 @@ whenever possible. When a decision precedes implementation (as with
 all three foundational ADRs below), the ADR lands first and the
 implementation references the ADR number in its commit messages.
 
+> **Reading note added 2026-07-29.** Any ADR body below written before
+> 2026-07-14 that describes RLS as disabled, the anon key as ungated, or PINs
+> as plaintext is stating the context *as it was when that decision was made*.
+> It does not describe live state. v4.46 enabled RLS on all 19 public tables,
+> reduced anon to a single privilege, and moved PINs to bcrypt with
+> server-side verification. Those bodies are deliberately not rewritten -
+> falsifying the context would break the audit trail this log exists for. For
+> live state, read CLAUDE.md's Security posture section, which carries a
+> verification date and the queries.
+
 ## ADR format
 
 Every ADR follows this shape:
@@ -958,12 +968,14 @@ number, cross-references can be updated to point at it.
   ADR-0004 to the other entities that use `appendAuditEntry`.
 - ***Permission model: trainers EXECUTE, admins set STRUCTURE.***
   The principle and its applications across the codebase.
-- ***Anon RLS prototype posture.*** Acceptable during the prototype
-  phase; tightening is required before APC opens (April 2027
-  deadline) or before any clinical PHI flows through the system,
-  whichever comes first.
-- ***PIN storage as plaintext in the `settings` table.*** Acceptable
-  for prototype; hashing required before APC opens.
+- ***Anon RLS prototype posture.*** **SUPERSEDED 2026-07-14 by v4.46.**
+  Was: open access at the DB layer, acceptable during the prototype phase,
+  tighten before APC. Now: RLS on all 19 public tables, 55 policies, anon
+  reduced to `trainer_directory:SELECT` by migration 0008. Verified
+  2026-07-29.
+- ***PIN storage as plaintext in the `settings` table.*** **SUPERSEDED
+  2026-07-14 by v4.46 migration 0002.** PINs are bcrypt and verified
+  server-side; `trainers.pin` is NULL on every row. Verified 2026-07-29.
 
 ---
 

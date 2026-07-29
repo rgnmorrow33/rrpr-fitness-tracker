@@ -35,6 +35,18 @@ Newest version at the top; append new sections above the older ones.
   `trainer_directory:SELECT`. No migrations have run since v4.46, so the 0008
   end state is intact.
 
+- **Docs staleness sweep, July 29 (separate commit, no version).** Six files
+  carried claims that were false as of v4.46 or v4.33 and had survived every
+  version since. Corrected against the live database: CLAUDE.md Security
+  posture (said RLS DISABLED on 17 tables and PINs plaintext; actual is RLS
+  enabled on all 19, 55 policies, bcrypt PINs verified server-side),
+  ARCHITECTURE.md sections 2, 4, 6 and 9, SCHEMA.md narrative prose,
+  BACKLOG.md, DECISIONS.md (reading note plus two superseded markers),
+  DEVICE_CHECKS.md, and the RLS runbook (banner marking it EXECUTED rather
+  than pending). ARCHITECTURE.md also had the Netlify site labels **inverted** -
+  it named `pardfitnesstracker` as production when that is the dead v2.x
+  build. CLAUDE.md gained a "Before you write or execute a spec" preflight.
+
 ### Still open
 
 - **v4.51 (lastActivityDate) is BLOCKED at its own gate.** The defect is real

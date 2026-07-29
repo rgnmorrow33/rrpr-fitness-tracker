@@ -1,5 +1,16 @@
 # RLS + PIN Hashing: Staging Test and Go-Live Runbook
 
+> **EXECUTED 2026-07-14 (v4.46). This is a historical record, not pending
+> work.** Migrations 0002 and 0004 through 0008 are applied to production;
+> 0003 was retired and never run. Verified 2026-07-29: RLS enabled on all 19
+> public tables, 55 policies, anon holding one privilege
+> (`trainer_directory:SELECT`), PINs bcrypt and verified server-side.
+>
+> Everything below is preserved as written on the day, including the
+> present-tense "nothing has touched production" framing and the staging
+> state table. Read it as the plan that ran, not as a plan to run. The
+> rollback section stays useful; the go-live sequencing does not.
+
 Item 3 of the post-v4.45 work order. Everything below is staged and NOTHING
 has touched production. Production flip happens after Hawaii, on a day Reagan
 can watch it, with Selisa available for iPad verification.

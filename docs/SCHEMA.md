@@ -6,13 +6,22 @@ analysis (translator maps, direct `.from()` calls, audit cascade
 queries) and is the second source of truth alongside the live
 information_schema view in Supabase.
 
-**Status.** Codebase-derived v1. A future regeneration script that
-pulls directly from information_schema is a deferred Bucket 3
-followup. Until that lands, treat any divergence between this doc
-and the live DB as a doc bug, fix it here, and note it in the
-commit message.
+**Status.** The regeneration script landed: `npm run schema:check` reports
+drift read-only, `npm run schema:check -- --write` applies it to the
+`AUTOGEN` regions. Narrative prose outside those markers is never touched by
+it and stays hand-curated. Column **Notes** are preserved verbatim across
+regens, so a wrong note stays wrong until someone edits it by hand.
 
-**Last updated.** 2026-05-18
+> **The AUTOGEN regions below are STALE as of 2026-07-29.** They still say 17
+> tables with RLS "Disabled" on every row. Live is **19 tables with RLS
+> enabled on all 19**, 55 policies, and anon holding one privilege
+> (`trainer_directory:SELECT`). Run `npm run schema:check -- --write` to
+> refresh them - it needs `DATABASE_URL` in `.env`, which is why it could not
+> be run in the July 29 docs pass. Until then trust CLAUDE.md's Security
+> posture section, not the RLS column in the grid below.
+
+**Last updated.** 2026-07-29 (narrative prose only - see the AUTOGEN warning
+above).
 
 **Cross-references.**
 - ARCHITECTURE.md explains the why behind these shapes (JSONB
@@ -52,15 +61,21 @@ following the per-table detail.
 | `settings` | Key-value store. Currently holds `admin_pin` row. | Disabled | No |
 <!-- AUTOGEN:table-inventory END -->
 
-RLS state per CLAUDE.md ("Anon RLS allowing read/write on all tables.
-Acceptable for prototype. Tighten before APC opens (April 2027) or
-before any clinical PHI flows through the system, whichever first.")
-The codebase contains zero RLS-aware paths.
+**RLS state (verified 2026-07-29): enabled on all 19 public tables**, 55
+policies, zero `allow all`. The "Disabled" values in the grid above are stale
+AUTOGEN output, not the live posture. anon holds exactly one privilege in the
+schema, `trainer_directory:SELECT`. See CLAUDE.md Security posture for the
+re-verification queries.
 
-The 12-table `app-changes` realtime channel is set up in the
-`buildAppChanges` closure of the main realtime `useEffect`. The
-per-trainer `notifications-<trainerId>` channel is built in
-`buildNotifications` inside the notifications storage adapter.
+**Realtime (verified 2026-07-29).** Channels are PER TABLE
+(`table-changes-<table>`), not one shared channel - the 12-listener
+`app-changes` channel described in earlier revisions was removed in v4.33
+because it reached SUBSCRIBED and delivered zero events. The
+`supabase_realtime` publication holds five tables: `classes`, `clients`,
+`leads`, `notifications`, `trainer_time_off`. `PUBLISHED_TABLES` in the main
+realtime `useEffect` gates channels to the four entity tables; the per-trainer
+`notifications-<trainerId>` channel is built in `buildNotifications` inside the
+notifications storage adapter. See ARCHITECTURE.md section 6.
 
 ---
 
@@ -350,7 +365,7 @@ to false (no DELETE).
 | `created_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 | `previous_names` | jsonb | Rename history: `[{name, renamed_at}, ...]`. |
-| `pin` | text | Plaintext for now, hash before APC per CLAUDE.md. |
+| `pin` | text | Vestigial since v4.46 - NULL on every row. PINs are bcrypt and verified server-side via `verify_trainer_pin`; `pin_set` is what the UI reads. |
 | `role_tier` | text | "trainer" / "lead" / "admin". |
 | `audit_log` | jsonb | Append-only. |
 | `deleted_at` | timestamptz | Hard soft-delete (distinct from `is_active`). |
