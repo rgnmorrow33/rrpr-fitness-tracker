@@ -2492,10 +2492,7 @@
       ['parQ', 'par_q'],
       ['fromQueueId', 'from_queue_id'],
       ['lastPackageAddedAt', 'last_package_added_at'],
-      ['auditLog', 'audit_log'],
       ['createdBy', 'created_by'],
-      ['deletedAt', 'deleted_at'],
-      ['deletedBy', 'deleted_by'],
       ['createdAt', 'created_at']
     ]),
 
@@ -2510,9 +2507,6 @@
       ['seasonEnd', 'season_end'],
       ['scheduleVersionId', 'schedule_version_id'],
       ['duration', 'duration_minutes'],
-      ['auditLog', 'audit_log'],
-      ['deletedAt', 'deleted_at'],
-      ['deletedBy', 'deleted_by'],
       ['createdAt', 'created_at']
     ]),
 
@@ -2567,7 +2561,6 @@
       ['assignedBy', 'assigned_by'],
       ['lostReason', 'lost_reason'],
       ['fromWroId', 'from_wro_id'],
-      ['auditLog', 'audit_log'],
       ['createdAt', 'created_at']
     ], { drop: [
       /* Local-only fields (no Supabase column). Round-trip via localStorage
@@ -2754,8 +2747,6 @@
       ['endAt',        'end_at'],
       ['allDay',       'all_day'],
       ['createdBy',    'created_by'],
-      ['deletedAt',    'deleted_at'],
-      ['deletedBy',    'deleted_by'],
       ['createdAt',    'created_at'],
       /* Spec 1: request-flow columns. status is 'pending' | 'approved' | 'denied'.
          Existing rows default to 'approved' on the DB side so legacy entries
@@ -25956,7 +25947,7 @@
         packages: packageRecords,
         sessions: [],
         parQ: {},
-        auditLog: [],
+        audit_log: [],
         createdBy: 'import_alpha_v1',
         datePurchased: earliestPurchase,
         lastPackageAddedAt: nowIso,
