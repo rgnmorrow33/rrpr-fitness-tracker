@@ -5092,9 +5092,9 @@
      clientPackageFlags / isClientCold yet - future migration target,
      built clean now so that move is cheap later. */
 
-  /* Catalog lookup for a package's template, mirrors sweepExpiringPackages's
-     resolveTemplate. Kept as a separate copy on purpose - the sweep is not
-     rewired in this pass. */
+  /* Catalog lookup for a package's template, mirrored sweepExpiringPackages's
+     resolveTemplate until v4.50, when the sweep dropped its local copy and
+     started calling this one. Single source now. */
   function resolvePackageTemplate(pkg){
     if (!pkg || typeof PT_PACKAGES_BY_FACILITY === 'undefined') return null;
     var lists = [PT_PACKAGES_BY_FACILITY.CMRC || [], PT_PACKAGES_BY_FACILITY.Baca || []];
@@ -5116,7 +5116,7 @@
 
   /* B1: precedence is override, then the package's own stamped validDays
      (e.g. purchase_import.py's RecTrac-derived span), then the catalog
-     default. Diverges from sweepExpiringPackages on purpose - see spec. */
+     default. v4.50: sweepExpiringPackages resolves through this too. */
   function packageValidDays(pkg){
     if (!pkg) return null;
     if (pkg.validDaysOverride != null) return pkg.validDaysOverride;
@@ -6118,8 +6118,8 @@
      and <=7), 0 (<=0 days). Skips fully-consumed clients (live recompute
      from client.sessions[] is the only source of truth - the previously-
      stored sessionsUsed / sessionsRemaining / is_active package fields
-     were write-only and were removed in Sprint K). validDays resolves from
-     the matched template (template_id preferred, type-string fallback);
+     were write-only and were removed in Sprint K). validDays resolves via
+     packageValidDays (override, stamped pkg.validDays, catalog default);
      packages with no resolvable validDays are silently skipped, which is
      why consult rows (sessions=0, no validDays) and legacy seed packages
      without a matching template never fire.
@@ -6131,24 +6131,6 @@
   function sweepExpiringPackages(clients, trainerProfiles, session, todayYMD){
     if (!session || !session.trainer_id) return Promise.resolve();
     if (typeof PT_PACKAGES_BY_FACILITY === 'undefined') return Promise.resolve();
-
-    function resolveTemplate(pkg){
-      if (!pkg) return null;
-      var lists = [PT_PACKAGES_BY_FACILITY.CMRC || [], PT_PACKAGES_BY_FACILITY.Baca || []];
-      if (pkg.template_id) {
-        for (var i = 0; i < lists.length; i++) {
-          var byId = lists[i].find(function(t){ return t.id === pkg.template_id; });
-          if (byId) return byId;
-        }
-      }
-      if (pkg.type) {
-        for (var j = 0; j < lists.length; j++) {
-          var byType = lists[j].find(function(t){ return t.type === pkg.type; });
-          if (byType) return byType;
-        }
-      }
-      return null;
-    }
 
     function trainerIdFor(name){
       if (!name) return null;
@@ -6218,10 +6200,7 @@
         if (!pkg.purchaseDate) return;
         if ((pkg.sessions || 0) === 0) return;
 
-        var template = resolveTemplate(pkg);
-        var validDays = (pkg.validDaysOverride != null)
-          ? pkg.validDaysOverride
-          : (template && template.validDays);
+        var validDays = packageValidDays(pkg);
         if (validDays == null) return;
 
         var expiresOn = addDaysYMD(pkg.purchaseDate, validDays);
@@ -6230,6 +6209,7 @@
         if (band == null) return;
 
         var dedupKey = pkg.id + ':' + band;
+        var template = resolvePackageTemplate(pkg);
         var packageLabel = (template && template.label) || pkg.type || 'Package';
 
         candidates.push({
@@ -31536,7 +31516,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.49 */
+/* v4.50 */
 </script>
 </body>
 </html>

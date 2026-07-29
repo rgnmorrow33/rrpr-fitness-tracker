@@ -69,6 +69,25 @@ anyone who doesn't have direct access to Reagan's files.
 - **PIN hashing.** Per *PIN storage as plaintext* (ADR, proposed). The PIN in
   the settings table is plaintext today. Hash before APC.
 
+## Open correctness questions
+
+Not cleanup. Each one changes numbers on live records, so each needs its own
+version and its own decision rather than a convenient sweep.
+
+- **`sessionConsumption` counts `scheduled` sessions as consumed.** Only
+  `excused` returns 0; every other status, including `scheduled`, deducts at
+  its duration ratio. So a booked-but-unsigned future session reduces
+  `sessionsRemaining` exactly like an attended one. Blast radius is everything
+  downstream of `sessionsRemaining`: the `sweepExpiringPackages` early exit
+  (`remaining <= 0` skips the client entirely, so a genuinely expiring package
+  can go unnotified), the `sessions_low` bands, `isClientCold`,
+  `clientPackageFlags`, the `expiring` refinement in `clientLifecycleStatus`,
+  and the remaining-session count a trainer reads on screen. Surfaced v4.50
+  while measuring lifecycle buckets against live data: one live client reads
+  cold and stale purely because her most recent session row is a `scheduled`
+  booking. Deciding this means deciding whether a booking is a claim on the
+  package or only a sign-off is - do not fold it into a feature batch.
+
 ## Deferred cleanup pile
 
 Address in a dedicated cleanup commit when convenient. These are their own
@@ -140,6 +159,18 @@ pass - do NOT touch app code for them mid-feature.
   aged-row `var(--red)` instances (the border ternary and the AGED badge
   background). Mechanical sweep, ~10 edits total. Bundle in a future
   admin-polish cleanup commit.
+- **Date-helper disambiguation comments reference call sites by line number.**
+  The comment blocks above `addDays`, `addDaysYMD` and `daysBetween` point at
+  each other numerically. The no-line-numbers convention at the top of this
+  file is scoped to `/docs`, so these are not a violation, but the same
+  reasoning applies harder inside the single file that actually drifts - the
+  v4.50 diff moved two of the three within hours of the comments landing.
+  Rewrite as name-only cross-references.
+- **`.gitignore` does not cover the untracked files that trip `release:tag`.**
+  `AUDIT_FINDINGS.md`, `playwright.local.config.ts`, `tests-local/` and
+  `tests/trainer-smoke.spec.ts` sit untracked in the working copy, so the
+  tag helper refuses on a dirty tree and every release needs `--allow-dirty`.
+  Open since v4.45. The `.gitignore` commit is the real fix.
 
 ## Notification UX followups
 

@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.48** (realtime guard + docs correction, deployed July 14, 2026)
+**Live version: v4.50** (sweep validDays resolution, July 29, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -11,66 +11,273 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - July 14, 2026
+## Current standing - July 29, 2026
 
-- **Live version: v4.48**, tagged and pushed; Netlify prod (pardfitnesstracker2)
-  auto-deployed. Tracker file: 31,380 lines / 1.4 MB. `node --check` on the
-  embedded JS: PASS.
-- **v4.47 closed the first piece of v4.46 fallout.** The post-deploy smoke suite
-  went fully red (9 of 9 views) within hours of the v4.46 flip. Not one was an
-  assertion failure - every view rendered. The realtime `reload()` path had no
-  `isStaff()` gate, so the signed-out login screen fired all 12 entity reloaders
-  on every page load and every wake, and 11 came back 42501. Gated. Suite green.
-- **The public exposure is closed.** Verified from a signed-out browser against
-  the live production site after deploy:
-
-      await supabaseClient.from('clients').select('*')
-      -> BLOCKED: permission denied for table clients
-
-  Earlier the same day that exact line returned all 15 client records, including
-  4 PAR-Q health questionnaires. `trainer_directory` (names only, no PINs, no
-  hashes) is now the only thing anyone on the internet can read.
-- Data intact through the flip: 15 clients, 10 leads, 132 classes, 21 trainers.
-- 13 plaintext PINs destroyed and bcrypt-hashed. Admin PIN hashed. RLS enabled on
-  19 tables. Zero `allow all` policies survive. Supabase linter: zero
-  `rls_disabled_in_public` errors.
-- Both public member tiles (Weight Room Orientation, Book a Consultation) work,
-  on a write-only kiosk token that can read nothing.
-- **Both import pipelines cut over to `service_role`** and verified with a live
-  authenticated read. They will run normally at 5am and 8am.
-- Production migrations applied: **0002, 0004, 0005, 0006, 0007, 0008**.
-  **0003 was retired and never run.**
-- **anon now holds exactly ONE privilege in the entire `public` schema:**
-  `trainer_directory:SELECT`. That is the correct end state and is worth
-  re-asserting after any future migration that creates a table or view (see 0008).
+- **Live version: v4.50**, tagged. Tracker file: 31,522 lines / 1.4 MB.
+  `node --check` on the embedded JS: PASS. Netlify prod
+  (pardfitnesstracker2) deploys on push to main.
+- **The two-week gap between v4.48 and v4.49 was quiet on the app and busy on
+  the data.** Live client count went 15 -> 35 over that stretch, almost all of
+  it via the 8am weekday `purchase_import.py` run. That growth is what turned
+  client lifecycle from a nice-to-have into the July 29 batch.
+- **v4.49 shipped the lifecycle layer** (`packageValidDays`, `lastActivityDate`,
+  `clientLifecycleStatus` + four threshold constants) and wired it to two
+  surfaces: Active/Lapsed/Dormant/All pills on the AdminAllClients roster, and
+  LAPSED/DORMANT pills on TopBar search rows.
+- **v4.50 removed the last place that resolved package expiry its own way.**
+  `sweepExpiringPackages` now goes through `packageValidDays` like everything
+  else. Behavior-neutral against live data, deliberately fixed while it is.
+- Live data as of July 29: 35 clients (non-deleted), 11 leads, 132 classes,
+  21 trainers, 198 notifications. Realtime publication re-verified by direct
+  query and unchanged: `classes, clients, leads, notifications,
+  trainer_time_off`.
+- anon still holds exactly ONE privilege in the entire `public` schema:
+  `trainer_directory:SELECT`. No migrations have run since v4.46, so the 0008
+  end state is intact.
 
 ### Still open
 
-- **Rotate the anon key** pasted into chat on July 10. Now that RLS is on, the
-  anon key is genuinely safe to be public, so this is hygiene rather than urgency.
-  (Before v4.46, rotation would have fixed nothing: the key ships to every browser
-  regardless. RLS is what makes a public key safe.)
+- **v4.51 (lastActivityDate) is BLOCKED at its own gate.** The defect is real
+  and confirmed: `lastActivityDate` takes the max of (qualifying session date,
+  package purchaseDate, `createdAt`), and for importer-created clients
+  `created_at` is row-insert time, so it falsely freshens recency. The spec
+  gated Phase 2 on "zero live clients change lifecycle bucket." Measured
+  against live data on July 29, **one client changes: Melissa Harvey, lapsed
+  -> dormant** (resolved date 2026-05-13 -> 2026-03-08, a 66-day import lag,
+  daysSince 77 -> 143). Gate failed, no edit made. Needs a call on whether
+  reclassifying her is the correct outcome (it looks like it is - her only
+  package was purchased March 8 and she has no sessions) before the fix ships.
+- **Two more clients sit 3 days from the same flip.** Michael Hilliard and
+  Jayasaree Kumar both resolve to 2026-04-03 under the corrected chain, which
+  is daysSince 117 against a >120 dormant threshold. Whenever v4.51 ships, it
+  will move them too unless something else changes first.
+- **All five device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, including
+  P1 (does live sync between two iPads still work after the v4.46 RLS flip). That
+  has now been open for 15 days. Code review cannot close any of them.
+- **Rotate the anon key** pasted into chat on July 10. Hygiene, not urgency, now
+  that RLS is on.
 - **Row ownership is still app-side**, not enforced by RLS. Any signed-in trainer
-  can update any client's row. Structural, not laziness: sessions, packages and
-  attendance live inside JSONB blobs on the parent row (ADR-0004), so "log a
-  session" IS "UPDATE the whole clients row". Unwinding that is a separate
-  project. Acceptable for an internal team tool; revisit before APC.
-- **UNVERIFIED: do realtime events actually flow after sign-in on a channel that
-  was opened pre-auth?** The realtime useEffect has `[]` deps, so all 4 entity
-  channels are opened while signed OUT, as anon. `realtime.setAuth()` fires on the
-  auth flip and SHOULD re-authorize them. If it does not, live cross-device sync
-  for clients / classes / leads is silently dead since the v4.46 flip, and the app
-  would look fine (data still converges on reload and wake sweep). This is now the
-  single highest-value open item. Settle it with the two-iPad sub-coverage check:
-  drop a class on one iPad, watch it appear on a second WITHOUT reloading. If it
-  only appears after a reload, channels are not re-authorizing and the fix is to
-  add `authVersion` to the effect's deps so channels open WITH a token.
+  can update any client's row. Structural (sessions/packages/attendance live in
+  JSONB on the parent row, ADR-0004). Acceptable for an internal team tool;
+  revisit before APC.
 - `intake-import/README.md` still documents the retired no-write posture.
   SCHEMA.md autogen regions miss `pt_discharge` and `intake_paperwork`.
   Test-FMS cleanup SQL is committed but never run.
 - `scripts/staging/rls_staging_test.py` asserts `PASS anon can select clients`,
-  which was correct for the retired 0003 model and is a critical failure under the
-  shipped model. `rls_identity_test.py` supersedes it. Retire the old one.
+  correct for the retired 0003 model and a critical failure under the shipped
+  model. `rls_identity_test.py` supersedes it. Retire the old one.
+- **`.gitignore` still does not cover the untracked files that trip
+  `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.50 - July 29, 2026
+
+One resolution path for package expiry instead of two. Behavior-neutral today,
+which is the entire reason to do it today.
+
+### Trigger
+
+v4.49 added `packageValidDays` with the correct precedence and pointed the new
+lifecycle surfaces at it, but deliberately left `sweepExpiringPackages` on its
+own inline resolution ("Diverges from sweepExpiringPackages on purpose - see
+spec"). That deferral was correct for v4.49's blast radius and wrong to leave
+standing.
+
+### Goal
+
+Kill the divergence while the data that would expose it does not exist yet. A
+behavior-neutral swap is a code review. The same swap in three months is a
+migration with live consequences.
+
+### File version
+
+v4.50 - 31,522 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+`sweepExpiringPackages` resolved a package's validity window as:
+
+    validDaysOverride ?? template.validDays
+
+It never read `pkg.validDays`. But `purchase_import.py` stamps `pkg.validDays`
+with the real RecTrac span at import, and `packageValidDays(pkg)` - already live
+behind the v4.49 lifecycle pills and the TopBar search rows - resolves
+override -> `pkg.validDays` -> catalog default. So the same package could be
+"expiring" to the roster pill and not expiring to the notification sweep.
+
+Why it has not bitten yet: every stamped `validDays` currently in production
+equals its catalog default (365 across the board), so the two paths agree on all
+35 active packages. The types where the divergence is structural rather than
+accidental are **Baca-Pairs-4 (30 day catalog default)** and **Baca-Pairs-8
+(60 day)** - a stamped 90-day span on either one would have resolved to 30 or 60
+in the sweep and 90 everywhere else. Both have **zero live rows** right now.
+
+That emptiness is the argument for fixing it now, not the argument for waiting.
+
+### Changes
+
+- **`sweepExpiringPackages` calls `packageValidDays(pkg)`.** The inline
+  `validDaysOverride ?? template.validDays` ternary is gone.
+- **The sweep's local `resolveTemplate` copy is deleted.** It existed only to
+  feed that ternary. The package label - the one other thing it fed - now
+  resolves through the module-scope `resolvePackageTemplate`, which is the same
+  lookup with one extra guard.
+- Three comment blocks corrected in the same pass, because all three asserted
+  the divergence was intentional and would have invited someone to re-add it:
+  the sweep's header block, `resolvePackageTemplate`'s "kept as a separate copy
+  on purpose," and `packageValidDays`'s "diverges from sweepExpiringPackages
+  on purpose."
+- Untouched by design: the band logic (0/7/14), the dedupe key
+  (`pkg.id + ':' + band`), `sessions_low` (count-driven, not expiry-driven),
+  and `clientLifecycleStatus`.
+
+Diff: **+9/-29** against a ~+6/-25 target. The overage is entirely the three
+comment corrections (+5/-5) plus the footer bump (+1/-1); the code-only diff is
++3/-23.
+
+### Test results
+
+- `node --check` on the embedded JS - PASS (via
+  `scripts/hooks/pre-push-syntax-check.js --git`).
+- **Precedence verified on 13 synthetic package objects in node**, running the
+  real `packageValidDays` / `resolvePackageTemplate` source extracted from the
+  shipped file. All three branches proven: override wins over everything;
+  stamped `validDays` beats the catalog default; bare package falls to the
+  catalog default via either `template_id` or `type`. Includes the
+  Baca-Pairs-4 case (catalog 30) carrying `validDays: 90`, which has no live
+  coverage - old path resolved 30, new path resolves 90. Also covers
+  `validDaysOverride: 0` (respected, not treated as absent) and the consult /
+  legacy-seed rows that resolve null and get skipped. No database writes, no
+  test rows in production.
+- **Divergence re-run against live data after the swap: 0 packages.** 35 active
+  packages across 35 non-deleted clients, 20 carrying a stamped `validDays`, 0
+  with an override, 0 where old and new resolution disagree. The swap changed
+  nothing for live data, which is what it was supposed to prove.
+- The v4.49 Fix A follow-up (comment-only disambiguation of
+  `addDays` / `addDaysYMD` / `daysBetween`, commit `3d31c33`) rides in this
+  version. It had been pushed to a stranded branch instead of main and was
+  merged clean, +6/-0, one file, no behavior change.
+
+### Deferred
+
+All of these are filed in `docs/BACKLOG.md` in this same commit, not just noted
+here. `sessionConsumption` went into a new **Open correctness questions**
+section rather than the cleanup pile, because it changes numbers on live
+records and "address when convenient" is the wrong instruction for it.
+
+- **The disambiguation comments merged in `3d31c33` reference call sites by
+  line number** (4770, 5576, 5585). CLAUDE.md's no-line-numbers rule is scoped
+  to `/docs`, so this is not a violation, but the same reasoning applies harder
+  inside a 31k-line file that drifts every version - this v4.50 diff already
+  moved two of the three. Worth converting to name-only references.
+- **`sessionConsumption` counts `scheduled` sessions as consumed.** Only
+  `excused` returns 0, so a booked-but-unsigned session deducts from
+  `sessionsRemaining` exactly like an attended one. Spotted while measuring
+  lifecycle buckets; not touched. Needs its own version and its own decision,
+  since it changes remaining-session math on live records.
+- **Sessions still have no per-package linkage on the client-wide remaining
+  count**, already flagged in the sweep's own comments. Unchanged.
+
+---
+
+## v4.49 - July 29, 2026
+
+Client lifecycle status. Four fixes, one commit, the first three of them
+groundwork for the fourth.
+
+### Trigger
+
+The roster had grown past the point where "who has drifted away from us" was
+answerable by looking at it. 35 clients, a two-week import ramp, and no way to
+separate someone who trained last week from someone who bought a package in
+March and never came back.
+
+### Goal
+
+A pure, unwired lifecycle classifier with real thresholds, plus the two smallest
+surfaces that make it useful: a roster filter and a duplicate-record guard at
+the front desk.
+
+### File version
+
+v4.49 - 31,536 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`).
+Commit `78f6f71`, +175/-19.
+
+### Changes
+
+**Fix A - date-helper consolidation.** `sweepExpiringPackages` carried a local
+`addDays` and a local `daysBetween`. The sweep-local `addDays` was deleted
+outright and the sweep repointed at the pre-existing module-scope `addDaysYMD`;
+`daysBetween` had no existing equivalent and hoisted to module scope unchanged.
+
+**Fix B - the lifecycle helpers.** Three module-scope functions plus four
+threshold constants, all pure, no writes, no persistence, no schema:
+
+- `packageValidDays(pkg)` - override -> stamped `pkg.validDays` -> catalog
+  default.
+- `lastActivityDate(client)` - latest of qualifying session date, package
+  purchase date, or client creation. `scheduled` sessions do not count; an
+  unsigned future or stale booking should not prop up recency.
+- `clientLifecycleStatus(client, today)` - `active` | `expiring` | `lapsed` |
+  `dormant`. Recency gates first, package state only refines the recent bucket
+  into active vs expiring. Null-defends toward `active`: a client with no
+  resolvable activity date reads as active, never as a reason to hide a record.
+- `LIFECYCLE_LAPSED_DAYS` 45, `LIFECYCLE_DORMANT_DAYS` 120,
+  `LIFECYCLE_EXPIRING_DAYS` 30, `LIFECYCLE_EXPIRING_SESSIONS` 2.
+
+**Fix C - roster filter pills.** Active / Lapsed / Dormant / All on
+AdminAllClients, orthogonal to the existing package-alert chips. Counts computed
+once against the full client set (not the current filter) and memoized against
+`ctx.clients`, because this is a full `clientLifecycleStatus` pass over every
+client and it must not redo that work on every keystroke.
+
+**Fix D - search-row status pills.** LAPSED / DORMANT pills on TopBar global
+search results. This is the one with an actual operational job: it stops the
+front desk from creating a duplicate record for a returning member. Search
+matching itself stays unfiltered across all statuses - the pill informs, it does
+not hide.
+
+### Test results
+
+- `node --check` on the embedded JS - PASS.
+- Came in at **+175/-19 against a ~+155/-15 target**. The overage was
+  `resolvePackageTemplate`, flagged before commit and approved rather than
+  absorbed silently.
+
+### Deferred
+
+- `clientPackageFlags` and `isClientCold` still carry their own recency logic
+  and were **not** migrated onto `lastActivityDate`. Named as a future migration
+  target in the code comments. Still open as of v4.50.
+- `packageValidDays` was left deliberately diverging from
+  `sweepExpiringPackages`. Closed in v4.50.
+
+### The lesson
+
+The Fix A precondition asked the wrong question. It asked a **closure** question
+- can this local function safely be hoisted out of its enclosing scope - when
+the real risk was a **namespace** question: is that name already taken at module
+scope, and by what?
+
+It was. A module-scope `addDays(d, n)` already existed, and it takes and returns
+`Date` objects, not YMD strings. The sweep's local `addDays` was the YMD-string
+variant. A naive same-name hoist would have compiled fine, passed `node --check`
+fine, and silently shadowed the Date-based helper across **30-plus call sites**
+- payroll, week navigation, and the schedule builders - every one of which would
+have started passing a `Date` into a function expecting `'YYYY-MM-DD'`. Nothing
+would have thrown. Dates would just have been wrong, on a payroll surface.
+
+What caught it was reading module scope for the name before moving anything, not
+the syntax check and not the diff review. Both of those would have passed.
+
+The follow-up was to cross-reference all three date helpers in comments so the
+next reader reaches for the right one. That pass got pushed to a stranded branch
+and sat unmerged for the rest of the day, which is its own small lesson about
+where work lands: it shipped with v4.50, not v4.49.
+
+**Before hoisting anything, grep the destination scope for the name. Not for the
+behavior - for the name.**
 
 ---
 
