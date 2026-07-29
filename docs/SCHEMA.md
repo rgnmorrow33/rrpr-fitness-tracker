@@ -12,16 +12,16 @@ drift read-only, `npm run schema:check -- --write` applies it to the
 it and stays hand-curated. Column **Notes** are preserved verbatim across
 regens, so a wrong note stays wrong until someone edits it by hand.
 
-> **The AUTOGEN regions below are STALE as of 2026-07-29.** They still say 17
-> tables with RLS "Disabled" on every row. Live is **19 tables with RLS
-> enabled on all 19**, 55 policies, and anon holding one privilege
-> (`trainer_directory:SELECT`). Run `npm run schema:check -- --write` to
-> refresh them - it needs `DATABASE_URL` in `.env`, which is why it could not
-> be run in the July 29 docs pass. Until then trust CLAUDE.md's Security
-> posture section, not the RLS column in the grid below.
+> **Known bug in the generator, found 2026-07-29.** `parseRows` splits Notes
+> cells on `|` without honouring the markdown `\|` escape, so any note
+> containing an escaped pipe is truncated at that point on every `--write`.
+> It ate the `classes.time` note on this run; it was restored by hand
+> afterwards. Check that row after any future regen until `parseRows` is
+> fixed to respect `\|`.
 
-**Last updated.** 2026-07-29 (narrative prose only - see the AUTOGEN warning
-above).
+**Last updated.** 2026-07-29. AUTOGEN regions regenerated against the live
+database (19 tables, RLS enabled on all 19). Narrative prose hand-curated the
+same day.
 
 **Cross-references.**
 - ARCHITECTURE.md explains the why behind these shapes (JSONB
@@ -36,7 +36,7 @@ above).
 ## Table inventory
 
 <!-- AUTOGEN:table-count START -->
-The `public` schema contains **17 tables**: 14 active tables wired
+The `public` schema contains **19 tables**: 16 active tables wired
 to the codebase (listed below), plus 3 orphan tables (empty, no code
 refs, no FK constraints) documented in the "Orphan tables" section
 following the per-table detail.
@@ -45,20 +45,22 @@ following the per-table detail.
 <!-- AUTOGEN:table-inventory START -->
 | Table | Purpose | RLS | Realtime |
 |---|---|---|---|
-| `clients` | Core PT client records. JSONB-heavy: packages, sessions, audit_log all embedded. | Disabled | No |
-| `classes` | Group exercise class definitions and per-occurrence attendance / sub assignments. | Disabled | No |
-| `wros` | Wellness Recovery Outcomes intake forms. 5 flat columns plus `data` JSONB. | Disabled | No |
-| `leads` | Consult queue / leads pipeline. Whitelist-filtered on write per Patch R. | Disabled | No |
-| `member_contacts` | Quick / Substantive / Educational contact log per trainer. | Disabled | No |
-| `admin_items` | Admin time entries (Program Creation, Training, Community Event, Other, custom). | Disabled | No |
-| `referrals` | PT referrals between trainers and clients. | Disabled | No |
-| `closures` | Facility closure dates (holidays, maintenance). | Disabled | No |
-| `trainers` | Trainer roster with role, role_tier, PIN, soft-delete. | Disabled | No |
-| `schedule_versions` | GX schedule history. Flat columns plus `data` JSONB holding the class list. | Disabled | No |
-| `trainer_time_off` | Per-trainer absence requests with approval workflow. | Disabled | Yes (app-changes) |
-| `announcement_banners` | Short-lived ops broadcasts to the trainer surface. | Disabled | No |
-| `notifications` | Trainer-targeted server-authored messages. Per-trainer subscription. | Disabled | Yes (per-trainer channel) |
-| `settings` | Key-value store. Currently holds `admin_pin` row. | Disabled | No |
+| `clients` | Core PT client records. JSONB-heavy: packages, sessions, audit_log all embedded. | Enabled | Yes |
+| `classes` | Group exercise class definitions and per-occurrence attendance / sub assignments. | Enabled | Yes |
+| `wros` | Wellness Recovery Outcomes intake forms. 5 flat columns plus `data` JSONB. | Enabled | No |
+| `leads` | Consult queue / leads pipeline. Whitelist-filtered on write per Patch R. | Enabled | Yes |
+| `member_contacts` | Quick / Substantive / Educational contact log per trainer. | Enabled | No |
+| `admin_items` | Admin time entries (Program Creation, Training, Community Event, Other, custom). | Enabled | No |
+| `referrals` | PT referrals between trainers and clients. | Enabled | No |
+| `closures` | Facility closure dates (holidays, maintenance). | Enabled | No |
+| `trainers` | Trainer roster with role, role_tier, PIN, soft-delete. | Enabled | No |
+| `schedule_versions` | GX schedule history. Flat columns plus `data` JSONB holding the class list. | Enabled | No |
+| `trainer_time_off` | Per-trainer absence requests with approval workflow. | Enabled | Yes (app-changes) |
+| `announcement_banners` | Short-lived ops broadcasts to the trainer surface. | Enabled | No |
+| `notifications` | Trainer-targeted server-authored messages. Per-trainer subscription. | Enabled | Yes (per-trainer channel) |
+| `settings` | Key-value store. Currently holds `admin_pin` row. | Enabled | No |
+| `pin_attempts` | PIN lockout counter, one row per scope (`admin` or `trainer:<uuid>`). Written only by the PIN RPCs. | Enabled | No |
+| `trainer_pins` | bcrypt PIN hashes, one row per trainer. No client-reachable read path. | Enabled | No |
 <!-- AUTOGEN:table-inventory END -->
 
 **RLS state (verified 2026-07-29): enabled on all 19 public tables**, 55
@@ -115,6 +117,9 @@ the primary target of ADR-0002 / ADR-0003 normalization work.
 | `deleted_at` | timestamptz | Soft-delete timestamp. |
 | `deleted_by` | text | Soft-delete actor. |
 | `created_by` | text | Sign-in name of creator. |
+| `assessments` | jsonb | Array of assessment rows (FMS today). Composite is computed once at save and stored, never recomputed on read, so history keeps the score it was graded under. Passthrough (single-word key, no field map). |
+| `pt_discharge` | jsonb | PT clinic discharge handoff record. Drives the PT_DISCHARGE alert chip on the roster. |
+| `intake_paperwork` | jsonb | Intake packet object rendered read-only by `INTAKE_SECTIONS` in ClientDetail (v4.40). Populated by import/SQL only until the Forms ingestion is built (BACKLOG). |
 <!-- AUTOGEN:columns:clients END -->
 
 **Translator mapping** (`translate.clients`): camelCase in-memory →
@@ -370,6 +375,7 @@ to false (no DELETE).
 | `audit_log` | jsonb | Append-only. |
 | `deleted_at` | timestamptz | Hard soft-delete (distinct from `is_active`). |
 | `deleted_by` | text | Soft-delete actor. |
+| `pin_set` | boolean | Whether this trainer has a PIN set, so the sign-in tile knows if it is usable. Maintained by `set_trainer_pin()`; the app never writes it. The hash itself lives in `trainer_pins`. |
 <!-- AUTOGEN:columns:trainers END -->
 
 **Translator** (`translate.trainers`, custom): not field-pair-based;
@@ -474,21 +480,59 @@ standard `makeFieldTranslator` would break the patch path that flips
 
 ### `settings`
 
-Key-value store. Today this holds one row keyed `admin_pin` with the
-Front Desk PIN as the value. Future config rows can land here without
-migrations.
+Key-value store. Today this holds one row keyed `admin_pin`, whose value
+is a **bcrypt hash** of the Front Desk PIN, not the PIN (v4.46, migration
+0002). Future config rows can land here without migrations.
 
 <!-- AUTOGEN:columns:settings START -->
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | uuid surrogate. Upserts target `key`, not `id` (`makeSettingsRow` writes `key` / `value` / `updated_at` only and never stamps `id`). |
 | `key` | text | PK. The on-conflict target. |
-| `value` | text | Arbitrary payload. |
+| `value` | text | Arbitrary payload. For `admin_pin` this is a bcrypt hash; it is never compared client-side. See `verify_admin_pin`. |
 | `updated_at` | timestamptz | |
 <!-- AUTOGEN:columns:settings END -->
 
 Used via the `makeSettingsRow` factory. Not in any realtime
 publication - settings are read on demand.
+
+### `trainer_pins`
+
+bcrypt PIN hashes, one row per trainer. Added by migration 0002 (v4.46)
+when PINs moved off `trainers.pin` and out of the client entirely. The
+hash never leaves the database: `verify_trainer_pin` compares server-side
+and returns a session, not a comparison. `trainers.pin` still exists as a
+vestigial column and is NULL on every row.
+
+<!-- AUTOGEN:columns:trainer_pins START -->
+| Column | Type | Notes |
+|---|---|---|
+| `trainer_id` | uuid | PK. FK to `trainers.id` ON DELETE CASCADE - the one hard FK constraint in the schema. |
+| `pin_hash` | text | bcrypt. Not readable by `anon` or `authenticated`; only the SECURITY DEFINER PIN functions touch it. |
+| `updated_at` | timestamptz | Stamped by `set_trainer_pin()`. |
+<!-- AUTOGEN:columns:trainer_pins END -->
+
+Written only by `set_trainer_pin()`, read only by `verify_trainer_pin()`.
+PUBLIC execute on the setters was revoked in migration 0007. No app code
+selects from this table directly.
+
+### `pin_attempts`
+
+Brute-force lockout counter for PIN entry. One row per scope, where scope
+is `admin` or `trainer:<uuid>`. Maintained entirely by the PIN RPCs via
+the `_pin_record` / `_pin_locked` helpers.
+
+<!-- AUTOGEN:columns:pin_attempts START -->
+| Column | Type | Notes |
+|---|---|---|
+| `scope` | text | PK. `admin` or `trainer:<uuid>`. |
+| `fails` | integer | Consecutive failures. Reset on success. |
+| `first_fail_at` | timestamptz | Start of the current failure window. |
+| `locked_until` | timestamptz | Non-null means locked. Checked before any hash comparison. |
+<!-- AUTOGEN:columns:pin_attempts END -->
+
+Five failed attempts trigger the lockout per the v4.46 go-live runbook. No
+app code selects from this table directly.
 
 ---
 

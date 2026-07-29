@@ -16,7 +16,7 @@
  *                                        regions of docs/SCHEMA.md only.
  *
  * It also doubles as an RLS-posture monitor: if any public table reports RLS
- * ENABLED, that is surfaced LOUDLY regardless of mode (the v4.31 drift class),
+ * DISABLED, that is surfaced LOUDLY regardless of mode (open to the anon key),
  * and orphan detection flags any table that is in the DB but not the doc, or
  * in the doc but not the DB.
  *
@@ -179,14 +179,20 @@ function columnsBlockTables(text) {
 }
 
 // Parse a markdown grid's data rows into arrays of trimmed cells. Skips the
-// header row and the |---|---| separator. Assumes no literal pipes inside cells
-// (true for this doc).
+// header row and the |---|---| separator.
+//
+// Splits on unescaped pipes only. The original version split on a bare '|' and
+// carried the comment "assumes no literal pipes inside cells (true for this
+// doc)" - that assumption was false. `classes.time`'s note contains an escaped
+// `\|\|`, so every --write truncated it at the first escape and silently
+// destroyed ~200 characters of the note. Caught 2026-07-29 by diffing a dry run
+// before applying it.
 function parseRows(inner) {
   if (inner == null) return [];
   return inner
     .split(/\r?\n/)
     .filter((ln) => ln.trim().startsWith('|'))
-    .map((ln) => ln.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()))
+    .map((ln) => ln.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim()))
     .filter((cells, i) => !(i === 0 || cells.every((c) => /^-*$/.test(c)))); // drop header + separator
 }
 
@@ -370,16 +376,25 @@ async function main() {
 
   // --- always-on report: RLS monitor + orphan/drift detection ---
   const out = [];
-  const rlsEnabled = db.tables.filter((t) => db.rls.get(t) === true);
-  if (rlsEnabled.length) {
+  // RLS posture monitor. Polarity flipped 2026-07-29: this used to alarm on RLS
+  // ENABLED, which was correct in the v4.31 prototype era when the app had zero
+  // RLS-aware paths. v4.46 enabled RLS on every public table, added 55 policies
+  // and cut anon down to trainer_directory:SELECT, so enabled is now the
+  // intended posture and DISABLED is the emergency - a table shipped without
+  // RLS is open to the public internet. Left un-flipped the check screamed on
+  // all 19 tables every run and forced a nonzero exit even on a clean doc,
+  // which trains the reader to ignore its loudest output.
+  const rlsOff = db.tables.filter((t) => db.rls.get(t) === false);
+  if (rlsOff.length) {
     out.push('');
     out.push('################################################################');
-    out.push('## RLS ENABLED on ' + rlsEnabled.length + ' public table(s): ' + rlsEnabled.join(', '));
-    out.push('## The app has zero RLS-aware paths - enabled RLS will break');
-    out.push('## reads/writes. This is the v4.31 drift class. Investigate now.');
+    out.push('## RLS DISABLED on ' + rlsOff.length + ' public table(s): ' + rlsOff.join(', '));
+    out.push('## Since v4.46 every public table carries RLS. A table without it');
+    out.push('## is readable and writable by anyone holding the committed anon');
+    out.push('## key, which is every browser. Close this before anything else.');
     out.push('################################################################');
   } else {
-    out.push('RLS posture: all ' + db.tables.length + ' public tables have RLS disabled (expected).');
+    out.push('RLS posture: all ' + db.tables.length + ' public tables have RLS enabled (expected).');
   }
 
   if (inDbNotDoc.length) {
@@ -404,7 +419,7 @@ async function main() {
   process.stdout.write(out.join('\n') + '\n');
 
   // --- mode-specific behavior ---
-  const hardDrift = drifted || inDbNotDoc.length || inDocNotDb.length || rlsEnabled.length;
+  const hardDrift = drifted || inDbNotDoc.length || inDocNotDb.length || rlsOff.length;
 
   if (write) {
     if (drifted) {
