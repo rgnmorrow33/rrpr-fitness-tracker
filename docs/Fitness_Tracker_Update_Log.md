@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.51** (lastActivityDate createdAt fallback, July 29, 2026)
+**Live version: v4.52** (translator casing, audit_log and deleted_at round-trip snake, July 29, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,9 +13,15 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 29, 2026
 
-- **Live version: v4.51**, tagged. Tracker file: 31,527 lines / 1.4 MB.
+- **Live version: v4.52**, tagged. Tracker file: 31,518 lines / 1.4 MB.
   `node --check` on the embedded JS: PASS. Netlify prod
   (pardfitnesstracker2) deploys on push to main.
+- **v4.52 fixed a translator casing mismatch that had been silently destroying
+  audit history and resurrecting soft-deleted records.** Four entities were
+  renaming `audit_log`, `deleted_at`, and `deleted_by` to camelCase on load
+  while every read site checked the snake name. Visible GX classes go 132 -> 72
+  as 60 already-deleted duplicates stop rendering. Audit history before
+  July 29 is gone and not recoverable.
 - **The two-week gap between v4.48 and v4.49 was quiet on the app and busy on
   the data.** Live client count went 15 -> 35 over that stretch, almost all of
   it via the 8am weekday `purchase_import.py` run. That growth is what turned
@@ -52,6 +58,28 @@ Newest version at the top; append new sections above the older ones.
 
 ### Still open
 
+- **The dedup-cleanup effect is armed for the first time as of v4.52.** It had
+  been failing silently since it shipped, because the grouping pass skips rows
+  where `c.deleted_at` is set and the translator was renaming that field away.
+  Going forward it soft-deletes duplicate classes on app mount with no human in
+  the loop. Harmless while the class table is clean; worth a decision before it
+  is not.
+- **The comment above `translate.timeOff` misdescribes the code as of v4.52.**
+  It still reads "Other entities map auditLog<->audit_log in their translators
+  - that is a pre-existing latent shape mismatch with appendAuditEntry; not
+  fixed here." They no longer do. Docs commit, not a code commit.
+- **Adjacent findings from the v4.52 audit, all unfixed.** `activeQueue` is
+  computed and never consumed, and guards a `deleted_at` column that `leads`
+  does not have (confirmed via `information_schema`). The `w.deletedAt` guard
+  in `ConsultQueueView.unconvertedWROs` is permanently false since no WRO
+  soft-delete path exists. `listTimeOffAllTrainers` has zero call sites.
+  `translate.closures` registers an identity pair `['facility', 'facility']`.
+  `softDeleteTrainerRecord` sets `deleted_at` without setting
+  `is_active = false`, while `trainersStorage.load` filters only on
+  `is_active`. `translate.contacts` has no `createdAt` pair but
+  `makeFieldTranslator` drops `createdAt` unconditionally. DECISIONS.md claims
+  `schedule_versions` uses `appendAuditEntry` when it has no call site and its
+  `toSupabase` has no `audit_log` key at all.
 - **The recency helper migration is specced but NOT built.** Repointing
   `clientPackageFlags` and `isClientCold` onto `lastActivityDate` is the
   obvious next move - both still carry their own recency logic, and
@@ -82,6 +110,163 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.52 - July 29, 2026
+
+Three fields stop getting renamed on the way in from Supabase. Audit history
+renders again, soft deletes survive a reload, and the 60 duplicate classes the
+dedup cleanup has been trying to remove since it shipped finally disappear.
+
+### Trigger
+
+Read-only diagnostic audit requested against v4.49, run against v4.50. A static
+trace had produced a hypothesis: `makeFieldTranslator` registers `audit_log <->
+auditLog` and `deleted_at <-> deletedAt`, `fromSupabase` renames on every load,
+and downstream guards that check the snake_case name go blind. Candidate, not
+diagnosis. The audit was scoped to confirm or refute it, and to sweep every
+registered pair rather than only the two suspected.
+
+### Goal
+
+A soft-deleted client, class, or time-off record should stay hidden after a
+reload. An audit log should accumulate. Neither was true for `clients`,
+`classes`, `leads`, or `trainer_time_off`.
+
+### File version
+
+v4.52 - 31,518 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+All three claims confirmed, two of them with the mechanism wrong.
+
+**Soft deletes were never lost.** `softDeleteClient` does `Object.assign({},
+before, { deleted_at: ..., deleted_by: ... })` on a record that already carries
+`deletedAt` from `fromSupabase`. Both keys resolve to `deleted_at` in
+`toSupabase`, and because `Object.keys` walks creation order and the snake key
+was added last, snake won. The Postgres row was correctly stamped every time.
+What broke was the read: after the next load the record carries `deletedAt`
+only, and all ~20 guards test `deleted_at`. The record was permanently deleted
+in the database and permanently visible in the app.
+
+**Audit logs were replaced, not truncated.** `appendAuditEntry` starts from
+`(record.audit_log || [])`, which post-load is `[]`, so every write persisted a
+one-element array over the full history. The 100-entry head-trim never fired.
+`clients`, `classes`, and `leads` are all in the realtime publication, so each
+write echoed back, triggered the 100ms debounced reload, and reset the record
+before the next append. Steady state was one entry, forever.
+
+Confirmed against live data, not just source:
+
+- Audit depth by table. `clients` deepest 2 (26 of 36 rows at exactly 1),
+  `classes` deepest 2 (60 of 132 at 1), `leads` deepest 1. Controls that keep
+  snake in memory: `trainers` deepest 3 with 8 of 21 above one entry,
+  `trainer_time_off` deepest 3 with 11 of 12 above one entry.
+- Zero reads of `.auditLog` anywhere in the file. `fromSupabase` was writing a
+  key nothing consumed.
+- 60 of 132 classes carried `deleted_at` and were rendering as active.
+- The clincher: all 60 shared one timestamp to the millisecond,
+  `2026-07-29 15:43:00.322+00`, five minutes old when queried. That can only
+  come from a single `new Date().toISOString()` in one `setClasses` updater.
+  The dedup-cleanup effect skips rows where `c.deleted_at` is set, which
+  post-reload is never, so it re-detected the same 60 duplicates and rewrote
+  them on every app mount. It had been failing silently since it shipped.
+
+`closures` came back at zero audit entries across all 12 rows and was initially
+read as a failing control. It is not a control at all: all 12 are
+`SEED_CLOSURES_2026`, seeded straight into state via `useState`, and
+`addClosure` / `removeClosure` have never run in production.
+
+### Changes
+
+- **`translate.clients`** - removed `['auditLog', 'audit_log']`,
+  `['deletedAt', 'deleted_at']`, `['deletedBy', 'deleted_by']`.
+- **`translate.classes`** - removed the same three.
+- **`translate.leads`** - removed `['auditLog', 'audit_log']`. Leads has no
+  `deleted_at` column (confirmed via `information_schema`), so there was
+  nothing else to strip.
+- **`translate.timeOff`** - removed `['deletedAt', 'deleted_at']`,
+  `['deletedBy', 'deleted_by']`. Its `audit_log` was already correctly out of
+  the map.
+- **`BulkImportClientsModal.buildClientPayload`** - `auditLog: []` becomes
+  `audit_log: []`. Without this the stripped pair turns it into a bogus
+  `auditLog` column and every bulk import dies on PGRST204.
+
+Diff: **+1/-10**. The four entities now match `trainers` and `closures`, which
+have kept these fields snake-case in memory all along.
+
+Side effect worth knowing: `AUDIT_NOISE_KEYS` lists `audit_log` but not
+`auditLog`, so the noise filter in `diffRecords` was not covering the key these
+records actually carried. It covers it now, for free.
+
+### Test results
+
+- `node --check` on the embedded JS extracted from the patched file - PASS.
+- **Post-fix orphan sweep** across the whole file: zero remaining code
+  references to `auditLog`. The 15 remaining `deletedAt` / `deletedBy` hits are
+  all `translate.scheduleVersions`, which is a separate custom translator that
+  is camel-case by design and correct, plus the one dead `w.deletedAt` guard on
+  WROs.
+- **Round trip executed against the real patched translator**, extracted from
+  the edited file and run on a representative row: `audit_log` appends 3 -> 4
+  instead of collapsing to 1, exactly one `audit_log` and one `deleted_at` key
+  reach the wire instead of two each, and a soft-deleted record still reads
+  `deleted_at` after a simulated reload.
+- **Pre-ship gate against live data.** Rebuilt the dedup key
+  (`name|dayOfWeek|startTime|location|instructor`) in SQL and grouped all 132
+  classes. All 52 duplicate groups returned `surviving = 1`. Eight classes had
+  three copies, forty-four had two, 8x2 + 44x1 = 60. The complement query
+  (groups where every copy is deleted) returned zero rows, so no class
+  disappears entirely.
+- **Not verified: on-device behavior.** No iPad check has been run against
+  v4.52. The checklist below is untouched.
+
+### Deferred
+
+- **The comment above `translate.timeOff` is now wrong.** It reads "Other
+  entities map auditLog<->audit_log in their translators - that is a
+  pre-existing latent shape mismatch with appendAuditEntry; not fixed here."
+  As of this version they do not. Left in place per the defer-cleanups rule;
+  it belongs in a docs commit, not this one.
+- **The destroyed audit history is not recoverable.** This protects everything
+  from July 29 forward and nothing before it.
+- **The dedup-cleanup effect is now armed for the first time.** It has been
+  firing blanks; going forward it soft-deletes duplicate classes on app mount
+  with no human in the loop. That behavior was never separately decided and
+  should be.
+- Adjacent findings from the audit, none fixed. Full list in Still open above.
+
+### iPad test checklist for v4.52
+
+- Open a client with recent activity and tap Audit History. Should list
+  multiple entries. **If it still says "No audit entries yet" after you make a
+  change and reopen it, the fix did not take - roll back.**
+- GX schedule should show 72 classes, not 132, and no visible duplicate rows.
+- Admin > All Classes > Show deleted should now report 60.
+- Soft-delete a throwaway test class, wait for the sync dot to settle, reload.
+  **If it reappears in the active list, the fix did not take.**
+- Time-off manager: the one previously-deleted row should be gone from the
+  active list.
+- Run the regression probe SQL, have someone open the tracker, run it again.
+  The `deleted_at` timestamp on those 60 rows should be identical both times.
+  **If it advances, the dedup loop is still running.**
+
+### The lesson
+
+Two, and they are both about evidence rather than code.
+
+A static trace gets the existence of a bug right and the mechanism wrong in
+whichever direction sounds most alarming. This one called the soft-delete
+failure a lost write when the write was fine and the read was blind, and called
+the audit-log failure a truncation when it was a full replacement. Neither
+correction changes whether you fix it. Both change what you tell people and
+what you check afterward.
+
+And when you pick a control group, verify the control has ever been exercised.
+`closures` looked like a clean comparison and was twelve seed rows that no
+human has ever touched.
 
 ---
 
