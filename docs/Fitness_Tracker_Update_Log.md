@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.50** (sweep validDays resolution, July 29, 2026)
+**Live version: v4.51** (lastActivityDate createdAt fallback, July 29, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,7 +13,7 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 29, 2026
 
-- **Live version: v4.50**, tagged. Tracker file: 31,522 lines / 1.4 MB.
+- **Live version: v4.51**, tagged. Tracker file: 31,527 lines / 1.4 MB.
   `node --check` on the embedded JS: PASS. Netlify prod
   (pardfitnesstracker2) deploys on push to main.
 - **The two-week gap between v4.48 and v4.49 was quiet on the app and busy on
@@ -27,6 +27,10 @@ Newest version at the top; append new sections above the older ones.
 - **v4.50 removed the last place that resolved package expiry its own way.**
   `sweepExpiringPackages` now goes through `packageValidDays` like everything
   else. Behavior-neutral against live data, deliberately fixed while it is.
+- **v4.51 demoted `createdAt` to a fallback in `lastActivityDate`.** It had
+  been a max participant, which meant every importer-created client looked
+  freshly active. One live client reclassified: Melissa Harvey, lapsed ->
+  dormant. Live buckets now 26 active / 0 expiring / 8 lapsed / 1 dormant.
 - Live data as of July 29: 35 clients (non-deleted), 11 leads, 132 classes,
   21 trainers, 198 notifications. Realtime publication re-verified by direct
   query and unchanged: `classes, clients, leads, notifications,
@@ -34,7 +38,6 @@ Newest version at the top; append new sections above the older ones.
 - anon still holds exactly ONE privilege in the entire `public` schema:
   `trainer_directory:SELECT`. No migrations have run since v4.46, so the 0008
   end state is intact.
-
 - **Docs staleness sweep, July 29 (separate commit, no version).** Six files
   carried claims that were false as of v4.46 or v4.33 and had survived every
   version since. Corrected against the live database: CLAUDE.md Security
@@ -49,20 +52,19 @@ Newest version at the top; append new sections above the older ones.
 
 ### Still open
 
-- **v4.51 (lastActivityDate) is BLOCKED at its own gate.** The defect is real
-  and confirmed: `lastActivityDate` takes the max of (qualifying session date,
-  package purchaseDate, `createdAt`), and for importer-created clients
-  `created_at` is row-insert time, so it falsely freshens recency. The spec
-  gated Phase 2 on "zero live clients change lifecycle bucket." Measured
-  against live data on July 29, **one client changes: Melissa Harvey, lapsed
-  -> dormant** (resolved date 2026-05-13 -> 2026-03-08, a 66-day import lag,
-  daysSince 77 -> 143). Gate failed, no edit made. Needs a call on whether
-  reclassifying her is the correct outcome (it looks like it is - her only
-  package was purchased March 8 and she has no sessions) before the fix ships.
-- **Two more clients sit 3 days from the same flip.** Michael Hilliard and
-  Jayasaree Kumar both resolve to 2026-04-03 under the corrected chain, which
-  is daysSince 117 against a >120 dormant threshold. Whenever v4.51 ships, it
-  will move them too unless something else changes first.
+- **The recency helper migration is specced but NOT built.** Repointing
+  `clientPackageFlags` and `isClientCold` onto `lastActivityDate` is the
+  obvious next move - both still carry their own recency logic, and
+  `isClientCold` in particular reads `lastSeenDate`, which counts `scheduled`
+  sessions. Re-measured against the shipped v4.51 helper: **1 cold flip, 1
+  stale flip**, both Melissa Ladd, both the helper getting it right (her
+  newest session row is an unsigned `scheduled` booking from June 16 while she
+  bought a package on July 20). Down from 4 cold / 1 stale measured against the
+  buggy v4.49 helper - three of those four were bug artifacts, not migration
+  effects. Waiting on a spec.
+- **Two clients sit 3 days from the dormant threshold.** Michael Hilliard and
+  Jayasaree Kumar both resolve to 2026-04-03, which is daysSince 117 against a
+  >120 cutoff. They tip on August 1 with no code change at all.
 - **All five device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, including
   P1 (does live sync between two iPads still work after the v4.46 RLS flip). That
   has now been open for 15 days. Code review cannot close any of them.
@@ -80,6 +82,98 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.51 - July 29, 2026
+
+`createdAt` stops voting on how recently a client was active.
+
+### Trigger
+
+Shipped in v4.49 and caught while building v4.50. `lastActivityDate` took the
+max of three dates, and one of them was a row-insert timestamp.
+
+### Goal
+
+Recency should mean the client did something. Not that a batch job touched
+their row.
+
+### File version
+
+v4.51 - 31,527 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+`lastActivityDate` resolved as `max(qualifying session date, package
+purchaseDate, client.createdAt)`. For clients created by hand the third term is
+harmless - they were created the day they showed up. For importer-created
+clients it is not: `purchase_import.py` stamps `created_at` at row-insert time,
+which lags the real purchase by up to **66 days** observed live.
+
+So a client who bought a package on March 8, never booked a session, and got
+swept into the app by the importer on May 13 resolved to May 13. Seventy-seven
+days stale instead of a hundred and forty-three. `clientLifecycleStatus`
+consumes this, and it is live on the AdminAllClients roster pills and the TopBar
+search rows, so the front desk was being told someone was merely lapsed when
+they had been gone nearly five months.
+
+### Changes
+
+- **`createdAt` is now a last-resort fallback, not a max participant.** Session
+  and package dates still max against each other exactly as before. If either
+  resolves, that wins. Only when there is no qualifying session AND no
+  non-deleted package does the helper fall through to `createdAt`.
+- **The comment above the helper names the import-lag reason explicitly**, in
+  the terms that make re-adding the max look like the mistake it is. Without
+  that, the next reader restores it in good faith.
+- Null defense unchanged: all three resolving null still returns null, and
+  `clientLifecycleStatus` still buckets that as `active`. A record is never
+  hidden for missing data.
+- Untouched by design: `clientPackageFlags`, `isClientCold`,
+  `daysSinceLastSeen`, `lastSeenDate`, every threshold constant, and the
+  qualifying session-status list.
+
+Diff: **+15/-10** against a ~+8/-6 target. Code-only is +2/-5, net negative;
+the overage is the mandated comment (+12/-4) plus the footer bump.
+
+### Test results
+
+- `node --check` on the embedded JS - PASS.
+- **Nine assertions against the real shipped helper source** extracted from the
+  edited file, on synthetic objects, no database writes and no test rows in
+  production. All pass: session-recent-beats-package-old, the reverse, the bug
+  case (no sessions, package 60 days old, `createdAt` 5 days ago - package
+  wins), no-sessions-no-packages falls to `createdAt`, `scheduled` sessions
+  still do not qualify, `late_cancel` / `no_show` / `excused` all do, deleted
+  packages ignored, all-null returns null, and the all-null client still
+  buckets `active`.
+- **Live effect, measured not predicted: exactly one client moves.** Melissa
+  Harvey, lapsed -> dormant, resolved date 2026-05-13 -> 2026-03-08. Twenty-three
+  of 35 clients get a different resolved date; only she crosses a threshold.
+  Live buckets after: 26 active, 0 expiring, 8 lapsed, 1 dormant.
+
+### The gate, and why it was waived
+
+The spec gated Phase 2 on zero clients changing bucket. It returned one, so the
+fix was held and reported rather than shipped. Reagan waived it.
+
+That was the right call and the gate was the thing that was wrong. "Prove
+nothing moves" is a reasonable guard against an accidental reclassification, but
+this fix exists *because* something should move. Melissa Harvey bought one
+package on March 8, logged zero sessions, and has not been seen since. Dormant
+is what she is. A gate that blocks a correct reclassification is measuring the
+wrong thing - the useful question was never "does anything change," it was "is
+every change correct," and at n=1 that was answerable by reading the row.
+
+### Deferred
+
+- **Michael Hilliard and Jayasaree Kumar tip on August 1.** Both resolve to
+  2026-04-03, daysSince 117 against a >120 dormant cutoff. No code change
+  required; they cross on their own in three days. Flagged so it does not read
+  as a regression when it happens.
+- The recency helper migration (`clientPackageFlags` / `isClientCold` onto
+  `lastActivityDate`) is still unbuilt. Flip counts are in Still open.
 
 ---
 

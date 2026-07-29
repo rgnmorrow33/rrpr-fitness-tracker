@@ -5125,10 +5125,18 @@
     return template ? template.validDays : null;
   }
 
-  /* B2: latest of signed-off session activity, package purchase, or
-     client creation. 'scheduled' sessions don't count - an unsigned future
-     or stale booking shouldn't prop up recency. Future single source for
-     clientPackageFlags / isClientCold's recency logic (not migrated here). */
+  /* B2: latest of signed-off session activity or package purchase.
+     'scheduled' sessions don't count - an unsigned future or stale booking
+     shouldn't prop up recency.
+
+     v4.51: createdAt is a LAST-RESORT FALLBACK, never a max participant.
+     Maxing it in silently freshened every importer-created client -
+     purchase_import.py stamps created_at at row-insert time, lagging the
+     real purchase by up to 66 days observed live, so a client who bought in
+     March and never returned read as recently active. Do not put it back.
+
+     Future single source for clientPackageFlags / isClientCold's recency
+     logic (not migrated here). */
   function lastActivityDate(client){
     if (!client) return null;
     var latest = null;
@@ -5140,11 +5148,8 @@
       if (!p || !p.purchaseDate) return;
       if (!latest || p.purchaseDate > latest) latest = p.purchaseDate;
     });
-    if (client.createdAt) {
-      var createdYMD = client.createdAt.substring(0, 10);
-      if (!latest || createdYMD > latest) latest = createdYMD;
-    }
-    return latest;
+    if (latest) return latest;
+    return client.createdAt ? client.createdAt.substring(0, 10) : null;
   }
 
   var LIFECYCLE_LAPSED_DAYS = 45;
@@ -31516,7 +31521,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.50 */
+/* v4.51 */
 </script>
 </body>
 </html>
