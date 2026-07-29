@@ -5084,6 +5084,102 @@
     no_show: 'var(--red)',
     excused: 'var(--slate)'
   };
+
+  /* ===== Fix B (v4.49): client lifecycle status =====
+     Module-scope, no writes, no persistence, no schema. Not wired into
+     clientPackageFlags / isClientCold yet - future migration target,
+     built clean now so that move is cheap later. */
+
+  /* Catalog lookup for a package's template, mirrors sweepExpiringPackages's
+     resolveTemplate. Kept as a separate copy on purpose - the sweep is not
+     rewired in this pass. */
+  function resolvePackageTemplate(pkg){
+    if (!pkg || typeof PT_PACKAGES_BY_FACILITY === 'undefined') return null;
+    var lists = [PT_PACKAGES_BY_FACILITY.CMRC || [], PT_PACKAGES_BY_FACILITY.Baca || []];
+    var i;
+    if (pkg.template_id) {
+      for (i = 0; i < lists.length; i++) {
+        var byId = lists[i].find(function(t){ return t.id === pkg.template_id; });
+        if (byId) return byId;
+      }
+    }
+    if (pkg.type) {
+      for (i = 0; i < lists.length; i++) {
+        var byType = lists[i].find(function(t){ return t.type === pkg.type; });
+        if (byType) return byType;
+      }
+    }
+    return null;
+  }
+
+  /* B1: precedence is override, then the package's own stamped validDays
+     (e.g. purchase_import.py's RecTrac-derived span), then the catalog
+     default. Diverges from sweepExpiringPackages on purpose - see spec. */
+  function packageValidDays(pkg){
+    if (!pkg) return null;
+    if (pkg.validDaysOverride != null) return pkg.validDaysOverride;
+    if (pkg.validDays != null) return pkg.validDays;
+    var template = resolvePackageTemplate(pkg);
+    return template ? template.validDays : null;
+  }
+
+  /* B2: latest of signed-off session activity, package purchase, or
+     client creation. 'scheduled' sessions don't count - an unsigned future
+     or stale booking shouldn't prop up recency. Future single source for
+     clientPackageFlags / isClientCold's recency logic (not migrated here). */
+  function lastActivityDate(client){
+    if (!client) return null;
+    var latest = null;
+    (client.sessions || []).forEach(function(s){
+      if (!s || !s.date || SESSION_STATUSES.indexOf(s.status) === -1) return;
+      if (!latest || s.date > latest) latest = s.date;
+    });
+    getPackages(client).forEach(function(p){
+      if (!p || !p.purchaseDate) return;
+      if (!latest || p.purchaseDate > latest) latest = p.purchaseDate;
+    });
+    if (client.createdAt) {
+      var createdYMD = client.createdAt.substring(0, 10);
+      if (!latest || createdYMD > latest) latest = createdYMD;
+    }
+    return latest;
+  }
+
+  var LIFECYCLE_LAPSED_DAYS = 45;
+  var LIFECYCLE_DORMANT_DAYS = 120;
+  var LIFECYCLE_EXPIRING_DAYS = 30;
+  var LIFECYCLE_EXPIRING_SESSIONS = 2;
+
+  /* B3: recency gates first; package state only refines the recent bucket
+     into 'active' vs 'expiring'. Null defense: no resolvable activity date
+     reads as 'active', never as a reason to hide a record. */
+  function clientLifecycleStatus(client, today){
+    var lastActivity = lastActivityDate(client);
+    if (!lastActivity) return 'active';
+    var daysSince = daysBetween(lastActivity, today);
+
+    if (daysSince > LIFECYCLE_DORMANT_DAYS) return 'dormant';
+    if (daysSince > LIFECYCLE_LAPSED_DAYS) return 'lapsed';
+
+    var remaining = sessionsRemaining(client);
+
+    var nearestExpiry = null;
+    getPackages(client).forEach(function(p){
+      var validDays = packageValidDays(p);
+      if (validDays == null || !p.purchaseDate) return;
+      var expiresOn = addDaysYMD(p.purchaseDate, validDays);
+      if (daysBetween(today, expiresOn) < 0) return; /* already expired */
+      if (!nearestExpiry || expiresOn < nearestExpiry) nearestExpiry = expiresOn;
+    });
+
+    if ((remaining > 0 && remaining <= LIFECYCLE_EXPIRING_SESSIONS) ||
+        (nearestExpiry != null && daysBetween(today, nearestExpiry) <= LIFECYCLE_EXPIRING_DAYS)) {
+      return 'expiring';
+    }
+
+    return 'active';
+  }
+
   /* Patch L: surface unassigned-consult sessions distinctly from
      normal scheduled sessions. A session counts as 'awaiting trainer'
      when it's still in 'scheduled' state and neither the session nor
@@ -5477,6 +5573,13 @@
     var d = parseYMD(ymd);
     if (!d) return ymd;
     return toYMD(addDays(d, n));
+  }
+
+  /* Fix A (v4.49): hoisted from sweepExpiringPackages, unchanged. */
+  function daysBetween(fromYMD, toYMD){
+    var a = new Date(fromYMD + 'T00:00:00').getTime();
+    var b = new Date(toYMD + 'T00:00:00').getTime();
+    return Math.round((b - a) / 86400000);
   }
 
   /* Spec 1: build a recurring series' dates from a weekday set.
@@ -6047,22 +6150,6 @@
       return p ? p.id : null;
     }
 
-    function addDays(ymd, days){
-      var d = new Date(ymd + 'T00:00:00');
-      d.setDate(d.getDate() + days);
-      var mm = String(d.getMonth() + 1);
-      if (mm.length < 2) mm = '0' + mm;
-      var dd = String(d.getDate());
-      if (dd.length < 2) dd = '0' + dd;
-      return d.getFullYear() + '-' + mm + '-' + dd;
-    }
-
-    function daysBetween(fromYMD, toYMD){
-      var a = new Date(fromYMD + 'T00:00:00').getTime();
-      var b = new Date(toYMD + 'T00:00:00').getTime();
-      return Math.round((b - a) / 86400000);
-    }
-
     function bandFor(daysRem){
       if (daysRem <= 0) return 0;
       if (daysRem <= 7) return 7;
@@ -6131,7 +6218,7 @@
           : (template && template.validDays);
         if (validDays == null) return;
 
-        var expiresOn = addDays(pkg.purchaseDate, validDays);
+        var expiresOn = addDaysYMD(pkg.purchaseDate, validDays);
         var daysRem = daysBetween(todayYMD, expiresOn);
         var band = bandFor(daysRem);
         if (band == null) return;
@@ -24393,6 +24480,11 @@
             }
           },
             searchResults.map(function(c){
+              /* Fix D (v4.49): lapsed/dormant guard against front desk
+                 creating a duplicate record for a returning member. Search
+                 matching itself stays unfiltered across all statuses. */
+              var lifecycle = clientLifecycleStatus(c, todayStr());
+              var showLifecyclePill = lifecycle === 'lapsed' || lifecycle === 'dormant';
               return e('div', {
                 key: c.id,
                 className: 'list-row',
@@ -24400,7 +24492,15 @@
                 onClick: function(){ if (onSearchResultClick) onSearchResultClick(c.id); }
               },
                 e('div', null,
-                  e('div', { style: { fontWeight: 700, color: 'var(--navy)' } }, c.name),
+                  e('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                    e('span', { style: { fontWeight: 700, color: 'var(--navy)' } }, c.name),
+                    showLifecyclePill && e('span', {
+                      style: {
+                        fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: '999px',
+                        color: '#fff', background: lifecycle === 'dormant' ? 'var(--slate)' : 'var(--amber)'
+                      }
+                    }, lifecycle === 'dormant' ? 'DORMANT' : 'LAPSED')
+                  ),
                   e('div', { style: { fontSize: '11px', color: 'var(--slate)' } },
                     (c.trainerName ? c.trainerName + ' · ' : '') +
                     (c.location || '') +
@@ -25295,6 +25395,13 @@
     var alertFilter = alertFilterTuple[0];
     var setAlertFilter = alertFilterTuple[1];
 
+    /* Fix C (v4.49): lifecycle status filter, orthogonal to alertFilter -
+       separate local state, both narrow the same list. Local, resets on
+       mount, no localStorage this round. */
+    var lifecycleFilterTuple = useState('active');
+    var lifecycleFilter = lifecycleFilterTuple[0];
+    var setLifecycleFilter = lifecycleFilterTuple[1];
+
     var showDeletedTuple = useState(false);
     var showDeleted = showDeletedTuple[0];
     var setShowDeleted = showDeletedTuple[1];
@@ -25340,6 +25447,24 @@
     })();
     var deletedCount = (ctx.allClients || []).filter(function(c){ return !!c.deleted_at; }).length;
 
+    /* Fix C: lifecycle status + pill counts, computed once against the full
+       client set (not the current filter) and memoized against ctx.clients -
+       this runs a full clientLifecycleStatus pass over every client and must
+       not redo that work on every keystroke/render. */
+    var todayYMD = todayStr();
+    var lifecycleInfo = useMemo(function(){
+      var byId = {};
+      var counts = { active: 0, lapsed: 0, dormant: 0 };
+      ctx.clients.forEach(function(c){
+        var s = clientLifecycleStatus(c, todayYMD);
+        byId[c.id] = s;
+        if (s === 'active' || s === 'expiring') counts.active++;
+        else if (s === 'lapsed') counts.lapsed++;
+        else counts.dormant++;
+      });
+      return { byId: byId, counts: counts };
+    }, [ctx.clients]);
+
     var sourceList = showDeleted ? (ctx.allClients || []) : ctx.clients;
     var filtered = sourceList.filter(function(c){
       if (showDeleted && !c.deleted_at) return false;
@@ -25351,6 +25476,12 @@
         if (alertFilter === 'last_session' && !f.lastSessionFlag) return false;
         if (alertFilter === 'stale' && !f.staleFlag) return false;
         if (alertFilter === 'pt_discharge' && !hasDischargeAssessment(c)) return false;
+      }
+      if (lifecycleFilter !== 'all') {
+        var lifecycle = lifecycleInfo.byId[c.id] || clientLifecycleStatus(c, todayYMD);
+        if (lifecycleFilter === 'active' && lifecycle !== 'active' && lifecycle !== 'expiring') return false;
+        if (lifecycleFilter === 'lapsed' && lifecycle !== 'lapsed') return false;
+        if (lifecycleFilter === 'dormant' && lifecycle !== 'dormant') return false;
       }
       return true;
     }).sort(function(a,b){ return a.name.localeCompare(b.name); });
@@ -25477,6 +25608,31 @@
           e('option', { value: '' }, 'All'),
           LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
         )
+      ),
+      /* Fix C: lifecycle status filter pills. Separate local state from
+         alertFilter below - orthogonal filters, both narrow the same list. */
+      e('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+        [
+          { id: 'active', label: 'Active', count: lifecycleInfo.counts.active },
+          { id: 'lapsed', label: 'Lapsed', count: lifecycleInfo.counts.lapsed, color: 'var(--amber)' },
+          { id: 'dormant', label: 'Dormant', count: lifecycleInfo.counts.dormant, color: 'var(--slate)' },
+          { id: 'all', label: 'All', count: ctx.clients.length }
+        ].map(function(opt){
+          var active = lifecycleFilter === opt.id;
+          var color = opt.color || 'var(--navy)';
+          return e('button', {
+            key: opt.id,
+            onClick: function(){ setLifecycleFilter(opt.id); },
+            style: {
+              padding: '6px 12px', borderRadius: '999px',
+              border: '1.5px solid ' + (active ? color : 'var(--border)'),
+              background: active ? color : '#fff',
+              color: active ? '#fff' : 'var(--slate)',
+              fontWeight: 600, fontSize: '12px',
+              cursor: 'pointer'
+            }
+          }, opt.label + ' (' + opt.count + ')');
+        })
       ),
       /* Package-alert filter chips */
       e('div', { style: { display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' } },
@@ -31374,7 +31530,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.48 */
+/* v4.49 */
 </script>
 </body>
 </html>
