@@ -104,6 +104,26 @@ version and its own decision rather than a convenient sweep.
 
 ## Deferred cleanup pile
 
+### From v4.55 (build version indicator)
+
+- **Pre-push hooks check the wrong worktree's HEAD when run from inside a
+  worktree.** `pre-push-syntax-check.js` and `pre-push-tag-check.js` both
+  resolve their project root via `CLAUDE_PROJECT_DIR` (falling back to
+  `git rev-parse --show-toplevel`) and then run `git show HEAD:<file>`
+  against that root. In a Claude Code session working from an isolated
+  worktree, `CLAUDE_PROJECT_DIR` stays pinned to the primary checkout for
+  the life of the session - so the Claude-Code-PreToolUse invocation checks
+  the primary checkout's HEAD, not the worktree branch actually being
+  pushed. Surfaced directly while proving Fix C: pushing `v4.55` from the
+  worktree got BLOCKED with an accurate-looking but wrong-context error
+  (it was reading the primary checkout's pre-v4.55 `main`, not the
+  worktree's HEAD). The native `--git` mode (the real git pre-push hook,
+  which always runs with the pushing repo as cwd) is unaffected - this only
+  bites the Claude-Code-side copy of the same check. Every previous
+  worktree-based push likely had its syntax/tag check silently validate the
+  primary checkout's branch instead of the one being pushed, not a new
+  bug from this version.
+
 ### From v4.53 (lead delete)
 
 - `makeEntity.save` early-returns when the array is empty, so emptying any
