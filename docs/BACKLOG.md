@@ -104,6 +104,25 @@ version and its own decision rather than a convenient sweep.
 
 ## Deferred cleanup pile
 
+### From v4.53 (lead delete)
+
+- `makeEntity.save` early-returns when the array is empty, so emptying any
+  entity list persists nothing at all. Same class of bug as the v4.53 lead
+  delete, wider surface: it applies to every entity, not just leads.
+- `activeQueue` filters on `q.deleted_at`, a column the `leads` table does not
+  have. Dead filter. Harmless today, misleading to read, and it will quietly
+  start working if anyone ever adds the column.
+- Multi-device resurrection: an iPad holding a stale entity array can re-upsert
+  a row another device deleted, on its next dirty save. Pre-existing for every
+  entity. The v4.53 fix advances `queueRef.current` on the deleting device
+  only.
+- A hard-deleted lead leaves no record anywhere. If a deletions log is wanted
+  it is its own version, not a rider on a fix.
+- The lead Delete button has no in-flight guard. A double tap fires two
+  deletes and the second reports that it did not land.
+- `clients.from_queue_id` has no foreign key to `leads.id`. v4.53 guards the
+  one delete path in the app; nothing guards SQL or the importers.
+
 Address in a dedicated cleanup commit when convenient. These are their own
 pass - do NOT touch app code for them mid-feature.
 

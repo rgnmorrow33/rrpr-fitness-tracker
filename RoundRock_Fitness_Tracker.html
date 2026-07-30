@@ -9421,8 +9421,72 @@
         return stamped;
       });
     }
+    /* v4.53 Fix A: lead delete now actually deletes.
+
+       The old body dropped the row from React state and wrote nothing. The
+       array save then upserted every surviving lead, realtime fired on the
+       leads table, the app refetched, and the "deleted" lead came straight
+       back. Live evidence on July 30: eleven leads still present, ten of them
+       carrying one identical updated_at from the moment of the delete attempt.
+
+       Hard delete, not soft. The leads table has no deleted_at column, the
+       del_admin RLS policy already exists for exactly this, and a soft-delete
+       flag would need a migration plus a filter on every raw queue read site.
+       Missing one of those sweeps is what left 60 deleted classes rendering
+       before v4.52.
+
+       Returns a promise now. Callers MUST handle rejection: the lead stays on
+       screen when the delete does not land. */
     function deleteQueueEntry(id){
-      setQueue(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+      var isAdminSession = !!session &&
+        (session.role === 'admin' || session.role_tier === 'admin');
+      if (!isAdminSession) {
+        /* Gate at the handler, not only at the render. A hidden button with
+           an ungated handler counts as ungated. */
+        return Promise.reject(new Error('Only an admin can delete a lead.'));
+      }
+      /* v4.53 Fix B: clients.from_queue_id carries no FK constraint, so
+         nothing in the database stops a delete from orphaning that pointer.
+         In-memory the field is camel (translate.clients maps fromQueueId ->
+         from_queue_id), same lookup the lead detail modal already does.
+         Soft-deleted clients are excluded, consistent with every other
+         client read in the app. */
+      var owner = (clientsRef.current || []).filter(function(c){
+        return c && !c.deleted_at && c.fromQueueId === id;
+      })[0];
+      if (owner) {
+        return Promise.reject(new Error(
+          'Cannot delete: client ' + (owner.name || 'record') +
+          ' is linked to this lead.'
+        ));
+      }
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        setQueue(function(list){
+          var next = (list || []).filter(function(x){ return x.id !== id; });
+          queueRef.current = next;
+          return next;
+        });
+        return Promise.resolve();
+      }
+      return supabaseClient.from('leads')
+        .delete().eq('id', id).select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          /* RLS filters, it does not error. A blocked delete comes back with
+             error null and zero rows, so the returned row count is the only
+             honest signal that the delete actually landed. */
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the lead is still there. Check admin rights.');
+          }
+          setQueue(function(list){
+            var next = (list || []).filter(function(x){ return x.id !== id; });
+            /* Advance the dirty-check baseline so the save useEffect skips a
+               redundant full-array upsert (and the realtime echo it causes).
+               Mirrors createQueueEntry. */
+            queueRef.current = next;
+            return next;
+          });
+        });
     }
     function claimQueueEntry(id, claimerName, claimedByRole){
       setQueue(function(list){
@@ -20592,11 +20656,15 @@
             className: 'btn btn-outline',
             style: { color: 'var(--brick)', borderColor: 'var(--brick)' },
             onClick: function(){
-              if (window.confirm('Delete this lead permanently? Cannot be undone.')) {
-                ctx.deleteQueueEntry(lead.id);
+              if (!window.confirm('Delete this lead permanently? Cannot be undone.')) return;
+              /* v4.53 Fix C: toast after the await, not ahead of it, and keep
+                 the lead on screen when the delete does not land. Pattern B. */
+              Promise.resolve(ctx.deleteQueueEntry(lead.id)).then(function(){
                 ctx.toast('Lead deleted', 'error');
                 props.onClose();
-              }
+              }).catch(function(err){
+                ctx.toast((err && err.message) || 'Delete failed', 'error');
+              });
             }
           }, 'Delete')
         ),
@@ -31512,7 +31580,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.52 */
+/* v4.53 */
 </script>
 </body>
 </html>

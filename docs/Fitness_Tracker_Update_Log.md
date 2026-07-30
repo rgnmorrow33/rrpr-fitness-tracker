@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.52** (translator casing, audit_log and deleted_at round-trip snake, July 29, 2026)
+**Live version: v4.53** (lead delete persists a real DELETE, July 30, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -11,11 +11,16 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - July 29, 2026
+## Current standing - July 30, 2026
 
-- **Live version: v4.52**, tagged. Tracker file: 31,518 lines / 1.4 MB.
+- **Live version: v4.53**, tagged. Tracker file: 31,586 lines / 1.4 MB.
   `node --check` on the embedded JS: PASS. Netlify prod
   (pardfitnesstracker2) deploys on push to main.
+- **v4.53 made lead delete write.** The handler dropped the row from React
+  state and issued no database call, so the array save upserted the survivors,
+  realtime echoed, and the app refetched the "deleted" lead back in. Now a
+  real `DELETE` whose returned row count is checked, admin-gated at the
+  handler, and refused outright when a client points at the lead.
 - **v4.52 fixed a translator casing mismatch that had been silently destroying
   audit history and resurrecting soft-deleted records.** Four entities were
   renaming `audit_log`, `deleted_at`, and `deleted_by` to camelCase on load
@@ -110,6 +115,120 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.53 - July 30, 2026
+
+Deleting a lead deletes it. The old handler removed the row from React state
+and wrote nothing, so the next array save upserted every surviving lead, the
+realtime channel echoed, the app refetched, and the deleted lead came back.
+
+### Trigger
+
+Reagan deleted a batch of test leads in the consult queue and watched every one
+of them repopulate within seconds.
+
+### Goal
+
+A lead an admin deletes stays deleted, on that iPad and every other one. A
+delete that does not land says so instead of reporting success.
+
+### File version
+
+v4.53 - 31,586 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+`deleteQueueEntry` was three lines and touched only React state:
+
+    function deleteQueueEntry(id){
+      setQueue(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+    }
+
+Nothing else in the chain covers for that. `makeEntity.save` is
+`upsert(rows, { onConflict: 'id' })` with no DELETE branch, so a row dropped
+from the array is simply not mentioned in the write. `makeEntity.load` is
+`select('*')` with no filter. `leads` is one of the five tables in the
+`supabase_realtime` publication, so the upsert of the survivors echoed back and
+triggered the refetch that brought the row home.
+
+Confirmed against live data before any edit. Eleven leads present, ten of them
+carrying an identical `updated_at` of `2026-07-30 19:47:09.905+00` and one at
+`19:46:54.631`. One timestamp to the millisecond across ten rows is a single
+array upsert, not ten deletes. Same tell as the 60 classes in v4.52.
+
+The toast made it worse rather than exposing it: `ctx.toast('Lead deleted')`
+fired synchronously next to a call that returned `undefined`. Pattern B, with
+the twist that there was no write to await in the first place.
+
+### Changes
+
+**Fix A - `deleteQueueEntry` deletes server-side and awaits before dropping the
+row.** `.from('leads').delete().eq('id', id).select('id')`, and the returned row
+count is what gets checked. RLS filters rather than errors, so a blocked delete
+comes back `error: null, data: []`; without the count check a non-admin would
+watch the row vanish locally and return on reload. Admin is now checked in the
+handler, not only at the render. On success the updater advances
+`queueRef.current` so the dirty-check save effect skips the redundant
+full-array upsert and the realtime echo that goes with it.
+
+**Fix B - a lead a client points at cannot be deleted.** `clients.from_queue_id`
+carries no foreign key, so nothing in the database stops a delete from orphaning
+that pointer. Two live leads are in that state right now, Laurie Helton and
+Selisa Woessner, and neither is status `converted`, so the existing render gate
+did not cover them. The guard reads in-memory clients and names the linked
+client in the rejection.
+
+**Fix C - the toast moved behind the await.** Success closes the modal, failure
+leaves the lead on screen with the reason.
+
+Hard delete rather than soft was the deliberate call. `leads` has no
+`deleted_at` column, the `del_admin` RLS policy already existed for exactly
+this, and a soft-delete flag would have meant a migration, two translator
+entries that have to round-trip snake, two more keys on
+`LEADS_ALLOWED_COLUMNS`, and a filter on every raw `queue` read site. Missing
+one of those sweeps is what left 60 deleted classes rendering before v4.52. It
+would also have broken the 5am importer: `open_lead_for` matches on
+`OPEN_LEAD_STATUSES` and would treat a soft-deleted lead as an open one,
+silently suppressing a real new lead for that person.
+
+### Test results
+
+- `node --check` on the embedded JS: PASS.
+- Diff +73/-5 against a ~+55/-8 budget. The overage is comment, not logic.
+- Live leads before the data cleanup: 11. After: 4.
+
+### Deferred
+
+- `makeEntity.save` early-returns when `rows.length === 0`, so emptying any
+  entity list persists nothing. Same class of bug, wider surface.
+- `activeQueue` filters on `q.deleted_at`, a column the leads table does not
+  have. Dead filter, harmless, confusing to read.
+- Multi-device resurrection: another iPad holding a stale array can re-upsert a
+  deleted row on its next dirty save. Pre-existing for every entity.
+- A hard-deleted lead leaves no record anywhere. If a deletions log is wanted it
+  is its own version.
+- The Delete button has no in-flight guard. A double tap fires two deletes and
+  the second reports that it did not land.
+
+### iPad test checklist for v4.53
+
+- As an admin, delete a throwaway lead. It should disappear and the sync dot
+  should settle. **Reload the app. If it comes back, the fix did not take.**
+- Delete a lead on one iPad, reload a second iPad, confirm it is gone there too.
+- Open Laurie Helton or Selisa Woessner as an admin and press Delete. It should
+  refuse and name the linked client. **If it deletes, Fix B did not take.**
+- Sign in as a trainer and confirm the Delete button is not rendered at all.
+
+### The lesson
+
+One identical millisecond timestamp across a batch of rows is the fingerprint of
+a single array write, and it has now been the tell twice in two days. The 60
+classes in v4.52 shared `15:43:00.322`. The ten leads here shared
+`19:47:09.905`. When something looks deleted and is not, check whether every
+survivor was touched at the same instant. That reads the write path without
+opening the code.
 
 ---
 
