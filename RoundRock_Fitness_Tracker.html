@@ -9007,12 +9007,42 @@
        is byte-identical to what storage.X.save would have written.
        localStorage mode resolves as a no-op (the save useEffect still
        handles that mode). */
-    function persistClassRow(cl){
+    /* v4.54 Fix A: classes is the ONLY table whose RLS is asymmetric.
+       INSERT is admin-only (ins_admin, WITH CHECK app_is_admin()) while
+       UPDATE is open to any signed-in trainer (upd_signed_in). PostgREST
+       .upsert() emits INSERT ... ON CONFLICT, and Postgres evaluates the
+       INSERT WITH CHECK against the proposed row even when the conflict
+       resolves to an UPDATE. So an upsert of an ALREADY EXISTING class
+       row fails for a trainer with "new row violates row-level security
+       policy for table classes" - exactly what a trainer hit logging
+       attendance on 2026-07-30.
+       Verified on live that day as Victor Leak (role_tier=trainer) in a
+       rolled-back transaction: plain UPDATE = OK, upsert of the same
+       existing row = FAIL with that error string.
+       So mutations of an existing class go out as a real UPDATE. Inserts
+       stay on the upsert path behind opts.insert and stay admin-only.
+       The .select('id') is load-bearing for the same reason the v4.53
+       lead delete needed it: under RLS a blocked write returns zero rows
+       and NO error, so without the returned-row check this would trade a
+       loud failure for a silent one. */
+    function persistClassRow(cl, opts){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
       var supabaseRow = translate.classes.toSupabase(cl);
+      if (opts && opts.insert) {
+        return supabaseClient.from('classes')
+          .upsert(supabaseRow, { onConflict: 'id' })
+          .then(function(res){ if (res.error) throw res.error; });
+      }
       return supabaseClient.from('classes')
-        .upsert(supabaseRow, { onConflict: 'id' })
-        .then(function(res){ if (res.error) throw res.error; });
+        .update(supabaseRow)
+        .eq('id', cl.id)
+        .select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Class not updated (row missing or blocked by policy): ' + cl.id);
+          }
+        });
     }
     function persistWRORow(w){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
@@ -9123,7 +9153,9 @@
         before: opts.before !== undefined ? opts.before : before,
         after: opts.after !== undefined ? opts.after : cl
       }, opts.changes !== undefined ? { changes: opts.changes } : {}));
-      return persistClassRow(stamped).then(function(){
+      /* v4.54 Fix A: creates are the one class write that legitimately
+         needs the INSERT path. Everything else is an UPDATE. */
+      return persistClassRow(stamped, { insert: action === 'create' }).then(function(){
         setClasses(function(list){
           var exists = list.some(function(x){ return x.id === stamped.id; });
           var next = exists
@@ -9215,7 +9247,15 @@
         return stamped;
       });
     }
-    function addAttendanceAsync(classId, att){
+    /* v4.54 Fix B: opts.subAssignment folds the sub-claim record into the
+       SAME class-row mutation as the attendance record. LogAttendanceModal
+       used to fire ctx.addSubAssignment and then props.onLog back to back,
+       which is two writes to one row for one button press. Both helpers
+       read the `classes` render snapshot, so the second write was built on
+       a list that did not contain the first one yet and clobbered it. One
+       copy, one persist, no race. */
+    function addAttendanceAsync(classId, att, opts){
+      opts = opts || {};
       var target = (classes || []).find(function(x){ return x.id === classId; });
       if (!target) return Promise.reject(new Error('Class not found'));
       /* Same stamp + audit as addAttendance, computed from a state
@@ -9232,6 +9272,14 @@
       });
       var copy = Object.assign({}, target);
       copy.attendance = (target.attendance || []).concat([stampedAtt]);
+      /* Sub-claim merged onto the same copy. Status is always 'claimed'
+         here, and the sub_posted fan-out only fires on status 'open', so
+         nothing is lost by not routing through addSubAssignmentAsync. */
+      if (opts.subAssignment) {
+        copy.subAssignments = (target.subAssignments || [])
+          .filter(function(s){ return s.date !== opts.subAssignment.date; })
+          .concat([opts.subAssignment]);
+      }
       copy = appendAuditEntry(copy, session, 'attendance_logged', {
         entity_type: 'class',
         target_id: target.id,
@@ -9252,15 +9300,28 @@
         return copy;
       });
     }
+    /* v4.54 Fix C: accepts one assignment or an array of them for the SAME
+       class. The time-off auto-post can produce several occurrences of one
+       recurring class (Mon-Fri off, one Monday class, two Mondays in the
+       window), and one call per assignment would each build its copy from
+       the same stale `classes` snapshot - last write wins, earlier ones
+       vanish. Batching them into a single copy and a single UPDATE removes
+       the race. Fan-out still fires per assignment, unchanged. */
     function addSubAssignmentAsync(classId, assignment){
       var prevClass = (classes || []).find(function(x){ return x.id === classId; });
       if (!prevClass) return Promise.reject(new Error('Class not found'));
-      var prevForDate = (prevClass.subAssignments || [])
-        .find(function(s){ return s.date === assignment.date; });
+      var incoming = Array.isArray(assignment) ? assignment : [assignment];
+      if (incoming.length === 0) return Promise.resolve(prevClass);
+      var replacedDates = {};
+      incoming.forEach(function(a){ replacedDates[a.date] = true; });
+      /* Captured before the copy so the fan-out can tell a genuinely new
+         open request from a re-save of one that was already open. */
+      var prevByDate = {};
+      (prevClass.subAssignments || []).forEach(function(s){ prevByDate[s.date] = s; });
       var copy = Object.assign({}, prevClass);
       copy.subAssignments = (prevClass.subAssignments || [])
-        .filter(function(s){ return s.date !== assignment.date; })
-        .concat([assignment]);
+        .filter(function(s){ return !replacedDates[s.date]; })
+        .concat(incoming);
       return persistClassRow(copy).then(function(){
         setClasses(function(list){
           var next = list.map(function(c){ return c.id === classId ? copy : c; });
@@ -9268,9 +9329,12 @@
           return next;
         });
         /* sub_posted fan-out identical to addSubAssignment. */
-        if (assignment.status === 'open' && (!prevForDate || prevForDate.status !== 'open')) {
-          var className = prevClass.name || null;
-          var requesterId = (assignment.requestedBy ? trainerIdByName(assignment.requestedBy) : null)
+        var className = prevClass.name || null;
+        incoming.forEach(function(a){
+          var prevForDate = prevByDate[a.date];
+          if (a.status !== 'open') return;
+          if (prevForDate && prevForDate.status === 'open') return;
+          var requesterId = (a.requestedBy ? trainerIdByName(a.requestedBy) : null)
             || (session && session.trainer_id) || null;
           var rows = (trainerProfiles || [])
             .filter(function(p){ return p.is_active !== false && p.id && p.id !== requesterId; })
@@ -9280,15 +9344,15 @@
                 type: 'sub_posted',
                 payload: {
                   className: className,
-                  date: assignment.date,
+                  date: a.date,
                   time: prevClass.startTime || null,
                   classId: classId,
-                  subAssignmentId: assignment.id
+                  subAssignmentId: a.id
                 }
               };
             });
           storage.notifications.emitMany(rows);
-        }
+        });
         return copy;
       });
     }
@@ -18710,10 +18774,15 @@
         initialDate: coverLog.date,
         forceInstructor: trainerName,
         onClose: function(){ setCoverLog(null); },
-        onLog: function(att){
-          ctx.addAttendance(coverLog.cls.id, att);
-          setCoverLog(null);
-          ctx.toast('Sub session logged ✓');
+        /* v4.54 Fix B: persist first, toast second. Modal stays open on
+           failure so the headcount does not have to be retyped. */
+        onLog: function(att, logOpts){
+          ctx.addAttendanceAsync(coverLog.cls.id, att, logOpts).then(function(){
+            setCoverLog(null);
+            ctx.toast('Sub session logged ✓');
+          }).catch(function(err){
+            ctx.toast('Log failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+          });
         }
       })
     );
@@ -19155,20 +19224,28 @@
           ctx: ctx,
           cls: c,
           onClose: function(){ setLogOpen(false); },
-          onLog: function(att){
-            ctx.addAttendance(c.id, att);
-            setLogOpen(false);
-            ctx.toast('Attendance logged ✓');
+          /* v4.54 Fix B: persist first, toast second. */
+          onLog: function(att, logOpts){
+            ctx.addAttendanceAsync(c.id, att, logOpts).then(function(){
+              setLogOpen(false);
+              ctx.toast('Attendance logged ✓');
+            }).catch(function(err){
+              ctx.toast('Log failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+            });
           }
         }),
         subRequestOpen && e(SubRequestModal, {
           ctx: ctx,
           cls: c,
           onClose: function(){ setSubRequestOpen(false); },
+          /* v4.54 Fix C: same RLS class of failure as attendance. */
           onSave: function(assignment){
-            ctx.addSubAssignment(c.id, assignment);
-            setSubRequestOpen(false);
-            ctx.toast(assignment.status === 'open' ? 'Posted to sub queue ✓' : 'Sub assigned ✓');
+            ctx.addSubAssignmentAsync(c.id, assignment).then(function(){
+              setSubRequestOpen(false);
+              ctx.toast(assignment.status === 'open' ? 'Posted to sub queue ✓' : 'Sub assigned ✓');
+            }).catch(function(err){
+              ctx.toast('Sub request failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+            });
           }
         }),
         editOpen && e(NewClassModal, {
@@ -19537,12 +19614,17 @@
          Uses trainerNameMatches so name-format variation (full vs first,
          case, whitespace) on a trainer logging their own class doesn't
          create a false sub assignment. */
+      /* v4.54 Fix B: the claim record is no longer written here. It rides
+         up to onLog so the caller persists it in the same class-row UPDATE
+         as the attendance. Two writes to one row for one button press was
+         a lost-update race, and the second one silently won. */
       var isSub = instructor && !trainerNameMatches(instructor, props.cls.instructor);
+      var pendingSub = null;
       if (isSub) {
         var existing = getAssignedSubForDate(props.cls, date);
         var existingStatus = existing ? subStatus(existing) : null;
         if (!existing || existingStatus === 'open') {
-          ctx.addSubAssignment(props.cls.id, {
+          pendingSub = {
             id: existing ? existing.id : uid(),
             date: date,
             subInstructor: instructor,
@@ -19555,11 +19637,11 @@
             approvedAt: null,
             denyReason: null,
             createdAt: existing ? existing.createdAt : new Date().toISOString()
-          });
+          };
         }
       }
 
-      props.onLog(att);
+      props.onLog(att, pendingSub ? { subAssignment: pendingSub } : null);
     }
 
     return e('div', { className: 'modal-overlay' },
@@ -29837,10 +29919,14 @@
         cls: logTarget,
         initialDate: todayYMD,
         onClose: function(){ setLogTarget(null); },
-        onLog: function(att){
-          ctx.addAttendance(logTarget.id, att);
-          setLogTarget(null);
-          ctx.toast('Attendance logged ✓');
+        /* v4.54 Fix B: persist first, toast second. */
+        onLog: function(att, logOpts){
+          ctx.addAttendanceAsync(logTarget.id, att, logOpts).then(function(){
+            setLogTarget(null);
+            ctx.toast('Attendance logged ✓');
+          }).catch(function(err){
+            ctx.toast('Log failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+          });
         }
       }),
       newWroOpen && e(NewWROModal, {
@@ -30243,6 +30329,10 @@
       if (postSubs && conflicts.length > 0) {
         var profile = (ctx.trainerProfiles || []).find(function(p){ return p.id === record.trainerId; });
         var trainerName = profile ? profile.name : '';
+        /* v4.54 Fix C: group by class so a recurring class with several
+           conflicting occurrences goes out as ONE row update, then post the
+           classes in parallel and toast on the settled result. */
+        var byClass = {};
         var posted = 0;
         conflicts.forEach(function(cf){
           if (cf.alreadyOpen) return;
@@ -30255,14 +30345,24 @@
             note: 'Auto-posted from time-off entry',
             createdAt: new Date().toISOString()
           };
-          ctx.addSubAssignment(cf.cls.id, assignment);
+          if (!byClass[cf.cls.id]) byClass[cf.cls.id] = [];
+          byClass[cf.cls.id].push(assignment);
           posted++;
         });
-        ctx.toast(
-          existing
-            ? ('Time off updated · ' + posted + ' sub request' + (posted === 1 ? '' : 's') + ' posted')
-            : ('Time off added · ' + posted + ' sub request' + (posted === 1 ? '' : 's') + ' posted')
-        );
+        Promise.all(Object.keys(byClass).map(function(cid){
+          return ctx.addSubAssignmentAsync(cid, byClass[cid]);
+        })).then(function(){
+          ctx.toast(
+            (existing ? 'Time off updated · ' : 'Time off added · ') +
+            posted + ' sub request' + (posted === 1 ? '' : 's') + ' posted'
+          );
+        }).catch(function(err){
+          ctx.toast(
+            (existing ? 'Time off updated, but ' : 'Time off added, but ') +
+            'sub requests failed: ' + (err && err.message ? err.message : 'unknown error'),
+            'error'
+          );
+        });
       } else {
         ctx.toast(existing ? 'Time off updated ✓' : 'Time off added ✓');
       }
@@ -31552,13 +31652,18 @@
         cls: cancelTarget.cls,
         date: cancelTarget.date,
         onClose: function(){ setCancelTarget(null); },
+        /* v4.54 Fix C: persist first. The service recovery prompt only
+           chains once the cancellation is actually on the row. */
         onSave: function(c){
           var cls = cancelTarget.cls;
-          ctx.addCancellation(cls.id, c);
-          setCancelTarget(null);
-          ctx.toast('Class marked cancelled \u2713');
-          /* Chain into the service recovery prompt with class-duration auto-match. */
-          setCancelRecovery({ cls: cls, cancellationId: c.id, durationHours: classDurationHours(cls) });
+          ctx.addCancellationAsync(cls.id, c).then(function(){
+            setCancelTarget(null);
+            ctx.toast('Class marked cancelled \u2713');
+            /* Chain into the service recovery prompt with class-duration auto-match. */
+            setCancelRecovery({ cls: cls, cancellationId: c.id, durationHours: classDurationHours(cls) });
+          }).catch(function(err){
+            ctx.toast('Cancellation failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+          });
         }
       }),
       cancelRecovery && e(ServiceRecoveryModal, {
@@ -31580,7 +31685,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.53 */
+/* v4.54 */
 </script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.53** (lead delete persists a real DELETE, July 30, 2026)
+**Live version: v4.54** (trainer class writes go out as UPDATE, not upsert, July 30, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,9 +13,17 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 30, 2026
 
-- **Live version: v4.53**, tagged. Tracker file: 31,586 lines / 1.4 MB.
+- **Live version: v4.54**, tagged. Tracker file: 31,691 lines / 1.4 MB.
   `node --check` on the embedded JS: PASS. Netlify prod
   (pardfitnesstracker2) deploys on push to main.
+- **v4.54 made every class write a trainer can reach actually land.** `classes`
+  is the only table in the database whose RLS is asymmetric - INSERT admin-only,
+  UPDATE open to any signed-in trainer - and every class write in the client was
+  a PostgREST `.upsert()`, which is `INSERT ... ON CONFLICT`. Postgres evaluates
+  the INSERT `WITH CHECK` even when the conflict resolves to an UPDATE, so a
+  trainer updating a class they already own was refused. Attendance, sub
+  requests, sub claims, cancellations and the time-off auto-post were all
+  affected and all toasted success anyway.
 - **v4.53 made lead delete write.** The handler dropped the row from React
   state and issued no database call, so the array save upserted the survivors,
   realtime echoed, and the app refetched the "deleted" lead back in. Now a
@@ -115,6 +123,131 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.54 - July 30, 2026
+
+A trainer logging attendance could not write to the class. Every class mutation
+below admin went out as an upsert, and `classes` is the one table whose RLS
+forbids INSERT to trainers while permitting UPDATE.
+
+### Trigger
+
+Reagan logged a test attendance on Victor Leak's class (Victor: `role_tier =
+trainer`) at 2:48pm on July 30 and got two toasts at once:
+
+    Attendance logged
+    Save classes failed: new row violates row-level security policy for table "classes"
+
+### Goal
+
+A trainer's attendance log, sub request, sub claim and cancellation reach the
+database. A write that does not land says so instead of reporting success and
+disappearing on reload.
+
+### File version
+
+v4.54 - 31,691 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### The bug
+
+`classes` is the only asymmetric row in the policy table:
+
+| table | INSERT with_check | UPDATE using |
+|---|---|---|
+| **classes** | **`app_is_admin()`** | **`app_is_signed_in()`** |
+| clients, leads, wros, referrals, member_contacts, admin_items | `app_is_signed_in()` | `app_is_signed_in()` |
+| closures, schedule_versions, announcement_banners, trainers | `app_is_admin()` | `app_is_admin()` |
+
+The asymmetry is correct and deliberate: a trainer should log attendance on a
+class, not create classes. The client could not express it. `makeEntity.save`
+and `persistClassRow` both write with `.upsert(rows, { onConflict: 'id' })`,
+which PostgREST emits as `INSERT ... ON CONFLICT`, and Postgres evaluates the
+INSERT `WITH CHECK` against the proposed row **even when the conflict resolves
+to an UPDATE**. Every class write by a non-admin was therefore refused, whether
+or not the row already existed.
+
+Verified against live before any edit, impersonating Victor inside a
+transaction that ended in `RAISE EXCEPTION`:
+
+    plain UPDATE          = OK (1 row visible)
+    UPSERT(existing row)  = FAIL[new row violates row-level security policy for table "classes"]
+
+That is the production error string, reproduced exactly.
+
+`addAttendance` only calls `setClasses`, so the failing write was the deferred
+`storage.classes.save` array upsert in the `_saveIfDirty` effect. The green
+toast fired synchronously next to a handler that returns `undefined` - Pattern
+B again, same shape as the v4.53 lead delete.
+
+A second finding along the way: `addAttendanceAsync`, `addSubAssignmentAsync`,
+`addCancellationAsync` and `auditedUpsertClassAsync` were all written, all
+exposed on ctx, and all dead. Every one of the ten class-mutation call sites
+used the sync variant. The persist-then-toast work had been built and never
+wired up. Wiring it was necessary but not sufficient, since those helpers route
+through `persistClassRow`, which was itself an upsert.
+
+### Changes
+
+**Fix A - `persistClassRow` writes a real UPDATE.**
+`.update(row).eq('id', cl.id).select('id')`, with the returned row count
+checked. Same reasoning as the v4.53 lead delete: under RLS a blocked write
+comes back `error: null, data: []`, so without the count check this would trade
+a loud failure for a silent one. Inserts stay on the upsert path behind
+`opts.insert`, passed only by `auditedUpsertClassAsync` when
+`action === 'create'`. Nothing in the RLS posture moved.
+
+**Fix B - attendance persists before it claims success.** All three
+`LogAttendanceModal` `onLog` handlers (sub-cover log, class detail, today view)
+now await `addAttendanceAsync` and toast after it resolves; on rejection the
+modal stays open so the headcount does not have to be retyped.
+
+`LogAttendanceModal.submit()` also stopped writing the sub-claim record itself.
+It used to call `ctx.addSubAssignment` and then `props.onLog(att)` back to back
+- two writes to the same class row for one button press, both built from the
+same `classes` render snapshot, so the second silently clobbered the first. The
+claim now rides up through `onLog` as `opts.subAssignment` and
+`addAttendanceAsync` folds it into the same copy and the same UPDATE.
+
+**Fix C - the other trainer-reachable class writes.** Sub request, cancellation
+and the time-off auto-post moved to the async helpers with the toast behind the
+await. `addSubAssignmentAsync` now accepts an array of assignments for one
+class, and the time-off path groups conflicts by class before calling it: a
+recurring class with several conflicting occurrences used to issue one call per
+occurrence, each building its copy from the same stale snapshot, last write
+wins. Fan-out still fires per assignment and is unchanged.
+
+### Verification
+
+`node --check` on the embedded JS: PASS. Diff +150/-45 against a ~+140/-55
+budget; the overage is comment.
+
+Re-run of the live probe as Victor Leak, rolled back, against the shape the new
+code sends:
+
+    v4.53-era upsert        = FAIL (row-level security)
+    v4.54 UPDATE..RETURNING = OK, rows=1
+    trainer INSERT          = correctly BLOCKED
+
+The last line is the posture check: a trainer still cannot create a class. anon
+still holds exactly one privilege in `public`, `trainer_directory:SELECT`. No
+migration ran; this version changes no database object.
+
+Still needs Selisa's iPad pass on production before the decision record is
+logged.
+
+### Deferred
+
+- `addAttendance` is now unreferenced. `addSubAssignment` and `addCancellation`
+  keep one caller each. Removal is its own version.
+- `_saveIfDirty` sets `ref.current = null` on failure, so anything that later
+  treats `classesRef.current` as the freshest list has to tolerate a null.
+  Nothing in v4.54 does.
+- The bulk `storage.classes.save` upsert stays reachable for admins. Every
+  trainer-reachable path is off it now, but the shape is still there and will
+  bite again if a new trainer-facing class mutation is wired to the sync
+  helpers.
 
 ---
 
