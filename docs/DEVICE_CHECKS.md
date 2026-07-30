@@ -136,6 +136,39 @@ whether it survived. If it vanished, tell Reagan.
 
 ---
 
+## Check 6 - Build indicator / manual refresh (v4.55, UNVERIFIED)
+
+**Status: OPEN. This is the one that actually needs your iPad, not a desktop
+browser - it exists because of a stale home screen tile you reported on
+July 30.**
+
+The login screen now has small text at the bottom reading something like
+`v4.55 · tap to refresh`. Two things it's for:
+
+1. **Which build is this.** The version number there should match whatever
+   Reagan tells you just shipped. If it doesn't, the device hasn't picked up
+   the latest push yet.
+2. **Manual refresh.** Tapping that text forces a fresh fetch of the app,
+   which is the only way to get a home screen tile unstuck - there's no
+   address bar or pull-to-refresh on a tile, so a stale tile had no way to
+   fix itself before this.
+
+### The check
+
+1. On an iPad or iPhone with the app installed as a **home screen tile**
+   (not just open in Safari), open it and confirm the version text is
+   readable at the bottom of the login screen.
+2. Tap it.
+
+**PASS:** The app reloads and the version text still reads the current
+version afterward.
+
+**If it doesn't fix a stuck/stale tile:** that's the scenario this shipped
+for, so it's important - tell Reagan exactly what you saw (did it reload at
+all? did the version text change?).
+
+---
+
 ## Completed
 
 Nothing yet. This list was created 2026-07-14.

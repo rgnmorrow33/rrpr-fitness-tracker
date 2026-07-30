@@ -7,7 +7,15 @@
  * gap where CI (smoke.yml) only runs post-deploy, so a syntax error would
  * otherwise reach production iPads before anything automated notices.
  *
- * Two invocation modes, same check:
+ * v4.55 Fix C: also blocks a push if APP_VERSION and the trailing footer
+ * comment disagree - the two version strings in this file that make the
+ * Login-screen build indicator trustworthy instead of one more stale
+ * claim. Unlike the syntax check, this assertion does NOT share the
+ * fail-open behavior below: a check that can't extract either value has
+ * not passed, it has failed, so checkVersionMatch() calls process.exit()
+ * itself rather than throwing back into main()'s try/catch.
+ *
+ * Two invocation modes, same checks:
  *   (default) Claude Code PreToolUse hook. Reads a tool-call JSON on stdin,
  *     acts only when the command is a `git ... push`. exit 0 = allow,
  *     exit 2 = BLOCK (stderr fed back to Claude), exit 1 = non-blocking error.
@@ -55,6 +63,37 @@ function isGitPush(command) {
   return /\bgit(\.exe)?["']?\s+(-[^\s]+\s+|-C\s+\S+\s+)*push\b/i.test(command);
 }
 
+// v4.55 Fix C: APP_VERSION and the trailing `/* vX.Y */` footer comment must
+// agree. Deliberately does not throw - a thrown error would hit main()'s
+// outer try/catch and fail OPEN, which is correct for an unrelated internal
+// error but wrong here: a check that can't read the file has not passed.
+function checkVersionMatch(html, block) {
+  try {
+    const versionMatch = html.match(/var\s+APP_VERSION\s*=\s*'(v\d+\.\d+)'/);
+    const footerMatch = html.match(/\/\*\s*(v\d+\.\d+)\s*\*\/\s*<\/script>/);
+    if (!versionMatch || !footerMatch) {
+      process.stderr.write(
+        `BLOCKED: could not extract the version to check. APP_VERSION constant ` +
+        `found: ${!!versionMatch}; trailing footer comment found: ${!!footerMatch}. ` +
+        `A guard that can't read the file has not passed - fix whichever is ` +
+        `missing before pushing.\n`
+      );
+      process.exit(block);
+    }
+    if (versionMatch[1] !== footerMatch[1]) {
+      process.stderr.write(
+        `BLOCKED: APP_VERSION ('${versionMatch[1]}') does not match the trailing ` +
+        `footer comment ('${footerMatch[1]}') in ${HTML_FILE} at HEAD. Update both ` +
+        `to the same version before pushing.\n`
+      );
+      process.exit(block);
+    }
+  } catch (e) {
+    process.stderr.write(`BLOCKED: version-match check itself failed (${e.message}).\n`);
+    process.exit(block);
+  }
+}
+
 function main() {
   // In git mode the push is already happening; skip the stdin/command gate.
   if (!GIT_MODE) {
@@ -85,9 +124,15 @@ function main() {
     process.exit(BLOCK);
   }
 
+  const html = show.stdout;
+
+  // v4.55 Fix C: version-match guard. Exits directly (see checkVersionMatch)
+  // rather than returning a failure to be handled below, so it can't be
+  // routed through the fail-open catch at the bottom of this file.
+  checkVersionMatch(html, BLOCK);
+
   // Extract every inline <script> block (no src attribute). Pad with newlines
   // so node --check reports real HTML line numbers.
-  const html = show.stdout;
   const blocks = [];
   const re = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
   let m;

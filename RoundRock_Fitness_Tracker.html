@@ -2127,6 +2127,12 @@
      carries the checklist) with the prod URL/key left in place.
      ======================================================================== */
   var STORAGE_MODE = 'supabase'; /* 'localStorage' | 'supabase' */
+  /* v4.55: single source of truth for the build indicator (Login footer)
+     and the pre-push hook's version-match guard. Must equal the trailing
+     version comment at the bottom of this script - the hook fails the
+     push if they disagree. */
+  var APP_VERSION = 'v4.55';
+  if (typeof window !== 'undefined') { window.APP_VERSION = APP_VERSION; }
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
   /* ============ APP AUTH TOKEN (identity RLS, 0004/0005) ============
@@ -11235,6 +11241,18 @@
       e('div', { className: 'login-admin' },
         e('button', { onClick: function(){ setFrontDeskOpen(true); } }, 'Front desk?')
       ),
+
+      /* v4.55: build indicator doubles as the manual refresh - the only way
+         off a stale bundle on an iOS home screen tile, which has no
+         address bar or pull-to-refresh. Self-labeled since Selisa (the
+         device-checks owner) isn't in these chats to be told what it does.
+         Query-string cache-bust, not location.reload(true) - that flag is
+         a long-standing no-op in WebKit/Chromium and does not defeat a
+         standalone-mode cache. */
+      e('div', {
+        style: { fontSize: '11px', color: 'var(--slate-soft)', textAlign: 'center', marginTop: '18px', cursor: 'pointer' },
+        onClick: function(){ window.location.replace(window.location.pathname + '?v=' + Date.now()); }
+      }, APP_VERSION + ' · tap to refresh'),
 
       pinTarget && e(PinModal, {
         title: pinTarget.name + ' - Enter PIN',
@@ -31685,7 +31703,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.54 */
+/* v4.55 */
 </script>
 </body>
 </html>

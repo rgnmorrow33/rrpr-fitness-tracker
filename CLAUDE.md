@@ -250,9 +250,13 @@ Workflow:
 5. Netlify auto-deploys in ~30 seconds
 6. Selisa verifies on production iPad
 
-Pre-push gates. Two checks run before every push and block it on failure:
-node --check on the embedded JS, and the tag-before-push check. They run
-two ways - through Claude Code automatically (.claude/settings.json), and
+Pre-push gates. Three checks run before every push and block it on failure:
+node --check on the embedded JS, the tag-before-push check, and (since
+v4.55) a version-match check that blocks unless `APP_VERSION` (the config
+constant near STORAGE_MODE) equals the trailing `/* vX.Y */` footer
+comment - so the Login-screen build indicator can't silently drift into a
+stale claim the way this file itself has twice. Update both together. They
+run two ways - through Claude Code automatically (.claude/settings.json), and
 as a native git pre-push hook for manual terminal pushes. The git hook is
 tracked in githooks/ but core.hooksPath is local config, so each clone
 enables it ONCE:
