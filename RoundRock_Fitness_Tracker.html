@@ -2131,7 +2131,7 @@
      and the pre-push hook's version-match guard. Must equal the trailing
      version comment at the bottom of this script - the hook fails the
      push if they disagree. */
-  var APP_VERSION = 'v4.56';
+  var APP_VERSION = 'v4.57';
   if (typeof window !== 'undefined') { window.APP_VERSION = APP_VERSION; }
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
@@ -3764,6 +3764,35 @@
     var table = PERMISSIONS[tier];
     if (!table) return false;
     return !!table[action];
+  }
+
+  /* v4.57 Fix A: shared delete-permission gate. `allowed` is the caller's
+     already-evaluated boolean - a plain hasPermission(session, 'x') check,
+     or an OR'd expression for handlers with a second qualifying condition
+     (e.g. deleteSubAssignment's canManageSubs shape). Every delete handler
+     calls this as its first statement; sync handlers toast-and-return on a
+     false result, async handlers reject instead so the caller's .catch
+     surfaces one message rather than two. Render gates stay in place - this
+     is a second layer, not a replacement. */
+  var DELETE_DENY_MSG = 'You do not have permission to do that.';
+  function guardDelete(allowed){
+    return !!allowed;
+  }
+
+  /* v4.57 Fix D: shared type-to-confirm gate for irreversible deletes.
+     Replaces the two byte-for-byte-identical inline copies that used to
+     live in ClientDetail.doHardDelete and ClassDetail.doHardDelete.
+     safeAlternative names the recoverable action to suggest instead (e.g.
+     "soft delete"); omit it when there isn't one. */
+  function confirmTypedDelete(kind, expectedName, safeAlternative, detail){
+    var msg = 'This permanently removes the record. Cannot be undone. ' +
+      (safeAlternative
+        ? ('Use ' + safeAlternative + ' unless you specifically need to remove this from the database entirely.')
+        : 'This cannot be recovered.') +
+      (detail ? (' ' + detail) : '') +
+      '\n\nType the ' + kind + ' name to confirm: ' + expectedName;
+    var input = window.prompt(msg);
+    return input === expectedName;
   }
 
   var SEED_TRAINERS = [
@@ -8049,12 +8078,21 @@
     var toasts = toastTuple[0];
     var setToasts = toastTuple[1];
 
-    function toast(msg, kind){
+    /* v4.57 Fix B1: opts is optional and additive - every existing call site
+       (toast(msg) / toast(msg, kind)) is unaffected. { actionLabel, onAction }
+       renders a button in the toast that runs onAction and dismisses
+       immediately; ttl overrides the default 2400ms. */
+    function toast(msg, kind, opts){
       var id = uid();
-      setToasts(function(t){ return t.concat([{ id: id, msg: msg, kind: kind || 'success' }]); });
+      var actionLabel = opts && opts.actionLabel;
+      var onAction = opts && opts.onAction;
+      var ttl = (opts && opts.ttl) || 2400;
+      setToasts(function(t){
+        return t.concat([{ id: id, msg: msg, kind: kind || 'success', actionLabel: actionLabel, onAction: onAction }]);
+      });
       setTimeout(function(){
         setToasts(function(t){ return t.filter(function(x){ return x.id !== id; }); });
-      }, 2400);
+      }, ttl);
     }
 
     /* ---- client CRUD ---- */
@@ -8070,7 +8108,11 @@
         return list.concat([c]);
       });
     }
-    function deleteClient(id){
+    /* v4.57 Fix E: renamed from deleteClient. This is the permanent one -
+       softDeleteClient (above) is what the visible "Delete Client" button
+       calls, which read exactly backwards under the old name. */
+    function hardDeleteClient(id){
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       setClients(function(list){ return list.filter(function(x){ return x.id !== id; }); });
     }
     function addSession(clientId, sess){
@@ -8143,11 +8185,23 @@
        from row presence, so the package credit returns automatically).
        Action name 'session_delete' matches the package_deleted /
        recurring_cancel_all vocabulary on this entity. */
+    /* v4.57 D1: one rule at every call site (15141, 17757, 17968) - a
+       scheduled (not-yet-logged) session is ordinary shift work and
+       deletable by anyone who can see the client, matching what the
+       ClientDetail row-level gate already did. Anything non-scheduled is a
+       record of what happened and needs canDeleteSession, same as before.
+       Verified the only route into ClientDetail for trainer tier is the
+       trainerName-scoped roster (TrainerPT), so no separate ownership check
+       is needed here - ClientDetail can't be opened for someone else's
+       client in the first place. */
     function deleteSession(clientId, sessId){
       var before = clients.find(function(x){ return x.id === clientId; });
       if (!before) return;
-      var sess = (before.sessions || []).find(function(s){ return s.id === sessId; });
-      if (!sess) return;
+      var sessIdx = (before.sessions || []).findIndex(function(s){ return s.id === sessId; });
+      if (sessIdx === -1) return;
+      var sess = before.sessions[sessIdx];
+      var isScheduled = sess.status === 'scheduled';
+      if (!guardDelete(isScheduled || hasPermission(session, 'canDeleteSession'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       var after = Object.assign({}, before, {
         sessions: (before.sessions || []).filter(function(s){ return s.id !== sessId; })
       });
@@ -8155,6 +8209,23 @@
          returns to the package. */
       auditedUpsertClient(after, 'session_delete', {
         before: before, after: after, amount: sessionConsumption(sess)
+      });
+      /* v4.57 Fix B2: undo instead of an extra confirm dialog. Reads through
+         clientsRef so the 8s window survives any client edits that land in
+         between (the save useEffect keeps the ref current every render). */
+      toast('Session deleted', 'error', {
+        actionLabel: 'Undo',
+        ttl: 8000,
+        onAction: function(){
+          var current = (clientsRef.current || []).find(function(x){ return x.id === clientId; });
+          if (!current) return;
+          var restoredSessions = (current.sessions || []).slice();
+          restoredSessions.splice(Math.min(sessIdx, restoredSessions.length), 0, sess);
+          var restored = Object.assign({}, current, { sessions: restoredSessions });
+          auditedUpsertClient(restored, 'session_restored', {
+            before: current, after: restored, amount: -sessionConsumption(sess)
+          });
+        }
       });
     }
 
@@ -8352,7 +8423,9 @@
         return list.concat([cl]);
       });
     }
-    function deleteClass(id){
+    /* v4.57 Fix E: renamed from deleteClass, same reasoning as hardDeleteClient. */
+    function hardDeleteClass(id){
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       setClasses(function(list){ return list.filter(function(x){ return x.id !== id; }); });
     }
     function addAttendance(classId, att){
@@ -8393,27 +8466,64 @@
       });
     }
     function deleteAttendance(classId, attId){
+      if (!guardDelete(hasPermission(session, 'canEditClassStructure'))) { toast(DELETE_DENY_MSG, 'error'); return; }
+      var cls = classes.find(function(x){ return x.id === classId; });
+      var idx = cls ? (cls.attendance || []).findIndex(function(a){ return a.id === attId; }) : -1;
+      var removed = idx >= 0 ? cls.attendance[idx] : null;
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
-          var removed = (c.attendance || []).find(function(a){ return a.id === attId; }) || null;
+          var found = (c.attendance || []).find(function(a){ return a.id === attId; }) || null;
           var copy = Object.assign({}, c);
           copy.attendance = (c.attendance || []).filter(function(a){ return a.id !== attId; });
-          if (removed) {
+          if (found) {
+            /* v4.57 Fix B3: widened payload. Previously dropped time and
+               logged_at (time feeds payroll) and collapsed instructor with
+               actualInstructor, which loses the distinction on a sub-covered
+               class. Now sufficient to hand-reconstruct the removed row. */
             copy = appendAuditEntry(copy, session, 'attendance_deleted', {
               entity_type: 'class',
               target_id: c.id,
               before: {
-                attendance_id: removed.id,
-                class_date: removed.class_date || removed.date || null,
-                instructor: removed.instructor || removed.actualInstructor || null,
-                headcount: typeof removed.headcount === 'number' ? removed.headcount : null
+                attendance_id: found.id,
+                class_date: found.class_date || found.date || null,
+                instructor: found.instructor || null,
+                actualInstructor: found.actualInstructor || null,
+                time: found.time || null,
+                logged_at: found.logged_at || null,
+                headcount: typeof found.headcount === 'number' ? found.headcount : null
               }
             });
           }
           return copy;
         });
       });
+      /* v4.57 Fix B2: undo instead of an extra confirm dialog. onAction uses
+         the setClasses functional-updater form, so it always applies against
+         the latest state even if other class edits land during the 8s window. */
+      if (removed) {
+        toast('Attendance deleted', 'error', {
+          actionLabel: 'Undo',
+          ttl: 8000,
+          onAction: function(){
+            setClasses(function(list){
+              return list.map(function(c){
+                if (c.id !== classId) return c;
+                var copy = Object.assign({}, c);
+                var arr = (c.attendance || []).slice();
+                arr.splice(Math.min(idx, arr.length), 0, removed);
+                copy.attendance = arr;
+                copy = appendAuditEntry(copy, session, 'attendance_restored', {
+                  entity_type: 'class',
+                  target_id: c.id,
+                  after: { attendance_id: removed.id, class_date: removed.class_date || removed.date || null }
+                });
+                return copy;
+              });
+            });
+          }
+        });
+      }
     }
     function addSubAssignment(classId, assignment){
       /* Snapshot prev-state BEFORE setClasses so the emit's open-vs-open
@@ -8467,11 +8577,31 @@
       }
     }
     function deleteSubAssignment(classId, assignmentId){
+      var cls = classes.find(function(x){ return x.id === classId; });
+      /* Matches the canManageSubs expression in ClassDetail (19081): admin/
+         lead, or the class's own regular instructor. */
+      var isInstructor = !!(cls && ctxCurrentUserName() === cls.instructor);
+      if (!guardDelete(hasPermission(session, 'canEditClassStructure') || isInstructor)) { toast(DELETE_DENY_MSG, 'error'); return; }
       setClasses(function(list){
         return list.map(function(c){
           if (c.id !== classId) return c;
+          var removed = (c.subAssignments || []).find(function(s){ return s.id === assignmentId; }) || null;
           var copy = Object.assign({}, c);
           copy.subAssignments = (c.subAssignments || []).filter(function(s){ return s.id !== assignmentId; });
+          /* v4.57 Fix B4: previously no audit trail at all for this removal. */
+          if (removed) {
+            copy = appendAuditEntry(copy, session, 'sub_assignment_deleted', {
+              entity_type: 'class',
+              target_id: c.id,
+              before: {
+                sub_assignment_id: removed.id,
+                date: removed.date || null,
+                sub_instructor: removed.subInstructor || null,
+                original_instructor: removed.originalInstructor || null,
+                status: removed.status || null
+              }
+            });
+          }
           return copy;
         });
       });
@@ -8564,6 +8694,7 @@
       });
     }
     function removeClosure(date, facility){
+      if (!guardDelete(hasPermission(session, 'canManageClosures'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       /* Spec 2 (A): facility param disambiguates same-date closures.
          Legacy callers omit it; falls back to first non-deleted match
          on the date. */
@@ -8662,10 +8793,21 @@
     }
     function persistBannerDelete(id){
       if (STORAGE_MODE !== 'supabase' || !supabaseClient) return Promise.resolve();
+      /* v4.57 Fix C: RLS filters, it does not error - a blocked delete comes
+         back with error null and zero rows, same as deleteQueueEntry (9587).
+         .select('id') + a row-count check is the only honest signal the
+         delete actually landed; previously this resolved on any res.error
+         being absent and let deleteBanner report success either way. */
       return supabaseClient.from('announcement_banners')
         .delete()
         .eq('id', id)
-        .then(function(res){ if (res.error) throw res.error; });
+        .select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the banner is still there. Check admin rights.');
+          }
+        });
     }
     function upsertBanner(b){
       var hadId = !!(b && b.id);
@@ -8699,6 +8841,7 @@
       });
     }
     function deleteBanner(id){
+      if (!guardDelete(hasPermission(session, 'canManageBanners'))) return Promise.reject(new Error(DELETE_DENY_MSG));
       /* Patch E: previously this only filtered local state. The save
          useEffect upserts only the remaining rows, leaving the deleted
          row in Supabase indefinitely. Now issues a real DELETE so
@@ -8881,8 +9024,35 @@
         }
       }
     }
+    /* v4.57 Fix C: previously local-state-only. The wros save useEffect is
+       upsert-only (storage.wros.save -> makeEntity), so filtering the array
+       here never issued a delete - the row stayed in Supabase and reappeared
+       on refetch while the UI reported success. Mirrors deleteQueueEntry's
+       shape: admin guard, real DELETE, row-count check (RLS blocks silently
+       with error null and zero rows), local state mutated only after the
+       write lands. */
     function deleteWRO(id){
-      setWros(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) return Promise.reject(new Error(DELETE_DENY_MSG));
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        setWros(function(list){
+          var next = (list || []).filter(function(x){ return x.id !== id; });
+          wrosRef.current = next;
+          return next;
+        });
+        return Promise.resolve();
+      }
+      return supabaseClient.from('wros').delete().eq('id', id).select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the WRO is still there. Check admin rights.');
+          }
+          setWros(function(list){
+            var next = (list || []).filter(function(x){ return x.id !== id; });
+            wrosRef.current = next;
+            return next;
+          });
+        });
     }
     /* v2.5: claim a pending WRO. Marks it as in-progress so other team
        members can see who's picking it up. Idempotent: re-claiming by the
@@ -8922,8 +9092,29 @@
         return list.concat([r]);
       });
     }
+    /* v4.57 Fix C: same ghost-delete fix as deleteWRO, same shape. */
     function deleteReferral(id){
-      setReferrals(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) return Promise.reject(new Error(DELETE_DENY_MSG));
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        setReferrals(function(list){
+          var next = (list || []).filter(function(x){ return x.id !== id; });
+          referralsRef.current = next;
+          return next;
+        });
+        return Promise.resolve();
+      }
+      return supabaseClient.from('referrals').delete().eq('id', id).select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the referral is still there. Check admin rights.');
+          }
+          setReferrals(function(list){
+            var next = (list || []).filter(function(x){ return x.id !== id; });
+            referralsRef.current = next;
+            return next;
+          });
+        });
     }
     function assignSub(classId, sub){
       setClasses(function(list){
@@ -8972,8 +9163,43 @@
       });
       return true;
     }
+    /* v4.57 Fix C: ghost-delete fix, same shape as deleteWRO, plus a
+       referential refusal - same spirit as deleteQueueEntry's from_queue_id
+       check. The AdminManageInstructors UI previously only warned about a
+       trainer having assigned clients/classes in a window.confirm; that
+       warning is now a hard refusal so removal can't orphan a roster or
+       leave a class pointing at a deleted instructor. */
     function removeTrainer(name){
-      setTrainerProfiles(function(list){ return list.filter(function(p){ return p.name !== name; }); });
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) return Promise.reject(new Error(DELETE_DENY_MSG));
+      var ownedClient = (clientsRef.current || []).find(function(c){ return c && !c.deleted_at && c.trainerName === name; });
+      if (ownedClient) {
+        return Promise.reject(new Error('Cannot delete: ' + ownedClient.name + ' is still assigned to this trainer.'));
+      }
+      var ownedClass = (classesRef.current || []).find(function(c){ return c && !c.deleted_at && c.instructor === name; });
+      if (ownedClass) {
+        return Promise.reject(new Error('Cannot delete: ' + ownedClass.name + ' still lists this trainer as instructor.'));
+      }
+      var profile = (trainerProfiles || []).find(function(p){ return p.name === name; });
+      if (!profile || !profile.id || STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        setTrainerProfiles(function(list){
+          var next = list.filter(function(p){ return p.name !== name; });
+          trainerProfilesRef.current = next;
+          return next;
+        });
+        return Promise.resolve();
+      }
+      return supabaseClient.from('trainers').delete().eq('id', profile.id).select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the team member is still there. Check admin rights.');
+          }
+          setTrainerProfiles(function(list){
+            var next = list.filter(function(p){ return p.name !== name; });
+            trainerProfilesRef.current = next;
+            return next;
+          });
+        });
     }
     /* Merge a profile update (e.g., from EditTrainerModal). Matches by id
        when present, falls back to name match. */
@@ -8997,8 +9223,29 @@
         return list.concat([it]);
       });
     }
+    /* v4.57 Fix C: same ghost-delete fix as deleteWRO, same shape. */
     function deleteItem(id){
-      setItems(function(list){ return list.filter(function(x){ return x.id !== id; }); });
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) return Promise.reject(new Error(DELETE_DENY_MSG));
+      if (STORAGE_MODE !== 'supabase' || !supabaseClient) {
+        setItems(function(list){
+          var next = (list || []).filter(function(x){ return x.id !== id; });
+          itemsRef.current = next;
+          return next;
+        });
+        return Promise.resolve();
+      }
+      return supabaseClient.from('admin_items').delete().eq('id', id).select('id')
+        .then(function(res){
+          if (res.error) throw res.error;
+          if (!res.data || res.data.length === 0) {
+            throw new Error('Delete did not land - the entry is still there. Check admin rights.');
+          }
+          setItems(function(list){
+            var next = (list || []).filter(function(x){ return x.id !== id; });
+            itemsRef.current = next;
+            return next;
+          });
+        });
     }
 
     /* ---- v2 / v2.3: Consult queue / leads pipeline CRUD ---- */
@@ -9846,6 +10093,7 @@
        since the makeEntity save path is upsert-only - the row would
        reappear on the next refresh. */
     function deleteScheduleVersion(id){
+      if (!guardDelete(hasPermission(session, 'canEditClassStructure'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       var actor = ctxCurrentUserName() || 'unknown';
       var nowIso = new Date().toISOString();
       setScheduleVersions(function(list){
@@ -10260,6 +10508,7 @@
     /* Hard-delete a single package on a client. Reachable only from the
        deleted-records filter view via the "Delete forever" link. */
     function hardDeletePackage(clientId, packageId){
+      if (!guardDelete(hasPermission(session, 'canHardDelete'))) { toast(DELETE_DENY_MSG, 'error'); return; }
       var before = clients.find(function(x){ return x.id === clientId; });
       if (!before) return;
       var pkgBefore = (before.packages || []).find(function(p){ return p.id === packageId; });
@@ -10519,7 +10768,7 @@
       confirmPairParticipant: confirmPairParticipant,
       dismissPairCandidate: dismissPairCandidate,
       logServiceRecovery: logServiceRecovery,
-      deleteClient: deleteClient,
+      hardDeleteClient: hardDeleteClient,
       addSession: addSession,
       updateSession: updateSession,
       deleteSession: deleteSession,
@@ -10530,7 +10779,7 @@
       auditedUpsertClass: auditedUpsertClass,
       softDeleteClass: softDeleteClass,
       restoreClass: restoreClass,
-      deleteClass: deleteClass,
+      hardDeleteClass: hardDeleteClass,
       auditQueueChange: auditQueueChange,
       addAttendance: addAttendance,
       deleteAttendance: deleteAttendance,
@@ -10742,7 +10991,14 @@
   function ToastStack(props){
     return e('div', { className: 'toast-stack' },
       props.toasts.map(function(t){
-        return e('div', { key: t.id, className: 'toast ' + (t.kind || '') }, t.msg);
+        return e('div', { key: t.id, className: 'toast ' + (t.kind || '') },
+          t.msg,
+          t.actionLabel && t.onAction && e('button', {
+            className: 'toast-action',
+            style: { marginLeft: '10px', background: 'none', border: 'none', textDecoration: 'underline', color: 'inherit', cursor: 'pointer', fontWeight: 700 },
+            onClick: t.onAction
+          }, t.actionLabel)
+        );
       })
     );
   }
@@ -14626,10 +14882,8 @@
       ctx.toast('Client restored ✓');
     }
     function doHardDelete(){
-      var msg = 'This permanently removes the record. Cannot be undone. Use soft delete unless you specifically need to remove this from the database entirely.\n\nType the client name to confirm: ' + c.name;
-      var input = window.prompt(msg);
-      if (input !== c.name) return;
-      ctx.deleteClient(c.id);
+      if (!confirmTypedDelete('client', c.name, 'soft delete')) return;
+      ctx.hardDeleteClient(c.id);
       ctx.toast('Client hard-deleted', 'error');
       props.onBack();
     }
@@ -15138,7 +15392,9 @@
                         title: 'Delete this session',
                         onClick: function(ev){
                           ev.stopPropagation();
-                          if (window.confirm('Delete this session?')) ctx.deleteSession(c.id, s.id);
+                          /* v4.57 Fix B2: undo replaces the confirm - see
+                             ctx.deleteSession, which toasts an Undo action. */
+                          ctx.deleteSession(c.id, s.id);
                         }
                       }, '✕')
                     );
@@ -17948,7 +18204,11 @@
     var bothSigned = !!(s.trainerSig && s.clientSig);
     var canEditAnySession = ctx.can('canEditAnySession');
     var canDeleteSession = ctx.can('canDeleteSession');
-    var canDelete = canDeleteSession && !bothSigned;
+    /* v4.57 D1: scheduled (not-yet-logged) sessions are deletable by anyone
+       who can see them, matching the ClientDetail row-level gate and the
+       shared rule now enforced inside ctx.deleteSession itself. */
+    var isScheduled = status === 'scheduled';
+    var canDelete = (canDeleteSession || isScheduled) && !bothSigned;
     var recovery = s.serviceRecovery || null;
     var hasRecoveryDescription = !!(recovery && (recovery.description || recovery.note));
     var hasRecoveryActions = !!(recovery && recovery.actions && recovery.actions.length > 0);
@@ -18027,7 +18287,7 @@
             onClick: function(){ props.onReschedule(s); }
           }, 'Reschedule'),
           canEditAnySession && props.onEdit && e('button', { className: 'btn btn-outline', onClick: function(){ props.onEdit(s); } }, 'Edit'),
-          canDeleteSession && e('button', {
+          (canDeleteSession || isScheduled) && e('button', {
             className: 'btn btn-ghost btn-sm',
             style: { color: 'var(--red)', opacity: canDelete ? 1 : 0.4, cursor: canDelete ? 'pointer' : 'not-allowed' },
             disabled: !canDelete,
@@ -19099,10 +19359,8 @@
       ctx.toast('Class restored ✓');
     }
     function doHardDelete(){
-      var msg = 'This permanently removes the record. Cannot be undone. Use soft delete unless you specifically need to remove this from the database entirely.\n\nType the class name to confirm: ' + c.name;
-      var input = window.prompt(msg);
-      if (input !== c.name) return;
-      ctx.deleteClass(c.id);
+      if (!confirmTypedDelete('class', c.name, 'soft delete')) return;
+      ctx.hardDeleteClass(c.id);
       ctx.toast('Class hard-deleted', 'error');
       props.onBack();
     }
@@ -19291,7 +19549,9 @@
                     style: { color: 'var(--red)' },
                     onClick: function(ev){
                       ev.stopPropagation();
-                      if (window.confirm('Delete this attendance record?')) ctx.deleteAttendance(c.id, a.id);
+                      /* v4.57 Fix B2: undo replaces the confirm - see
+                         ctx.deleteAttendance, which toasts an Undo action. */
+                      ctx.deleteAttendance(c.id, a.id);
                     }
                   }, '✕')
                 );
@@ -20316,11 +20576,13 @@
             className: 'btn btn-ghost',
             style: { color: 'var(--red)', marginRight: 'auto' },
             onClick: function(){
-              if (confirm('Delete this admin time entry?')) {
-                ctx.deleteItem(existing.id);
-                ctx.toast('Admin time deleted');
+              if (!confirmTypedDelete('admin time entry', existing.title || 'this entry', null)) return;
+              ctx.deleteItem(existing.id).then(function(){
+                ctx.toast('Admin time deleted', 'error');
                 props.onClose();
-              }
+              }).catch(function(err){
+                ctx.toast('Could not delete: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+              });
             }
           }, 'Delete'),
           e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
@@ -28244,16 +28506,18 @@
         setName('');
       }
     }
+    /* v4.57 D2/Fix C: the hasClients/hasClasses check used to be a warning
+       inside window.confirm ("remove anyway?"). ctx.removeTrainer now
+       refuses the delete outright when either is true, so this only needs
+       the type-to-confirm gate - the referential check happens once, in the
+       handler, not duplicated here. */
     function remove(n){
-      var hasClients = ctx.clients.some(function(c){ return c.trainerName === n; });
-      var hasClasses = ctx.classes.some(function(c){ return c.instructor === n; });
-      if (hasClients || hasClasses) {
-        if (!window.confirm(n + ' still has clients and/or classes assigned. Remove anyway? Their clients and classes will remain but may appear without a valid team member until reassigned.')) return;
-      } else {
-        if (!window.confirm('Remove ' + n + '?')) return;
-      }
-      ctx.removeTrainer(n);
-      ctx.toast('Team member removed', 'error');
+      if (!confirmTypedDelete('team member', n, null)) return;
+      ctx.removeTrainer(n).then(function(){
+        ctx.toast('Team member removed', 'error');
+      }).catch(function(err){
+        ctx.toast('Could not remove: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
     }
     function reconcileNow(){
       if (reconciling) return;
@@ -29364,10 +29628,14 @@
     var setEditPreOpen = editPreOpenTuple[1];
 
     function doDelete(){
-      if (!window.confirm('Delete this ' + (isYouthCert(w) ? 'youth certification' : 'WRO') + ' record? The signed pre-form and any specialist notes will be permanently removed.')) return;
-      ctx.deleteWRO(w.id);
-      ctx.toast(isYouthCert(w) ? 'Youth certification deleted' : 'WRO deleted', 'error');
-      props.onBack();
+      var kind = isYouthCert(w) ? 'youth certification' : 'WRO';
+      if (!confirmTypedDelete(kind, w.participantName, null, 'The signed pre-form and any specialist notes will be permanently removed.')) return;
+      ctx.deleteWRO(w.id).then(function(){
+        ctx.toast(isYouthCert(w) ? 'Youth certification deleted' : 'WRO deleted', 'error');
+        props.onBack();
+      }).catch(function(err){
+        ctx.toast('Could not delete: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
     }
     function convert(){ props.onConvert(w); }
     function emailParticipant(){
@@ -29938,9 +30206,12 @@
       ctx.toast('Referral status updated ✓');
     }
     function deleteRef(r){
-      if (!window.confirm('Delete this referral? This cannot be undone.')) return;
-      ctx.deleteReferral(r.id);
-      ctx.toast('Referral deleted', 'error');
+      if (!confirmTypedDelete('referral', r.clientName || 'this referral', null)) return;
+      ctx.deleteReferral(r.id).then(function(){
+        ctx.toast('Referral deleted', 'error');
+      }).catch(function(err){
+        ctx.toast('Could not delete: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+      });
     }
 
     function exportReferralsCSV(){
@@ -32324,7 +32595,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.56 */
+/* v4.57 */
 </script>
 </body>
 </html>

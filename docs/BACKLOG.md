@@ -101,8 +101,30 @@ version and its own decision rather than a convenient sweep.
   cold and stale purely because her most recent session row is a `scheduled`
   booking. Deciding this means deciding whether a booking is a claim on the
   package or only a sign-off is - do not fold it into a feature batch.
+- **Should lead ever be able to permanently delete a WRO or a referral?**
+  v4.57 gated `deleteWRO`/`deleteReferral` to `canHardDelete` (admin-only),
+  which matches what the `wros`/`referrals` DELETE RLS policy
+  (`app_is_admin()`) already enforced - a lead-tier delete was already refused
+  server-side before v4.57, it just refused silently and reported success. So
+  v4.57 didn't take away a working capability, it stopped lying about one.
+  Whether lead *should* get real delete rights here is a policy question,
+  needs an RLS migration, and was deliberately kept out of v4.57. Same shape
+  as the lead "own team" scoping TODO below - both are "lead permissions are
+  provisional this cycle" questions.
 
 ## Deferred cleanup pile
+
+### From v4.57 (delete hardening)
+
+- **`deleteCancellation`, `removeSubAssignment`, `deleteContact` are dead
+  code.** All three are exported on `ctx` with zero UI callers (confirmed by
+  grep across the whole file). `removeSubAssignment` is a stale near-duplicate
+  of the live `deleteSubAssignment`. Left out of the v4.57 guard/audit sweep
+  on purpose - adding a permission guard to unreachable code would misleadingly
+  imply they're live. Candidates for removal in a dedicated cleanup version;
+  removal, not a guard, is the fix.
+- Stray `/* ===== PIN MODAL ===== */` section marker above the KIOSK WRO INTAKE
+  block; the comment appears twice and the first one labels the wrong section.
 
 ### From v4.55 (build version indicator)
 

@@ -1,6 +1,8 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.56** (youth weight room certification, and both member-facing forms matched to the July 2026 Microsoft Forms questionnaires, July 31, 2026)
+**Live version: v4.57** (delete hardening: permission guards on every delete
+handler, undo instead of a confirm on attendance/session deletes, four
+ghost-deletes made real, hard-delete rename, July 31, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -13,9 +15,34 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 31, 2026
 
-- **Live version: v4.56**, tagged. Tracker file: 32,330 lines / 1.4 MB.
-  `node --check` on the embedded JS: PASS. Netlify prod
-  (pardfitnesstracker2) deploys on push to main.
+- **Live version: v4.57**, tagged. Tracker file line count/size grew with the
+  delete-hardening batch. `node --check` on the embedded JS: PASS. Netlify prod
+  (pardfitnesstracker2) deploys on push to main. Shipped as a branch + draft
+  PR rather than direct-to-main, per this session's background-job convention
+  - not yet on production until merged.
+- **v4.57 closed the delete-hardening gaps a Phase 1 diagnostic found across
+  the app.** Every delete handler now gates at the handler, not only the
+  render (a hidden button with an ungated handler was the dangerous case -
+  `deleteAttendance` had neither, and was reachable for any trainer on any
+  class since `ClassDetail` entry turned out to be unrestricted). Attendance
+  and session deletes drop their `window.confirm` in favor of an undo toast
+  (8s window) - fewer taps for the normal case, one tap to reverse a mis-tap
+  on a shared iPad. The attendance audit payload widened (was missing `time`
+  and `logged_at`, and collapsed `instructor`/`actualInstructor`). Four
+  ghost-deletes (`deleteWRO`, `deleteReferral`, `deleteItem`, `removeTrainer`)
+  that only filtered local state and never issued a DELETE - same shape as the
+  v4.53 lead-delete bug - now do a real `DELETE` with a row-count check and a
+  shared type-to-confirm prompt; `removeTrainer` also refuses outright instead
+  of just warning when the trainer has assigned clients or classes.
+  `persistBannerDelete` got the same row-count check `deleteQueueEntry`
+  already had. `deleteClient`/`deleteClass` renamed to `hardDeleteClient`/
+  `hardDeleteClass` - the old names read backwards from what they did.
+  `deleteSession` now applies one rule at all three call sites: a scheduled
+  (not-yet-logged) session is deletable by anyone who can see it, anything
+  else needs `canDeleteSession` - previously the three call sites disagreed
+  with each other. `deleteCancellation`, `removeSubAssignment`, `deleteContact`
+  are dead code (zero UI callers) and were deliberately left unguarded rather
+  than misleadingly "fixed" - see BACKLOG.md.
 - **v4.56 added youth weight room certification as a third member-facing
   kiosk tile** and brought both member-facing forms in line with the live
   Microsoft Forms questionnaires. Certifications ride the `wros` table behind
