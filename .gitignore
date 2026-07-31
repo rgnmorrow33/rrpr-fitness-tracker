@@ -40,3 +40,6 @@ docs/Fitness_Tracker_Update_Log.docx
 # Local staging copy carrying real branch keys - NEVER commit.
 # The tracked staging/*.staging.html keeps placeholders.
 staging/local-*.html
+
+# Local-only spec scratch; tests/ is tracked
+tests-local/

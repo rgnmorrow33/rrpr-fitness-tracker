@@ -288,9 +288,20 @@ reconstruction problem). Tags give the log scaffold (`npm run log:scaffold`) cle
 ranges with no argument, let the SCHEMA.md checker stamp drift reports against a
 known version, and mean future-me never has to guess whether a version existed.
 
-Rule: a version is not done until it is tagged. The update-log entry and the tag
-are the two closing acts of shipping a version. If you used the tag+scaffold
-helper (`npm run release:tag -- v4.32`), the tag is handled; otherwise tag by hand.
+Rule: a version is not done until it is tagged. The update-log entry, the tag,
+and the `docs/DEVICE_CHECKS.md` entries are the three closing acts of shipping a
+version. If you used the tag+scaffold helper (`npm run release:tag -- v4.32`),
+the tag is handled; otherwise tag by hand.
+
+Tag from `main`, never from a worktree branch. v4.57 was committed and tagged on
+`worktree-delete-hardening-v457` while `main` was still on v4.56, so
+`git tag | tail -3` reported a version that was not live and the log header
+claimed the same thing. Two of the three signals the version ritual reads were
+wrong for about two hours. Merge first, then tag `main`.
+
+A version that ships without `DEVICE_CHECKS.md` entries cannot have its decision
+record logged, because Selisa has nothing to run against it. Five records were
+stacked up behind exactly this by July 31, 2026.
 
 Tags are cheap and local-cost-free. This is a habit, not a process. No annotated
 tags, no release notes in the tag, no signing. Just `git tag vX.Y`.
