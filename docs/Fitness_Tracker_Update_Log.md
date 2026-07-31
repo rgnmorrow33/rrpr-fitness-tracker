@@ -1,11 +1,9 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.56.** v4.57 is built and committed on branch
-`worktree-delete-hardening-v457` but is NOT merged and NOT deployed. Do not
-treat v4.57 as shipped until it is on `main` and the login screen on a device
-reads v4.57. (v4.57: delete hardening - permission guards on every delete
+**Live version: v4.57** (delete hardening: permission guards on every delete
 handler, undo instead of a confirm on attendance/session deletes, four
-ghost-deletes made real, hard-delete rename, July 31, 2026)
+ghost-deletes made real, hard-delete rename). Merged to `main` and deployed
+July 31, 2026. Tag `v4.57` points at `356a6b7` on `main`.
 
 Newest version at the top; append new sections above the older ones.
 
@@ -18,19 +16,27 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 31, 2026
 
-- **Live version on production is v4.56.** v4.57 is built, committed as
-  `393feb6` on branch `worktree-delete-hardening-v457`, a clean fast-forward on
-  top of v4.56, and pushed. It is **not merged and not deployed**. Netlify prod
-  (pardfitnesstracker2) deploys on push to `main`, and `main` is still at
-  `69ee8ec`. `node --check` on the embedded JS: PASS, verified independently of
-  the pre-push hook, because v4.57 was built in an isolated worktree and
-  `BACKLOG.md` documents that the Claude-side hook resolves through
-  `CLAUDE_PROJECT_DIR` and checks the wrong branch in that case.
-- **The `v4.57` tag was created off-main and has been withdrawn.** It briefly
-  existed locally and on origin pointing at `393feb6`, which meant
-  `git tag | tail -3` reported v4.57 while `main` sat at v4.56. Two of the three
-  signals in the version-confirmation ritual were lying. Re-tag only after the
-  merge lands on `main`.
+- **Live version: v4.57**, tagged `356a6b7` on `main` and deployed. Netlify
+  prod (pardfitnesstracker2) deploys on push to `main`. `node --check` on the
+  embedded JS: PASS, verified independently of the pre-push hook because v4.57
+  was built in an isolated worktree and `BACKLOG.md` documents that the
+  Claude-side hook resolves through `CLAUDE_PROJECT_DIR` and checks the wrong
+  branch in that case.
+- **v4.57 shipped from a branch and briefly carried an off-main tag.** Code was
+  committed as `393feb6` on `worktree-delete-hardening-v457` and tagged there,
+  which meant `git tag | tail -3` reported v4.57 while `main` sat at v4.56. Two
+  of the three signals in the version-confirmation ritual were wrong for about
+  two hours. The tag was withdrawn from local and origin, the branch was
+  fast-forwarded into `main`, and v4.57 was re-tagged on `main`.
+- **The pre-push hook caught the re-tag ordering and was right to.** A push of
+  `main` was refused with "commit(s) in origin/main..HEAD reference version(s)
+  with no git tag: v4.57". Tag first, then push the branch, then push the tag.
+  Worth remembering: the hook enforces tag-before-push, so any plan that defers
+  tagging until after the deploy will be blocked.
+- **v4.57 shipped with zero device verification.** Nothing in it has been
+  exercised by a human against the running app. `Tracker_Verification_v4_57_v1_1`
+  is the packet that closes that, and `DEVICE_CHECKS.md` Checks 7 to 11 are the
+  canonical version of those steps.
 - **v4.57 closed the delete-hardening gaps a Phase 1 diagnostic found across
   the app.** Every delete handler now gates at the handler, not only the
   render (a hidden button with an ungated handler was the dangerous case -
