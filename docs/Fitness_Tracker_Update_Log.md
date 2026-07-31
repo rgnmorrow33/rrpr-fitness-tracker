@@ -1,6 +1,9 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.57** (delete hardening: permission guards on every delete
+**Live version: v4.56.** v4.57 is built and committed on branch
+`worktree-delete-hardening-v457` but is NOT merged and NOT deployed. Do not
+treat v4.57 as shipped until it is on `main` and the login screen on a device
+reads v4.57. (v4.57: delete hardening - permission guards on every delete
 handler, undo instead of a confirm on attendance/session deletes, four
 ghost-deletes made real, hard-delete rename, July 31, 2026)
 
@@ -15,11 +18,19 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - July 31, 2026
 
-- **Live version: v4.57**, tagged. Tracker file line count/size grew with the
-  delete-hardening batch. `node --check` on the embedded JS: PASS. Netlify prod
-  (pardfitnesstracker2) deploys on push to main. Shipped as a branch + draft
-  PR rather than direct-to-main, per this session's background-job convention
-  - not yet on production until merged.
+- **Live version on production is v4.56.** v4.57 is built, committed as
+  `393feb6` on branch `worktree-delete-hardening-v457`, a clean fast-forward on
+  top of v4.56, and pushed. It is **not merged and not deployed**. Netlify prod
+  (pardfitnesstracker2) deploys on push to `main`, and `main` is still at
+  `69ee8ec`. `node --check` on the embedded JS: PASS, verified independently of
+  the pre-push hook, because v4.57 was built in an isolated worktree and
+  `BACKLOG.md` documents that the Claude-side hook resolves through
+  `CLAUDE_PROJECT_DIR` and checks the wrong branch in that case.
+- **The `v4.57` tag was created off-main and has been withdrawn.** It briefly
+  existed locally and on origin pointing at `393feb6`, which meant
+  `git tag | tail -3` reported v4.57 while `main` sat at v4.56. Two of the three
+  signals in the version-confirmation ritual were lying. Re-tag only after the
+  merge lands on `main`.
 - **v4.57 closed the delete-hardening gaps a Phase 1 diagnostic found across
   the app.** Every delete handler now gates at the handler, not only the
   render (a hidden button with an ungated handler was the dangerous case -
@@ -155,7 +166,7 @@ Newest version at the top; append new sections above the older ones.
 - **Two clients sit 3 days from the dormant threshold.** Michael Hilliard and
   Jayasaree Kumar both resolve to 2026-04-03, which is daysSince 117 against a
   >120 cutoff. They tip on August 1 with no code change at all.
-- **All five device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, including
+- **All device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, 6 before v4.57 and 11 after, including
   P1 (does live sync between two iPads still work after the v4.46 RLS flip). That
   has now been open for 15 days. Code review cannot close any of them.
 - **Rotate the anon key** pasted into chat on July 10. Hygiene, not urgency, now
@@ -172,6 +183,132 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.57 - July 31, 2026
+
+Delete stops being three inconsistent things. Every handler gates at the handler,
+attendance and session deletes become undoable instead of confirm-gated, and four
+buttons that never issued a database call start issuing one.
+
+### Trigger
+
+Reagan asked whether deleting should be harder, and separately suspected trainers
+could delete things they should not. A read of the live RLS posture plus every
+delete call site found the first half of that unfounded and the second half worse
+than described.
+
+### Goal
+
+A delete either cannot happen, can be undone, or is unmistakably deliberate. It
+never reports success when the write did not land.
+
+### File version
+
+v4.57 - 32,601 lines, 1.5 MB (`RoundRock_Fitness_Tracker.html`)
+
+### What the diagnostic found
+
+Verified against live on 2026-07-31, not inferred: every DELETE policy on all 14
+policied tables is `app_is_admin()`, reading the `role_tier` claim off the JWT.
+Five more tables carry RLS with zero policies. **No trainer can hard-delete any
+row.** The original worry, as stated, was unfounded at the database layer.
+
+The damage was not DELETE-shaped. `sessions`, `attendance`, `cancellations`,
+`subAssignments` and `packages` live as JSONB arrays on `clients` and `classes`,
+so removing one is a whole-row UPDATE and both tables carry `upd_signed_in`.
+Auditing delete policies gave false comfort for exactly that reason.
+
+Three specific findings:
+
+- **The attendance hole was the wide version.** The delete control was rendered
+  unconditionally with no handler check, and `ClassDetail` turned out to be
+  reachable for any class by any trainer through TrainerGX "Full schedule"
+  browse mode, whose card `onClick` calls `setDetailId(c.id)` with no ownership
+  check. This closes the open question from the July 29 beta verification pass,
+  which could only call it a proximity pointer.
+- **Only two real `.delete()` calls existed in 32,330 lines.** Five handlers
+  filtered React state and issued nothing, riding one generic upsert-only entity
+  factory with no delete path. Same shape as v4.53.
+- **The attendance audit entry could not reconstruct the row it recorded.** It
+  dropped `time` (payroll-relevant) and `logged_at`, and collapsed `instructor`
+  with `actualInstructor`, losing the distinction on a sub-covered class.
+
+### What shipped
+
+- **Fix A.** Shared `guardDelete()` plus `DELETE_DENY_MSG`, called as the first
+  statement of all 13 live delete handlers. Render gates untouched; this is a
+  second layer, on the premise that a hidden button with an ungated handler
+  counts as ungated. `deleteQueueEntry` was already correct and left alone.
+- **Fix B.** `toast(msg, kind, opts)` gained an optional action button, additive
+  and backward compatible across all 222 existing call sites. Attendance and
+  session deletes drop `window.confirm` for an 8-second Undo toast that
+  reinserts at the original array position through the same audited path.
+  Attendance audit payload widened. `deleteSubAssignment` gained an audit entry.
+- **Fix C.** `deleteWRO`, `deleteReferral`, `deleteItem` and `removeTrainer`
+  issue a real DELETE with a row-count check. `removeTrainer` refuses outright,
+  rather than warning, when the trainer has assigned clients or classes.
+  `persistBannerDelete` got the row-count check it was missing.
+- **Fix D.** `confirmTypedDelete()` extracted from two byte-identical
+  `doHardDelete` copies and applied to all six irreversible sites.
+- **Fix E.** `deleteClient` / `deleteClass` renamed to `hardDeleteClient` /
+  `hardDeleteClass`. The old names read backwards from what they did, since
+  `softDelete*` is what the visible Delete button calls.
+
+### Decisions of record
+
+- **D1.** `deleteSession` normalized up, not down. Three call sites had three
+  behaviors. One rule now: a `scheduled` session is deletable by anyone who can
+  see it, anything else needs `canDeleteSession`. Normalizing down would have
+  pulled a working affordance at the highest-traffic surface during beta week.
+  The trainer roster is the only route into `ClientDetail` at trainer tier, so
+  the ownership check was verified redundant and skipped.
+- **D2.** WRO and referral delete are admin-only now, which restricts lead.
+  Accepted because the button already did not work for Carlos: RLS refused a
+  lead-tier delete silently. This stops the lie rather than removing a
+  capability. Letting lead genuinely delete them is an RLS policy change and a
+  separate decision. WRO records carry a signed liability waiver.
+- **D3.** `deleteCancellation`, `removeSubAssignment` and `deleteContact` are
+  dead code with zero UI callers. Left unguarded and not removed. Guarding
+  unreachable code would imply it is live and mislead the next reader. Logged
+  in `BACKLOG.md` for a dedicated cleanup version.
+- **D4.** `removeTrainer` keeps a handler guard despite a real render gate, on
+  the same premise as Fix A.
+
+### Design position
+
+Ceremony tracks reversibility, not the word "delete." A password or second PIN
+prompt was considered and rejected: the 24-hour TTL re-prompt is already a
+confusion source, and a PIN does not stop a mis-tap on a shared iPad. Soft delete
+on the JSONB array items was also rejected, because the cost is sweeping every
+read site (timecards, headcount, metrics, session consumption, package balance,
+CSV export), not storage.
+
+### iPad test checklist for v4.57
+
+- Sign in as a trainer, open any class you do not teach, and look at Session
+  History. **There should be no delete control next to the attendance rows.** If
+  there is one and it works, Fix A did not take.
+- As a lead or admin, delete an attendance record. It should vanish with an
+  "Undo" toast. **Tap Undo. The row should come back where it was.**
+- Delete an attendance record and let the toast expire without tapping Undo.
+  Reload. It should stay gone.
+- As a trainer, delete one of your own not-yet-logged scheduled sessions. It
+  should work. Then try a completed one. It should not be offered.
+- As an admin, delete a throwaway WRO. It should ask you to type the name.
+  **Reload after. If it comes back, Fix C did not take.**
+- Sign in as a lead and confirm the WRO and referral Delete buttons are gone.
+- As an admin, try to remove a team member who has clients assigned. It should
+  refuse and say why, not warn and proceed.
+
+### The lesson
+
+Auditing the DELETE policies was the obvious move and it produced a clean bill of
+health that was wrong. On a schema that keeps child records in JSONB arrays on a
+parent row, the destructive operation is an UPDATE, and no amount of reading
+delete policies will surface it. When asking "who can destroy this data," ask
+what shape the write is, not what the button is called.
 
 ---
 

@@ -9,10 +9,11 @@ point-in-time snapshot and may be stale. Check here.
 - Site: https://pardfitnesstracker2.netlify.app
 - Owner of this list: Reagan
 - Runs the checks: Selisa
-- Last updated: 2026-07-29 (v4.50). All five checks below are still OPEN and
-  have been for 15 days. v4.49 and v4.50 added nothing to this list: v4.49's
-  lifecycle pills are read-only UI, and v4.50 is behavior-neutral by
-  construction.
+- Last updated: 2026-07-31 (v4.57). **11 checks, all OPEN.** Checks 1 to 6 have
+  been open since v4.46 to v4.55. Checks 7 to 11 are new with v4.57 and cover
+  deleting things. Run them as one sweep rather than in two visits.
+- **Checks 7 to 11 need v4.57 to be live first.** As of 2026-07-31 production is
+  still on v4.56. Reagan will confirm when it merges.
 
 ## How to use this
 
@@ -167,6 +168,141 @@ version afterward.
 for, so it's important - tell Reagan exactly what you saw (did it reload at
 all? did the version text change?).
 
+---
+
+## v4.57 checks - deleting things (Checks 7 to 11)
+
+**Do not start these until Reagan confirms v4.57 is merged and live.** The login
+screen version text (Check 6) is how you tell: it has to read **v4.57**. If it
+still reads v4.56, stop, these five will not mean anything yet.
+
+What changed, in one paragraph: deleting things in the app was inconsistent.
+Some Delete buttons worked, some quietly did nothing and the record came back
+later, and a few were available to people who should not have had them. All of
+that was reworked. These checks confirm the reworked version behaves on a real
+device.
+
+---
+
+## Check 7 - A trainer cannot delete attendance (v4.57)
+
+**Status: OPEN. This is the most important one in this batch.**
+
+Before v4.57, any trainer could open any class, including ones they do not
+teach, and delete attendance records off it. Nothing stopped them and nothing
+recorded it properly.
+
+1. Sign in as a **trainer**, not as Carlos and not as Reagan. Victor Leak works.
+2. Go to the schedule and open a class **that trainer does not teach**.
+3. Scroll to **Session History**.
+
+**PASS:** There is no delete control next to the attendance rows.
+
+**FAIL:** There is a delete control, and tapping it removes the row.
+
+### If it fails
+
+Send Reagan this exact sentence, with the trainer name and class name:
+
+> "Check 7 FAILED - <trainer> could still delete attendance on <class>."
+
+This is a roll-back-worthy failure. It is the specific hole v4.57 was built to
+close.
+
+---
+
+## Check 8 - Undo actually puts it back (v4.57)
+
+**Status: OPEN**
+
+Attendance and session deletes no longer ask "are you sure." Instead they delete
+right away and give you eight seconds to tap **Undo**. That is intentional: it is
+fewer taps normally and it is recoverable when someone fat-fingers it.
+
+1. Sign in as **Carlos or Reagan**.
+2. Open a class with at least two attendance records.
+3. Delete one. A small message should appear at the bottom with an **Undo**
+   button on it.
+4. **Tap Undo before it disappears.**
+
+**PASS:** The row comes back, in the same place in the list it was before.
+
+**FAIL:** Nothing comes back, or it comes back in the wrong place, or there is no
+Undo button at all.
+
+Then do the other half:
+
+5. Delete a different attendance record and **do not** tap Undo. Let the message
+   disappear on its own.
+6. Reload the app.
+
+**PASS:** It is still gone.
+
+**FAIL:** It came back. That means the delete never reached the database, which
+is the exact bug this version was fixing.
+
+---
+
+## Check 9 - Deleting a WRO actually deletes it (v4.57)
+
+**Status: OPEN**
+
+Four Delete buttons in the app used to remove the record from the screen without
+removing it from the database. It looked like it worked and the record came back
+the next time the app loaded.
+
+1. Sign in as an **admin** (Reagan or Tyra).
+2. Open a **throwaway** WRO record. Do not use a real member's.
+3. Tap **Delete**.
+
+**PASS:** It asks you to type the person's name before it will delete.
+
+4. Type it and confirm.
+5. **Reload the app fully.**
+
+**PASS:** It is still gone.
+
+**FAIL:** It reappears after the reload.
+
+---
+
+## Check 10 - Lead no longer sees WRO and referral Delete (v4.57)
+
+**Status: OPEN**
+
+Carlos could see these buttons before, but they never actually worked for him,
+so what he got was a delete that looked successful and undid itself. The buttons
+are now hidden rather than lying.
+
+1. Sign in as **Carlos** (lead).
+2. Open a WRO record. Then open a referral record.
+
+**PASS:** There is no Delete button on either.
+
+**FAIL:** The button is still there. Note which one and tell Reagan.
+
+This one is worth mentioning to Carlos directly so it does not look like
+something broke.
+
+---
+
+## Check 11 - Removing a team member with clients is refused (v4.57)
+
+**Status: OPEN**
+
+1. Sign in as an **admin**.
+2. Go to the team member list and try to remove someone who currently has
+   clients or classes assigned. **Marcellus is a good example. Do not actually
+   remove anyone real.**
+
+**PASS:** It refuses outright and tells you why. It should not offer you a way
+to proceed anyway.
+
+**FAIL:** It warns you but lets you continue. Before v4.57 it did exactly that,
+which is how you end up with clients pointing at a team member who no longer
+exists.
+
+Cancel out either way. Do not remove a real team member for this check.
 ---
 
 ## Completed
