@@ -2131,7 +2131,7 @@
      and the pre-push hook's version-match guard. Must equal the trailing
      version comment at the bottom of this script - the hook fails the
      push if they disagree. */
-  var APP_VERSION = 'v4.55';
+  var APP_VERSION = 'v4.56';
   if (typeof window !== 'undefined') { window.APP_VERSION = APP_VERSION; }
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
@@ -2213,6 +2213,11 @@
     } catch(_){ return null; }
   }
   function isKioskSession(){ return appRoleTier() === 'kiosk'; }
+  /* v4.56: session-role test for the member-facing kiosk flows. Distinct
+     from isKioskSession(), which reads the TOKEN's role tier. Both youth
+     certification and adult WRO run on the same kiosk token, so any check
+     that means "a member is standing at the iPad" has to cover both roles. */
+  function isKioskRole(role){ return role === 'kiosk_wro' || role === 'kiosk_youth'; }
   function isStaff(){ return !!_appToken && !isKioskSession(); }
 
   /* 60s skew buffer so we never hand PostgREST a token that dies mid-flight. */
@@ -3890,6 +3895,27 @@
     "Quick form. We'll use it to tailor your free orientation. Most people finish in under 5 minutes.";
   var WRO_SIGN_TEXT = "By signing, I confirm the info above is accurate. The full informed consent and liability waiver will be reviewed and signed at my orientation.";
 
+  /* v4.56: fields and vocabulary carried over from the live Microsoft Forms
+     versions of the two member-facing questionnaires (CMRC Weight Room
+     Orientation Questionnaire and CMRC Youth Weight Room Certification
+     Questionnaire, July 2026). The iPad forms are a SUPERSET of the online
+     forms - every question the online form asks is asked here, and the
+     richer goals / experience / health-flag / follow-up steps that feed the
+     specialist prep and the conversion metrics stay on top of them. Keep
+     these option lists byte-identical to the MS Forms choices so responses
+     from both channels bucket together in the CSV export. */
+  var WRO_PREFERRED_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  var WRO_AREAS_OF_INTEREST = ['Circuit Weights', 'Cardio Equipment', 'Free Weights', 'The Yard', 'Other'];
+  var YOUTH_GENDER_OPTIONS = ['Man', 'Woman', 'Prefer not to say'];
+  var YOUTH_CERT_INTRO_TEXT = "CLAY MADSEN RECREATION CENTER · Youth Weight Room Certification\n\n" +
+    "Youth members get certified before using the weight room on their own. A parent or guardian fills this out with them. Takes about 3 minutes.";
+  var YOUTH_CERT_SIGN_TEXT = "By signing, I confirm I am the parent or legal guardian of the youth named above and that the info here is accurate. The full informed consent and liability waiver will be reviewed and signed in person at the certification.";
+  /* Youth certifications ride the wros table (data jsonb, no migration) and
+     are told apart by this discriminator. Anything absent formType is an
+     adult WRO - every row written before v4.56. */
+  var WRO_FORM_TYPE_YOUTH = 'youth_cert';
+  function isYouthCert(w){ return !!w && w.formType === WRO_FORM_TYPE_YOUTH; }
+
   /* Seed client data: [name, location, type, sessions, date, price] */
   var SEED_CLIENT_ROWS = [
     // Alejandra Vargas Guzman
@@ -4339,9 +4365,10 @@
      clients.intake_paperwork (passthrough column like par_q - no translator
      entry). v4.40 shipped an assumed intake-v1 shape drafted before the live
      form existed; v4.43 replaces it with intake-v2, locked field-by-field
-     against the Microsoft Forms response export (July 10, 2026). No
-     production rows ever carried intake-v1, so there is no back-compat
-     guard. No in-app editor: data lands via the Forms ingestion build
+     against the Microsoft Forms response export (July 10, 2026), and
+     re-verified against the July 2026 packet PDF in v4.56 with no field
+     changes needed. No production rows ever carried intake-v1, so there is
+     no back-compat guard. No in-app editor: data lands via the Forms ingestion build
      (BACKLOG) or SQL until then.
      Field types: 'flag' is a screening yes/no where YES is the clinical
      finding (amber pill, counts toward the header flag chip); 'bool' is a
@@ -4387,13 +4414,21 @@
       { key: 'details', label: 'Details on yes answers' },
       { key: 'medications', label: 'Medications / vitamins / supplements' }
     ]},
+    /* v4.56: re-verified field-for-field against the July 2026 PDF of the
+       Fitness Pre-Assessment Packet. All 38 questions still map onto intake-v2
+       with no additions, removals or type changes, so the shape and the Power
+       Automate template are unchanged. The ONLY drift was render order here:
+       the live form asks obstacles (Q25) before why_now (Q26) and past_attempts
+       (Q27). Reordered so a trainer reading the packet on screen follows the
+       same thread the member followed while answering it. Keys untouched -
+       this is display order only and no stored data is affected. */
     { key: 'exercise_history', label: 'Exercise History', fields: [
       { key: 'current_routine', label: 'Current routine' },
       { key: 'trainer_experience', label: 'Past trainer experience' },
       { key: 'likes_dislikes', label: 'Enjoys / dislikes' },
-      { key: 'why_now', label: 'Why now' },
-      { key: 'past_attempts', label: 'What pulled them off track before' },
-      { key: 'obstacles', label: 'Obstacles to consistency' }
+      { key: 'obstacles', label: 'Obstacles to consistency' },
+      { key: 'why_now', label: 'Why now (and not six months ago)' },
+      { key: 'past_attempts', label: 'What pulled them off track before' }
     ]},
     { key: 'goals', label: 'Goals', fields: [
       { key: 'short_term', label: 'Short term (under 3 months)' },
@@ -6662,7 +6697,12 @@
         clientName: w.participantName,
         date: dt,
         hours: dur,
-        kind: 'orientation'
+        kind: 'orientation',
+        /* v4.56: youth certifications are wros rows too, and a completed one
+           is real trainer time that credits the same way. Carry the type so
+           the time card can name it correctly instead of calling every one a
+           weight room orientation. */
+        formType: w.formType
       });
       orientationHours += dur;
     });
@@ -7889,7 +7929,12 @@
        Real user:  { trainer_id, trainer_name, role, role_tier, name, signed_in_at }
        Front Desk: { trainer_id:null, trainer_name:'Front Desk', role:'admin',
                      role_tier:'admin', name:'Front Desk', signed_in_at }
-       Kiosk:      { role:'kiosk_wro' }
+       Kiosk:      { role:'kiosk_wro' } or { role:'kiosk_youth' } (v4.56).
+                   Both mint the SAME 30-minute INSERT-only token via
+                   sign_in_kiosk; the role only picks which member-facing
+                   form renders. Test with isKioskRole(), never by
+                   comparing to 'kiosk_wro' - that was the bug shape when
+                   the youth tile was added.
        `name` is a mirror of trainer_name kept for backward compat with
        call sites that still read ctx.session.name. Hydrated synchronously
        from localStorage so a reload doesn't kick the user back to login. */
@@ -7967,7 +8012,7 @@
 
     useEffect(function(){
       if (!session) return;
-      if (session.role === 'kiosk_wro') return;
+      if (isKioskRole(session.role)) return;
       lastActivityRef.current = Date.now();
       function bump(){ lastActivityRef.current = Date.now(); }
       document.addEventListener('mousemove', bump);
@@ -9983,7 +10028,7 @@
     function ctxCan(action){ return hasPermission(session, action); }
     function ctxCurrentUserName(){
       if (!session) return null;
-      if (session.role === 'kiosk_wro') return null;
+      if (isKioskRole(session.role)) return null;
       return session.trainer_name || session.name || null;
     }
 
@@ -10606,6 +10651,8 @@
       view = e(Login, { ctx: ctx });
     } else if (session.role === 'kiosk_wro') {
       view = e(KioskWROView, { ctx: ctx });
+    } else if (session.role === 'kiosk_youth') {
+      view = e(KioskYouthCertView, { ctx: ctx });
     } else if (session.role === 'admin') {
       view = e(AdminDashboard, { ctx: ctx });
     } else if (session.role === 'lead') {
@@ -11217,6 +11264,13 @@
             style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
             onClick: function(){ startKioskFlow(function(){ ctx.setSession({ role: 'kiosk_wro' }); }); }
           }, '🏋  Weight Room Orientation Sign-Up'),
+          /* v4.56: youth certification. Same kiosk token as the WRO tile
+             (sign_in_kiosk), different session role, different form. */
+          e('button', {
+            className: 'btn btn-gold',
+            style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
+            onClick: function(){ startKioskFlow(function(){ ctx.setSession({ role: 'kiosk_youth' }); }); }
+          }, '🧒  Youth Weight Room Certification'),
           e('button', {
             className: 'btn btn-gold',
             style: { padding: '18px', fontSize: '15px', fontWeight: 700, width: '100%' },
@@ -11542,6 +11596,62 @@
         ctx: ctx,
         kioskMode: true,
         onClose: function(){ ctx.setSession(null); }, /* "Cancel" returns to login */
+        onSave: function(w){
+          ctx.upsertWRO(w);
+          setDone(true);
+        }
+      })
+    );
+  }
+
+  /* ============ KIOSK MODE: PUBLIC YOUTH CERTIFICATION INTAKE ============
+     v4.56. Same shape as KioskWROView: a guardian walks up to the iPad,
+     fills out the certification request, signs, submits, and the screen
+     returns itself to the login tiles. No access to anything else. */
+  function KioskYouthCertView(props){
+    var ctx = props.ctx;
+    var doneTuple = useState(false);
+    var done = doneTuple[0];
+    var setDone = doneTuple[1];
+
+    useEffect(function(){
+      if (!done) return;
+      var t = setTimeout(function(){ ctx.setSession(null); }, 8000);
+      return function(){ clearTimeout(t); };
+    }, [done]);
+
+    if (done) {
+      return e('div', { className: 'login-wrap', style: { textAlign: 'center', paddingTop: '80px' } },
+        e('div', { style: { fontSize: '64px', marginBottom: '20px' } }, '\u2713'),
+        e('div', { className: 'brand' }, 'Thanks!'),
+        e('div', { style: { fontSize: '18px', color: 'var(--slate)', marginTop: '12px', lineHeight: '1.5' } },
+          'The certification request is in.',
+          e('br'),
+          'Our team will reach out to schedule.'
+        ),
+        e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '40px' } },
+          'Returning to home screen\u2026'
+        ),
+        e('button', {
+          className: 'btn btn-ghost',
+          style: { marginTop: '20px' },
+          onClick: function(){ ctx.setSession(null); }
+        }, 'Return now')
+      );
+    }
+
+    return e('div', { className: 'login-wrap', style: { maxWidth: '720px' } },
+      e('div', { className: 'login-head' },
+        e('div', { className: 'brand' }, 'Youth Weight Room Certification'),
+        e('div', { className: 'tag' }, 'Clay Madsen Recreation Center \u00b7 Round Rock'),
+        e('h2', { style: { fontSize: '16px', marginTop: '8px', color: 'var(--slate)' } },
+          'A parent or guardian fills this out with the youth member.'
+        )
+      ),
+      e(NewYouthCertModal, {
+        ctx: ctx,
+        kioskMode: true,
+        onClose: function(){ ctx.setSession(null); },
         onSave: function(w){
           ctx.upsertWRO(w);
           setDone(true);
@@ -21354,11 +21464,12 @@
         '\ud83c\udfcb\ufe0f Personal Training',
         ptRolling.map(function(s){
           var isOrient = s.kind === 'orientation';
+          var orientLabel = (s.formType === WRO_FORM_TYPE_YOUTH) ? 'Youth Certification' : 'Weight Room Orientation';
           return {
-            title: s.clientName + (isOrient ? '  \u00b7  Weight Room Orientation' : ''),
+            title: s.clientName + (isOrient ? ('  \u00b7  ' + orientLabel) : ''),
             subtitle: formatShort(parseYMD(s.date)) +
               (isOrient
-                ? ' \u00b7 ' + s.hours.toFixed(2) + ' hr orientation'
+                ? ' \u00b7 ' + s.hours.toFixed(2) + ' hr ' + (s.formType === WRO_FORM_TYPE_YOUTH ? 'certification' : 'orientation')
                 : (s.hours === 0.5 ? ' \u00b7 30 min' : ' \u00b7 1 hour')),
             hours: s.hours,
             running: s.running
@@ -28286,6 +28397,60 @@
   }
 
   /* ============ WEIGHT ROOM ORIENTATION (WRO) ============ */
+
+  /* Shared big-tap-target check row for the member-facing kiosk forms. Was a
+     local closure inside NewWROModal until v4.56 needed the identical control
+     in the youth certification form; hoisted rather than copied so the two
+     member-facing forms cannot drift apart visually. Rendering is unchanged.
+     NOTE: PostWROModal's `checkRow` is a DIFFERENT, denser control (18px box,
+     center-aligned) for the specialist-facing form. Left alone on purpose. */
+  function intakeCheckboxRow(checked, onChange, label){
+    return e('div', {
+      onClick: onChange,
+      style: {
+        display: 'flex', alignItems: 'flex-start', gap: '10px',
+        padding: '10px 12px', marginBottom: '6px',
+        background: checked ? 'var(--cream-2)' : '#fff',
+        border: '1.5px solid ' + (checked ? 'var(--gold)' : 'var(--border)'),
+        borderRadius: '10px', cursor: 'pointer', fontSize: '14px'
+      }
+    },
+      e('div', {
+        style: {
+          width: '20px', height: '20px', borderRadius: '4px', flexShrink: 0,
+          border: '2px solid ' + (checked ? 'var(--gold)' : 'var(--slate-soft)'),
+          background: checked ? 'var(--gold)' : '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: '#fff', fontSize: '14px', fontWeight: 700, marginTop: '1px'
+        }
+      }, checked ? '✓' : ''),
+      e('div', { style: { flex: 1, color: 'var(--navy)' } }, label)
+    );
+  }
+
+  /* Shared single-select day picker. Both member-facing forms ask the same
+     preferred-day question off WRO_PREFERRED_DAYS; tapping the active day
+     clears it. */
+  function preferredDayPicker(value, onPick){
+    return e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '4px' } },
+      WRO_PREFERRED_DAYS.map(function(d){
+        var picked = value === d;
+        return e('button', {
+          key: d,
+          type: 'button',
+          onClick: function(){ onPick(picked ? '' : d); },
+          style: {
+            padding: '12px 16px', borderRadius: '10px', cursor: 'pointer',
+            fontSize: '14px', fontWeight: 600,
+            border: '1.5px solid ' + (picked ? 'var(--gold)' : 'var(--border)'),
+            background: picked ? 'var(--gold)' : '#fff',
+            color: picked ? '#fff' : 'var(--navy)'
+          }
+        }, d);
+      })
+    );
+  }
+
   function NewWROModal(props){
     /* PRE-orientation intake. Member fills out before the orientation.
        The full informed-consent / liability waiver is signed in person AT
@@ -28305,6 +28470,7 @@
         dob: '',
         phone: '',
         email: '',
+        emergencyContact: '',
         bestContactMethod: 'Phone',
         bestContactTime: '',
         // Section 2: What brings you in
@@ -28317,7 +28483,12 @@
         // Section 4: Anything we should know
         healthFlags: '',
         prefersInPersonHealthDiscussion: false,
-        // Section 5: Follow-up interests
+        // Section 5: Scheduling (v4.56 - matches the MS Forms questionnaire)
+        preferredDay: '',
+        preferredTimes: '',
+        areasOfInterest: [],
+        areasOfInterestOther: '',
+        // Section 6: Follow-up interests
         followupInterests: [],
         trainerPreference: '',
         scheduleAvailability: '',
@@ -28346,12 +28517,22 @@
     function step1Errors(){
       return intakeFieldErrors({ name: form.participantName, phone: form.phone, email: form.email });
     }
-    function step1Valid(){ return !hasErrors(step1Errors()); }
+    /* v4.56: emergency contact is required on the MS Forms questionnaire, so
+       it is required here too. Existing drafts predate the field and are
+       grandfathered by the `existing` branch of the state initializer, which
+       leaves it undefined - guard with a String() coerce, not .trim(). */
+    function step1Valid(){
+      return !hasErrors(step1Errors()) && String(form.emergencyContact || '').trim().length > 0;
+    }
     var step1Errs = step1Errors();
     function step2Valid(){ return form.goals.length > 0 || form.goalsOther.trim().length > 0; }
     /* Steps 3 and 4 are optional content - anything goes including nothing. */
-    function step5Valid(){ return form.followupInterests.length > 0; }
-    function step6Valid(){ return !!sig; }
+    function step5Valid(){
+      return String(form.preferredDay || '').length > 0 &&
+             String(form.preferredTimes || '').trim().length > 0;
+    }
+    function step6Valid(){ return form.followupInterests.length > 0; }
+    function step7Valid(){ return !!sig; }
 
     function finish(){
       var w = {
@@ -28361,6 +28542,7 @@
         dob: form.dob,
         phone: form.phone,
         email: form.email,
+        emergencyContact: form.emergencyContact,
         bestContactMethod: form.bestContactMethod,
         bestContactTime: form.bestContactTime,
         goals: form.goals,
@@ -28370,6 +28552,15 @@
         equipmentSpecific: form.equipmentSpecific,
         healthFlags: form.healthFlags,
         prefersInPersonHealthDiscussion: form.prefersInPersonHealthDiscussion,
+        preferredDay: form.preferredDay,
+        preferredTimes: form.preferredTimes,
+        areasOfInterest: form.areasOfInterest,
+        areasOfInterestOther: form.areasOfInterestOther,
+        /* v4.56: the MS Form asks a flat "interested in a personal trainer?"
+           yes/no. The iPad form asks the richer follow-up-interests question
+           instead of asking the same thing twice, so derive the flat answer
+           here. Both channels land the same key and the CSV column lines up. */
+        interestedInPT: form.followupInterests.indexOf('pt_package') !== -1 ? 'Yes' : 'No',
         followupInterests: form.followupInterests,
         trainerPreference: form.trainerPreference,
         scheduleAvailability: form.scheduleAvailability,
@@ -28386,31 +28577,9 @@
       props.onSave(w);
     }
 
-    function checkboxRow(checked, onChange, label){
-      return e('div', {
-        onClick: onChange,
-        style: {
-          display: 'flex', alignItems: 'flex-start', gap: '10px',
-          padding: '10px 12px', marginBottom: '6px',
-          background: checked ? 'var(--cream-2)' : '#fff',
-          border: '1.5px solid ' + (checked ? 'var(--gold)' : 'var(--border)'),
-          borderRadius: '10px', cursor: 'pointer', fontSize: '14px'
-        }
-      },
-        e('div', {
-          style: {
-            width: '20px', height: '20px', borderRadius: '4px', flexShrink: 0,
-            border: '2px solid ' + (checked ? 'var(--gold)' : 'var(--slate-soft)'),
-            background: checked ? 'var(--gold)' : '#fff',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: '#fff', fontSize: '14px', fontWeight: 700, marginTop: '1px'
-          }
-        }, checked ? '✓' : ''),
-        e('div', { style: { flex: 1, color: 'var(--navy)' } }, label)
-      );
-    }
+    var checkboxRow = intakeCheckboxRow;
 
-    var body, footer, headerLabel = 'Step ' + step + ' of 6';
+    var body, footer, headerLabel = 'Step ' + step + ' of 7';
     if (step === 1) {
       body = e('div', null,
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px', whiteSpace: 'pre-wrap' } },
@@ -28450,6 +28619,14 @@
             style: step1Errs.email ? { borderColor: 'var(--red)' } : null
           }),
           step1Errs.email && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.email)
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Emergency Contact Name and Phone *'),
+          e('input', {
+            value: form.emergencyContact || '',
+            onChange: function(ev){ update('emergencyContact', ev.target.value); },
+            placeholder: 'Jane Doe, (512) 555-1234'
+          })
         ),
         e('div', { className: 'row2' },
           e('div', { className: 'field' },
@@ -28547,8 +28724,47 @@
         e('button', { className: 'btn btn-primary', onClick: function(){ setStep(5); } }, 'Continue →')
       );
     } else if (step === 5) {
+      /* v4.56: the scheduling questions the MS Forms questionnaire asks.
+         Preferred day and preferred times are required there, so they are
+         required here. */
       body = e('div', null,
-        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '5 · Want to hear about more than the tour?'),
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '5 · When works for you?'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px' } },
+          'We use this to line up your orientation with a fitness specialist.'
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Preferred Training Day *'),
+          preferredDayPicker(form.preferredDay, function(d){ update('preferredDay', d); })
+        ),
+        e('div', { className: 'field', style: { marginTop: '14px' } },
+          e('label', null, 'Preferred Training Times *'),
+          e('input', {
+            value: form.preferredTimes || '',
+            onChange: function(ev){ update('preferredTimes', ev.target.value); },
+            placeholder: 'E.g. before 9 am, or after 5:30 pm'
+          })
+        ),
+        e('h3', { style: { fontSize: '16px', marginTop: '20px', marginBottom: '8px' } }, 'Areas of Interest'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '10px' } }, 'Check all that apply.'),
+        WRO_AREAS_OF_INTEREST.map(function(a){
+          return e('div', { key: a }, checkboxRow((form.areasOfInterest || []).indexOf(a) !== -1, function(){ toggleArray('areasOfInterest', a); }, a));
+        }),
+        (form.areasOfInterest || []).indexOf('Other') !== -1 && e('div', { className: 'field', style: { marginTop: '8px' } },
+          e('label', null, 'Other (specify)'),
+          e('input', {
+            value: form.areasOfInterestOther || '',
+            onChange: function(ev){ update('areasOfInterestOther', ev.target.value); },
+            placeholder: 'What else are you interested in?'
+          })
+        )
+      );
+      footer = e('div', { className: 'modal-footer' },
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(4); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step5Valid(), onClick: function(){ setStep(6); } }, 'Continue →')
+      );
+    } else if (step === 6) {
+      body = e('div', null,
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '6 · Want to hear about more than the tour?'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px' } },
           "No pressure. Check anything you'd like your fitness specialist to bring up."
         ),
@@ -28565,18 +28781,18 @@
             )
           ),
           e('div', { className: 'field' },
-            e('label', null, 'Day / time that usually works'),
-            e('input', { value: form.scheduleAvailability, onChange: function(ev){ update('scheduleAvailability', ev.target.value); }, placeholder: 'E.g. weekday mornings' })
+            e('label', null, 'Anything else about your availability'),
+            e('input', { value: form.scheduleAvailability, onChange: function(ev){ update('scheduleAvailability', ev.target.value); }, placeholder: 'Optional. E.g. out of town until the 12th' })
           )
         )
       );
       footer = e('div', { className: 'modal-footer' },
-        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(4); } }, '← Back'),
-        e('button', { className: 'btn btn-primary', disabled: !step5Valid(), onClick: function(){ setStep(6); } }, 'Continue →')
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(5); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step6Valid(), onClick: function(){ setStep(7); } }, 'Continue →')
       );
     } else {
       body = e('div', null,
-        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '6 · Sign'),
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '7 · Sign'),
         e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px', lineHeight: '1.5' } },
           WRO_SIGN_TEXT
         ),
@@ -28586,8 +28802,8 @@
         )
       );
       footer = e('div', { className: 'modal-footer' },
-        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(5); } }, '← Back'),
-        e('button', { className: 'btn btn-primary', disabled: !step6Valid(), onClick: finish }, 'Submit Request')
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(6); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step7Valid(), onClick: finish }, 'Submit Request')
       );
     }
 
@@ -28632,6 +28848,326 @@
       e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
         e('div', { className: 'modal-header' },
           e('h2', null, 'Weight Room Orientation · ' + headerLabel),
+          e('button', { className: 'modal-close', onClick: props.onClose }, '×')
+        ),
+        e('div', { className: 'modal-body' }, body),
+        footer
+      )
+    );
+  }
+
+  /* ============ YOUTH WEIGHT ROOM CERTIFICATION ============
+     v4.56. Mirrors the CMRC Youth Weight Room Certification Questionnaire
+     (Microsoft Forms, July 2026). Youth members get certified before using
+     the weight room unsupervised; a parent or guardian completes this with
+     them.
+
+     Storage: rides the `wros` table, tagged formType = 'youth_cert' inside
+     the `data` jsonb. No migration, no new RLS policy, and the kiosk token's
+     existing INSERT grant on `wros` (migration 0006) already covers it. The
+     specialist post-form, claim/release lifecycle, hour credit and convert-
+     to-client flow all come along for free because a youth cert IS a wros
+     row - the only differences are which questions were asked and who signed.
+
+     Adult WRO fields deliberately NOT asked here: goals, experience level,
+     tour interests, health flags, follow-up interests. The online youth form
+     does not ask them, and a guardian filling out a kiosk form for a 13-year
+     old is the wrong moment for a health-history interview. Those get covered
+     in person at the certification and land through the specialist form. */
+  function NewYouthCertModal(props){
+    var ctx = props.ctx;
+    useBodyScrollLock();
+    var existing = props.existing;
+    var stepTuple = useState(1);
+    var step = stepTuple[0];
+    var setStep = stepTuple[1];
+
+    var formTuple = useState(function(){
+      if (existing) return existing;
+      return {
+        /* Step 1: the youth */
+        participantName: '',
+        dob: '',
+        gender: '',
+        phone: '',
+        /* Step 2: the guardian */
+        guardianName: '',
+        guardianDob: '',
+        emergencyContact: '',
+        /* Step 3: scheduling and interests */
+        preferredDay: '',
+        preferredTimes: '',
+        interestedInPT: '',
+        areasOfInterest: [],
+        areasOfInterestOther: '',
+        /* Logistical */
+        date: todayStr(),
+        location: 'CMRC',
+        signature: null
+      };
+    });
+    var form = formTuple[0];
+    var setForm = formTuple[1];
+    function update(k, v){ setForm(function(f){ var n = Object.assign({}, f); n[k] = v; return n; }); }
+    function toggleArray(k, v){
+      setForm(function(f){
+        var arr = (f[k] || []).slice();
+        var i = arr.indexOf(v);
+        if (i === -1) arr.push(v); else arr.splice(i, 1);
+        var n = Object.assign({}, f); n[k] = arr; return n;
+      });
+    }
+
+    var sigTuple = useState(form.signature || null);
+    var sig = sigTuple[0];
+    var setSig = sigTuple[1];
+
+    /* The youth form collects no email, so intakeFieldErrors falls through to
+       requiring phone - which the online form also marks required. */
+    function step1Errors(){
+      return intakeFieldErrors({ name: form.participantName, phone: form.phone });
+    }
+    var step1Errs = step1Errors();
+    function step1Valid(){
+      return !hasErrors(step1Errs) && String(form.dob || '').length > 0;
+    }
+    function step2Valid(){
+      return String(form.guardianName || '').trim().length > 0 &&
+             String(form.guardianDob || '').length > 0 &&
+             String(form.emergencyContact || '').trim().length > 0;
+    }
+    function step3Valid(){
+      return String(form.preferredDay || '').length > 0 &&
+             String(form.preferredTimes || '').trim().length > 0;
+    }
+    function step4Valid(){ return !!sig; }
+
+    function finish(){
+      var w = {
+        id: existing && existing.id ? existing.id : uid(),
+        formType: WRO_FORM_TYPE_YOUTH,
+        participantName: form.participantName.trim(),
+        dob: form.dob,
+        gender: form.gender,
+        phone: form.phone,
+        guardianName: form.guardianName.trim(),
+        guardianDob: form.guardianDob,
+        emergencyContact: form.emergencyContact,
+        preferredDay: form.preferredDay,
+        preferredTimes: form.preferredTimes,
+        interestedInPT: form.interestedInPT,
+        areasOfInterest: form.areasOfInterest,
+        areasOfInterestOther: form.areasOfInterestOther,
+        /* Kept present-but-empty so every consumer that reads an adult WRO
+           shape off a youth row (CSV export, WRODetail, the flags filter)
+           sees a defined value instead of undefined. */
+        email: '',
+        goals: [],
+        tourInterests: [],
+        followupInterests: [],
+        healthFlags: '',
+        prefersInPersonHealthDiscussion: false,
+        date: form.date,
+        location: form.location,
+        signature: sig,
+        signedBy: 'guardian',
+        preCompletedAt: new Date().toISOString(),
+        postCompleted: false,
+        post: null,
+        convertedToClientId: null,
+        createdAt: new Date().toISOString()
+      };
+      props.onSave(w);
+    }
+
+    var body, footer, headerLabel = 'Step ' + step + ' of 4';
+    if (step === 1) {
+      body = e('div', null,
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '14px', whiteSpace: 'pre-wrap' } },
+          YOUTH_CERT_INTRO_TEXT
+        ),
+        e('h3', { style: { fontSize: '18px', marginBottom: '10px' } }, '1 · About the youth member'),
+        e('div', { className: 'field' },
+          e('label', null, 'Name *'),
+          e('input', {
+            value: form.participantName,
+            onChange: function(ev){ update('participantName', ev.target.value); },
+            placeholder: 'First Last',
+            style: step1Errs.name ? { borderColor: 'var(--red)' } : null
+          }),
+          step1Errs.name && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.name)
+        ),
+        e('div', { className: 'row2' },
+          e('div', { className: 'field' },
+            e('label', null, 'Date of Birth *'),
+            e('input', { type: 'date', value: form.dob, onChange: function(ev){ update('dob', ev.target.value); } })
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Phone Number *'),
+            e('input', {
+              value: form.phone, onChange: function(ev){ update('phone', ev.target.value); },
+              type: 'tel', placeholder: '(512) 555-1234',
+              style: step1Errs.phone ? { borderColor: 'var(--red)' } : null
+            }),
+            step1Errs.phone && e('div', { style: { fontSize: '12px', color: 'var(--red)', marginTop: '4px' } }, step1Errs.phone)
+          )
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Gender'),
+          e('select', { value: form.gender, onChange: function(ev){ update('gender', ev.target.value); } },
+            e('option', { value: '' }, 'Select…'),
+            YOUTH_GENDER_OPTIONS.map(function(g){ return e('option', { key: g, value: g }, g); })
+          )
+        ),
+        e('div', { className: 'row2' },
+          e('div', { className: 'field' },
+            e('label', null, 'Date'),
+            e('input', { type: 'date', value: form.date, onChange: function(ev){ update('date', ev.target.value); } })
+          ),
+          e('div', { className: 'field' },
+            e('label', null, 'Location'),
+            e('select', { value: form.location, onChange: function(ev){ update('location', ev.target.value); } },
+              LOCATIONS.map(function(l){ return e('option', { key: l, value: l }, l); })
+            )
+          )
+        )
+      );
+      footer = e('div', { className: 'modal-footer' },
+        e('button', { className: 'btn btn-ghost', onClick: props.onClose }, 'Cancel'),
+        e('button', { className: 'btn btn-primary', disabled: !step1Valid(), onClick: function(){ setStep(2); } }, 'Continue →')
+      );
+    } else if (step === 2) {
+      body = e('div', null,
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '2 · Parent or guardian'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px' } },
+          'A parent or legal guardian has to be on file before a youth member can be certified.'
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Guardian Name *'),
+          e('input', {
+            value: form.guardianName,
+            onChange: function(ev){ update('guardianName', ev.target.value); },
+            placeholder: 'First Last'
+          })
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Guardian Date of Birth *'),
+          e('input', { type: 'date', value: form.guardianDob, onChange: function(ev){ update('guardianDob', ev.target.value); } })
+        ),
+        e('div', { className: 'field' },
+          e('label', null, 'Emergency Contact Name and Phone *'),
+          e('input', {
+            value: form.emergencyContact,
+            onChange: function(ev){ update('emergencyContact', ev.target.value); },
+            placeholder: 'Jane Doe, (512) 555-1234'
+          })
+        )
+      );
+      footer = e('div', { className: 'modal-footer' },
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(1); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step2Valid(), onClick: function(){ setStep(3); } }, 'Continue →')
+      );
+    } else if (step === 3) {
+      body = e('div', null,
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '3 · Scheduling and interests'),
+        e('div', { className: 'field' },
+          e('label', null, 'Preferred Certification Day *'),
+          preferredDayPicker(form.preferredDay, function(d){ update('preferredDay', d); })
+        ),
+        e('div', { className: 'field', style: { marginTop: '14px' } },
+          e('label', null, 'Preferred Certification Times *'),
+          e('input', {
+            value: form.preferredTimes,
+            onChange: function(ev){ update('preferredTimes', ev.target.value); },
+            placeholder: 'E.g. after school, or Saturday mornings'
+          })
+        ),
+        e('div', { className: 'field', style: { marginTop: '14px' } },
+          e('label', null, 'Also interested in working with a personal trainer?'),
+          e('select', { value: form.interestedInPT, onChange: function(ev){ update('interestedInPT', ev.target.value); } },
+            e('option', { value: '' }, 'Select…'),
+            e('option', { value: 'Yes' }, 'Yes'),
+            e('option', { value: 'No' }, 'No')
+          )
+        ),
+        e('h3', { style: { fontSize: '16px', marginTop: '20px', marginBottom: '8px' } }, 'Areas of Interest'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '10px' } }, 'Check all that apply.'),
+        WRO_AREAS_OF_INTEREST.map(function(a){
+          return e('div', { key: a }, intakeCheckboxRow((form.areasOfInterest || []).indexOf(a) !== -1, function(){ toggleArray('areasOfInterest', a); }, a));
+        }),
+        (form.areasOfInterest || []).indexOf('Other') !== -1 && e('div', { className: 'field', style: { marginTop: '8px' } },
+          e('label', null, 'Other (specify)'),
+          e('input', {
+            value: form.areasOfInterestOther,
+            onChange: function(ev){ update('areasOfInterestOther', ev.target.value); },
+            placeholder: 'What else are they interested in?'
+          })
+        )
+      );
+      footer = e('div', { className: 'modal-footer' },
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(2); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step3Valid(), onClick: function(){ setStep(4); } }, 'Continue →')
+      );
+    } else {
+      body = e('div', null,
+        e('h3', { style: { fontSize: '18px', marginBottom: '6px' } }, '4 · Guardian signature'),
+        e('div', { style: { fontSize: '13px', color: 'var(--slate)', marginBottom: '12px', lineHeight: '1.5' } },
+          YOUTH_CERT_SIGN_TEXT
+        ),
+        e(SignaturePad, { label: 'Parent / guardian signature', onChange: setSig, key: 'youth_cert_pre' }),
+        e('div', { style: { fontSize: '12px', color: 'var(--slate-soft)', marginTop: '10px' } },
+          'The full informed consent and liability waiver will be signed in person at the certification.'
+        )
+      );
+      footer = e('div', { className: 'modal-footer' },
+        e('button', { className: 'btn btn-ghost', onClick: function(){ setStep(3); } }, '← Back'),
+        e('button', { className: 'btn btn-primary', disabled: !step4Valid(), onClick: finish }, 'Submit Request')
+      );
+    }
+
+    /* Kiosk mode renders inline as a page, not as an overlay. Same shell as
+       NewWROModal - footer.props.children is unwrapped so the buttons sit in
+       the page's own footer rather than a nested modal-footer. */
+    if (props.kioskMode) {
+      return e('div', {
+        style: {
+          background: '#fff',
+          borderRadius: '14px',
+          border: '1px solid var(--border)',
+          padding: '24px',
+          maxWidth: '720px',
+          margin: '0 auto'
+        }
+      },
+        e('div', {
+          style: {
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            paddingBottom: '14px', marginBottom: '18px',
+            borderBottom: '2px solid var(--cream-2)'
+          }
+        },
+          e('h2', { style: { margin: 0, fontSize: '20px' } }, headerLabel),
+          e('button', {
+            className: 'btn btn-ghost btn-sm',
+            onClick: props.onClose,
+            style: { color: 'var(--slate)' }
+          }, 'Cancel')
+        ),
+        body,
+        e('div', {
+          style: {
+            marginTop: '20px', paddingTop: '14px',
+            borderTop: '2px solid var(--cream-2)',
+            display: 'flex', justifyContent: 'flex-end', gap: '10px'
+          }
+        }, footer.props.children)
+      );
+    }
+
+    return e('div', { className: 'modal-overlay' },
+      e('div', { className: 'modal', onClick: function(ev){ ev.stopPropagation(); } },
+        e('div', { className: 'modal-header' },
+          e('h2', null, 'Youth Certification · ' + headerLabel),
           e('button', { className: 'modal-close', onClick: props.onClose }, '×')
         ),
         e('div', { className: 'modal-body' }, body),
@@ -28828,9 +29364,9 @@
     var setEditPreOpen = editPreOpenTuple[1];
 
     function doDelete(){
-      if (!window.confirm('Delete this WRO record? The signed pre-form and any specialist notes will be permanently removed.')) return;
+      if (!window.confirm('Delete this ' + (isYouthCert(w) ? 'youth certification' : 'WRO') + ' record? The signed pre-form and any specialist notes will be permanently removed.')) return;
       ctx.deleteWRO(w.id);
-      ctx.toast('WRO deleted', 'error');
+      ctx.toast(isYouthCert(w) ? 'Youth certification deleted' : 'WRO deleted', 'error');
       props.onBack();
     }
     function convert(){ props.onConvert(w); }
@@ -28850,7 +29386,10 @@
       window.location.href = 'mailto:' + encodeURIComponent(w.email) + '?subject=' + subject + '&body=' + body;
     }
 
+    var isYouth = isYouthCert(w);
     var converted = w.convertedToClientId ? ctx.clients.find(function(c){ return c.id === w.convertedToClientId; }) : null;
+    var areaLabels = (w.areasOfInterest || []).slice();
+    if (w.areasOfInterestOther) areaLabels.push('Other: ' + w.areasOfInterestOther);
     var goalLabels = (w.goals || []).slice();
     if (w.goalsOther) goalLabels.push('Other: ' + w.goalsOther);
     var experienceLabel = (function(){
@@ -28874,7 +29413,7 @@
       e('div', { className: 'header' },
         e('div', null,
           e('h1', null, w.participantName),
-          e('div', { className: 'sub' }, 'WRO Request · ' + formatDate(w.date) + ' · ' + w.location)
+          e('div', { className: 'sub' }, (isYouth ? 'Youth Certification Request' : 'WRO Request') + ' · ' + formatDate(w.date) + ' · ' + w.location)
         ),
         e('div', { className: 'header-right' },
           e('button', { className: 'logout-btn', onClick: function(){ ctx.setSession(null); } }, 'Sign out')
@@ -28935,8 +29474,15 @@
             e('tbody', null,
               infoRow('Name', w.participantName),
               w.dob && infoRow('Date of birth', formatDate(w.dob)),
+              w.gender && infoRow('Gender', w.gender),
               w.phone && infoRow('Phone', w.phone),
               w.email && infoRow('Email', w.email),
+              /* v4.56: guardian block. Youth-only in practice, but rendered off
+                 the fields rather than off isYouth so a back-filled adult row
+                 carrying a guardian still shows one. */
+              w.guardianName && infoRow('Parent / guardian', w.guardianName),
+              w.guardianDob && infoRow('Guardian date of birth', formatDate(w.guardianDob)),
+              w.emergencyContact && infoRow('Emergency contact', w.emergencyContact),
               w.bestContactMethod && infoRow('Best contact method', w.bestContactMethod),
               w.bestContactTime && infoRow('Best time to reach', w.bestContactTime),
               infoRow('Request submitted', formatDate(w.date)),
@@ -28945,8 +29491,27 @@
           )
         ),
 
-        /* Section 2: Goals + experience */
-        e('div', { className: 'audit-section' },
+        /* v4.56: scheduling block. Asked on both member-facing forms. */
+        (w.preferredDay || w.preferredTimes || areaLabels.length || w.interestedInPT) && e('div', { className: 'audit-section' },
+          e('h3', null, isYouth ? 'Certification Scheduling' : 'Orientation Scheduling'),
+          e('table', { className: 'audit-table', style: { marginTop: '8px' } },
+            e('tbody', null,
+              w.preferredDay && infoRow('Preferred day', w.preferredDay),
+              w.preferredTimes && infoRow('Preferred times', w.preferredTimes),
+              w.interestedInPT && infoRow('Interested in personal training', w.interestedInPT)
+            )
+          ),
+          areaLabels.length > 0 && e('div', { style: { marginTop: '10px' } },
+            e('div', { style: { fontSize: '12px', color: 'var(--slate)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, 'Areas of interest'),
+            e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '6px' } },
+              areaLabels.map(function(a, i){ return e('span', { key: i, className: 'chip' }, a); })
+            )
+          )
+        ),
+
+        /* Section 2: Goals + experience. Not asked on the youth form, so the
+           block is suppressed rather than rendering "None selected" and a dash. */
+        !isYouth && e('div', { className: 'audit-section' },
           e('h3', null, 'Goals & Experience'),
           e('div', { style: { marginBottom: '10px' } },
             e('div', { style: { fontSize: '12px', color: 'var(--slate)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' } }, 'Goals'),
@@ -29021,8 +29586,10 @@
 
         /* Member signature on the pre-form */
         e('div', { className: 'audit-section' },
-          e('h3', null, 'Member Signature'),
-          e('div', { className: 'section-sub' }, 'Signed at time of pre-orientation request submission.'),
+          e('h3', null, isYouth ? 'Parent / Guardian Signature' : 'Member Signature'),
+          e('div', { className: 'section-sub' }, isYouth
+            ? 'Signed by the parent or guardian at time of certification request submission.'
+            : 'Signed at time of pre-orientation request submission.'),
           w.signature
             ? e('img', { src: w.signature, style: { maxWidth: '100%', background: '#fff', border: '1px solid var(--border)', borderRadius: '8px' } })
             : e('div', { style: { color: 'var(--slate)', fontStyle: 'italic' } }, 'No signature on record.')
@@ -29050,6 +29617,12 @@
     var newOpen = newOpenTuple[0];
     var setNewOpen = newOpenTuple[1];
 
+    /* v4.56: staff-initiated youth certification intake (front desk taking it
+       over the phone or on paper). The member-facing path is the kiosk tile. */
+    var newYouthOpenTuple = useState(false);
+    var newYouthOpen = newYouthOpenTuple[0];
+    var setNewYouthOpen = newYouthOpenTuple[1];
+
     var detailTuple = useState(null);
     var detailId = detailTuple[0];
     var setDetailId = detailTuple[1];
@@ -29058,7 +29631,7 @@
     var convertWRO = convertTuple[0];
     var setConvertWRO = convertTuple[1];
 
-    var filterTuple = useState('all'); // all | pending_post | flags | converted
+    var filterTuple = useState('all'); // all | available | in_progress | flags | youth | converted
     var filter = filterTuple[0];
     var setFilter = filterTuple[1];
 
@@ -29079,8 +29652,17 @@
     });
 
     var nowMonth = todayStr().substring(0, 7);
-    var thisMonth = sorted.filter(function(w){ return (w.date || '').substring(0,7) === nowMonth; });
-    var converted = sorted.filter(function(w){ return w.convertedToClientId; });
+    /* v4.56: youth certifications share this table but are NOT weight room
+       orientations. They stay out of the WRO volume and conversion numbers -
+       "10+ WROs a month" and "15% convert to PT" are adult-funnel targets, and
+       folding certifications in would silently inflate one and dilute the
+       other. They DO stay in the work queue counts (available / in progress),
+       because a certification waiting for pickup is real team work. */
+    var youthCerts = sorted.filter(isYouthCert);
+    var adultWROs = sorted.filter(function(w){ return !isYouthCert(w); });
+    var thisMonth = adultWROs.filter(function(w){ return (w.date || '').substring(0,7) === nowMonth; });
+    var youthThisMonth = youthCerts.filter(function(w){ return (w.date || '').substring(0,7) === nowMonth; });
+    var converted = adultWROs.filter(function(w){ return w.convertedToClientId; });
     /* v2.5: split pending into available (no claim) and in-progress (claimed) */
     var pendingPost = sorted.filter(function(w){ return !w.postCompleted; });
     var availableNow = pendingPost.filter(function(w){ return wroState(w) === 'pending'; });
@@ -29088,13 +29670,14 @@
     var withFlags = sorted.filter(function(w){
       return (w.healthFlags && w.healthFlags.trim()) || w.prefersInPersonHealthDiscussion;
     });
-    var convertRate = sorted.length ? Math.round((converted.length / sorted.length) * 100) : 0;
+    var convertRate = adultWROs.length ? Math.round((converted.length / adultWROs.length) * 100) : 0;
 
     var filtered = sorted;
     if (filter === 'pending_post') filtered = pendingPost;
     else if (filter === 'available') filtered = availableNow;
     else if (filter === 'in_progress') filtered = inProgressNow;
     else if (filter === 'flags') filtered = withFlags;
+    else if (filter === 'youth') filtered = youthCerts;
     else if (filter === 'converted') filtered = converted;
 
     /* v2: CSV backup export. Browser localStorage can be wiped by an iOS
@@ -29104,7 +29687,9 @@
     function exportWROsCSV(){
       var rows = [];
       rows.push([
-        'WRO ID','Date','Participant','Phone','Email','DOB','Location','Source',
+        'WRO ID','Form Type','Date','Participant','Phone','Email','DOB','Gender',
+        'Guardian Name','Guardian DOB','Emergency Contact','Location','Source',
+        'Preferred Day','Preferred Times','Interested In PT','Areas Of Interest',
         'Goals','Experience Level','Tour Interests','Health Flags',
         'Prefers In-Person Health Discussion','Follow-up Interests',
         'Pre Signature Captured','Post Completed','Specialist',
@@ -29112,15 +29697,29 @@
         'Post Notes','Converted To PT Client','Created At'
       ].join(','));
       sorted.forEach(function(w){
+        /* v4.56: 'Other' free text is appended into the areas column rather
+           than given its own, so the column lines up 1:1 with the MS Forms
+           export where "Other" is an inline option value. */
+        var areas = (w.areasOfInterest || []).slice();
+        if (w.areasOfInterestOther) areas.push('Other: ' + w.areasOfInterestOther);
         rows.push([
           csvEscape(w.id),
+          csvEscape(isYouthCert(w) ? 'Youth certification' : 'Weight room orientation'),
           csvEscape(w.date || ''),
           csvEscape(w.participantName || ''),
           csvEscape(w.phone || ''),
           csvEscape(w.email || ''),
           csvEscape(w.dob || ''),
+          csvEscape(w.gender || ''),
+          csvEscape(w.guardianName || ''),
+          csvEscape(w.guardianDob || ''),
+          csvEscape(w.emergencyContact || ''),
           csvEscape(w.location || ''),
           csvEscape(w.source || 'kiosk'),
+          csvEscape(w.preferredDay || ''),
+          csvEscape(w.preferredTimes || ''),
+          csvEscape(w.interestedInPT || ''),
+          csvEscape(areas.join('; ')),
           csvEscape(w.goals || ''),
           csvEscape(w.experienceLevel || ''),
           csvEscape((w.tourInterests || []).join('; ')),
@@ -29153,10 +29752,15 @@
       e('div', { className: 'section-head' },
         e('div', null,
           e('h2', null, 'Weight Room Orientations'),
-          e('div', { className: 'meta' }, sorted.length + ' total \u00b7 ' + thisMonth.length + ' this month \u00b7 ' + convertRate + '% converted to PT')
+          e('div', { className: 'meta' },
+            adultWROs.length + ' orientations \u00b7 ' + thisMonth.length + ' this month \u00b7 ' +
+            convertRate + '% converted to PT' +
+            (youthCerts.length ? (' \u00b7 ' + youthCerts.length + ' youth certifications') : '')
+          )
         ),
         e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-          e('button', { className: 'btn btn-ghost btn-sm', onClick: exportWROsCSV, title: 'Backup all WROs to CSV' }, '\u2193 Backup CSV'),
+          e('button', { className: 'btn btn-ghost btn-sm', onClick: exportWROsCSV, title: 'Backup all WROs and youth certifications to CSV' }, '\u2193 Backup CSV'),
+          e('button', { className: 'btn btn-outline', onClick: function(){ setNewYouthOpen(true); } }, '+ Youth Certification'),
           e('button', { className: 'btn btn-gold', onClick: function(){ setNewOpen(true); } }, '+ New WRO Request')
         )
       ),
@@ -29180,7 +29784,12 @@
           e('div', { className: 'label' }, 'With Health Flags'),
           e('div', { className: 'value' }, withFlags.length)
         ),
-        e('div', { className: 'stat-card' + (sorted.length >= 5 && convertRate < 15 ? ' warn' : '') },
+        e('div', { className: 'stat-card' },
+          e('div', { className: 'label' }, 'Youth Certifications'),
+          e('div', { className: 'value' }, youthThisMonth.length),
+          e('div', { style: { fontSize: '11px', color: 'var(--slate)', marginTop: '2px' } }, 'This month \u00b7 ' + youthCerts.length + ' all time')
+        ),
+        e('div', { className: 'stat-card' + (adultWROs.length >= 5 && convertRate < 15 ? ' warn' : '') },
           e('div', { className: 'label' }, 'Conversion Rate'),
           e('div', { className: 'value' }, convertRate + '%'),
           e('div', { style: { fontSize: '11px', color: 'var(--slate)', marginTop: '2px' } }, 'Goal: 15%+')
@@ -29188,6 +29797,7 @@
       ),
       e('div', { className: 'audit-subtabs' },
         e('button', { className: filter === 'all' ? 'active' : '', onClick: function(){ setFilter('all'); } }, 'All (' + sorted.length + ')'),
+        e('button', { className: filter === 'youth' ? 'active' : '', onClick: function(){ setFilter('youth'); } }, 'Youth (' + youthCerts.length + ')'),
         e('button', { className: filter === 'available' ? 'active' : '', onClick: function(){ setFilter('available'); } }, 'Available (' + availableNow.length + ')'),
         e('button', { className: filter === 'in_progress' ? 'active' : '', onClick: function(){ setFilter('in_progress'); } }, 'In Progress (' + inProgressNow.length + ')'),
         e('button', { className: filter === 'flags' ? 'active' : '', onClick: function(){ setFilter('flags'); } }, 'Health Flags (' + withFlags.length + ')'),
@@ -29196,12 +29806,13 @@
       filtered.length === 0
         ? e('div', { className: 'empty' },
             e('div', { className: 'icon' }, '\ud83d\udccb'),
-            e('h3', null, sorted.length === 0 ? 'No WROs yet' : 'No WROs match this filter'),
+            e('h3', null, sorted.length === 0 ? 'No WROs yet' : (filter === 'youth' ? 'No youth certifications yet' : 'No WROs match this filter')),
             e('div', null, sorted.length === 0 ? 'Tap "+ New WRO Request" to capture a member\'s pre-orientation intake.' : 'Try a different filter.')
           )
         : filtered.map(function(w){
             var alreadyConverted = !!w.convertedToClientId;
             var hasFlags = (w.healthFlags && w.healthFlags.trim()) || w.prefersInPersonHealthDiscussion;
+            var isYouth = isYouthCert(w);
             var state = wroState(w);
             var leftBorder = alreadyConverted ? 'var(--green)' :
                              hasFlags ? 'var(--amber)' :
@@ -29217,6 +29828,7 @@
               e('div', null,
                 e('div', { style: { fontWeight: 700 } },
                   w.participantName,
+                  isYouth && e('span', { style: { fontSize: '11px', background: 'var(--teal)', color: '#fff', padding: '2px 8px', borderRadius: '999px', marginLeft: '8px', fontWeight: 700, letterSpacing: '0.04em' } }, 'YOUTH'),
                   alreadyConverted && e('span', { style: { fontSize: '11px', background: 'var(--green-bg)', color: 'var(--green)', padding: '2px 8px', borderRadius: '999px', marginLeft: '8px', fontWeight: 700 } }, '\u2713 PT'),
                   hasFlags && e('span', { style: { fontSize: '11px', background: 'var(--amber-bg)', color: 'var(--amber)', padding: '2px 8px', borderRadius: '999px', marginLeft: '6px', fontWeight: 700 } }, '\u26a0 FLAGS'),
                   /* v2.5: state badge */
@@ -29255,6 +29867,15 @@
           ctx.upsertWRO(w);
           setNewOpen(false);
           ctx.toast('WRO request saved ✓');
+        }
+      }),
+      newYouthOpen && e(NewYouthCertModal, {
+        ctx: ctx,
+        onClose: function(){ setNewYouthOpen(false); },
+        onSave: function(w){
+          ctx.upsertWRO(w);
+          setNewYouthOpen(false);
+          ctx.toast('Youth certification request saved ✓');
         }
       }),
       convertWRO && e(NewClientModal, {
@@ -31703,7 +32324,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.55 */
+/* v4.56 */
 </script>
 </body>
 </html>

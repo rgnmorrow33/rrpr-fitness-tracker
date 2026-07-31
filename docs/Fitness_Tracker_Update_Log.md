@@ -1,6 +1,6 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.54** (trainer class writes go out as UPDATE, not upsert, July 30, 2026)
+**Live version: v4.56** (youth weight room certification, and both member-facing forms matched to the July 2026 Microsoft Forms questionnaires, July 31, 2026)
 
 Newest version at the top; append new sections above the older ones.
 
@@ -11,11 +11,33 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - July 30, 2026
+## Current standing - July 31, 2026
 
-- **Live version: v4.54**, tagged. Tracker file: 31,691 lines / 1.4 MB.
+- **Live version: v4.56**, tagged. Tracker file: 32,330 lines / 1.4 MB.
   `node --check` on the embedded JS: PASS. Netlify prod
   (pardfitnesstracker2) deploys on push to main.
+- **v4.56 added youth weight room certification as a third member-facing
+  kiosk tile** and brought both member-facing forms in line with the live
+  Microsoft Forms questionnaires. Certifications ride the `wros` table behind
+  a `formType` discriminator in the existing `data` jsonb - no migration, no
+  new RLS policy, and the kiosk token's existing INSERT grant on `wros`
+  (migration 0006) already covers it. They stay out of the WRO volume and
+  conversion numbers and get their own filter, stat card and CSV columns.
+- **The adult WRO form is now a superset of the online questionnaire**, not a
+  different set of questions. It gained emergency contact (required),
+  preferred day, preferred times and areas of interest, and went 6 steps to 7.
+  The goals / experience / health-flag / follow-up steps that feed the
+  specialist prep and the conversion metrics were kept rather than traded away.
+- **The Fitness Pre-Assessment packet needed no shape change.** All 38
+  questions on the July 2026 PDF still map onto intake-v2 field-for-field with
+  no additions, removals or type changes, so `intake_paperwork` and the Power
+  Automate template are untouched. The only drift was render order, corrected.
+- **v4.55 shipped on July 30 but was never logged.** Entry reconstructed below
+  from commit `e2ca0a8` on July 31. The header of this file read v4.54 for a
+  day while the tracker footer read v4.55 - exactly the drift
+  `CANONICAL-SOURCES.md` exists to stop, and the v4.55 pre-push version-match
+  check does not catch it because it compares `APP_VERSION` to the file footer,
+  not to this log.
 - **v4.54 made every class write a trainer can reach actually land.** `classes`
   is the only table in the database whose RLS is asymmetric - INSERT admin-only,
   UPDATE open to any signed-in trainer - and every class write in the client was
@@ -123,6 +145,203 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.56 - July 31, 2026
+
+Youth weight room certification shipped as its own member-facing kiosk tile, and
+both member-facing forms were reconciled against the live Microsoft Forms
+questionnaires they are supposed to mirror.
+
+### Trigger
+
+Reagan supplied July 2026 PDFs of all three live forms - CMRC Weight Room
+Orientation Questionnaire, CMRC Youth Weight Room Certification Questionnaire,
+and the Fitness Pre-Assessment Packet - and asked for a certification button
+plus the other two brought into line.
+
+### Goal
+
+A guardian can request a youth certification at the iPad without a member of the
+team standing there. What the iPad asks matches what the online form asks. The
+WRO conversion metrics do not silently absorb certification volume.
+
+### File version
+
+v4.56 - 32,330 lines, 1.4 MB (`RoundRock_Fitness_Tracker.html`)
+
+### Where the certification data lives
+
+On `wros`, tagged `formType: 'youth_cert'` inside the existing `data` jsonb.
+
+This was the load-bearing call. The alternative was a `youth_certifications`
+table, which costs a 0010 migration, a fresh anon/kiosk INSERT grant, a new
+storage entity plus translator, and a new list view - and ships nothing until
+the SQL has been run by hand. The JSONB split on `wros` exists precisely so the
+form can evolve without migrations (SCHEMA.md), and a certification is
+structurally a WRO: same claim and release lifecycle, same specialist post-form,
+same trainer hour credit, same convert-to-client path. The only real differences
+are which questions were asked and who signed.
+
+Consequences, all deliberate:
+
+- **Zero SQL.** No migration, no policy change, no PostgREST schema reload.
+- **Rows written before v4.56 carry no `formType`.** `isYouthCert()` treats
+  absent as adult, so every existing row keeps its current meaning.
+- **Youth rows are excluded from the WRO funnel numbers.** "10+ orientations a
+  month" and "15% convert to PT" are adult-funnel targets. Folding
+  certifications in would inflate one and dilute the other. They are still
+  counted in the work queue (Available / In Progress), because a certification
+  waiting for pickup is real team work.
+
+### What shipped
+
+**Fix A - youth certification form and kiosk tile.** `NewYouthCertModal`, four
+steps: the youth (name, DOB, gender, phone), the guardian (name, DOB, emergency
+contact), scheduling and interests (preferred day, preferred times, personal
+training interest, areas of interest), guardian signature. `KioskYouthCertView`
+mirrors `KioskWROView` including the 8-second auto-return. Third gold tile on the
+Login screen. Front desk can also open it from the WRO list via
+`+ Youth Certification` for a phone or paper intake.
+
+**Guardian signature is required**, which the online form does not capture. The
+adult WRO already requires a member signature and this is a minor, so the
+attestation is worth the ten seconds. Stored as `signedBy: 'guardian'`.
+
+**A new session role, `kiosk_youth`.** It mints the SAME 30-minute INSERT-only
+token as `kiosk_wro` through `sign_in_kiosk`; the role only decides which form
+renders. Four places tested `session.role === 'kiosk_wro'` to mean "a member is
+standing at the iPad" - the idle-timeout exemption, `ctxCurrentUserName`, the
+top-level view switch, and the session-shape doc comment. Three now go through a
+new `isKioskRole()` helper rather than a second string compare, because the
+next kiosk flow would have quietly broken all of them again. Note this is
+distinct from the existing `isKioskSession()`, which reads the TOKEN's role tier.
+
+**Fix B - the adult WRO form is now a superset of the online questionnaire.**
+Added emergency contact (required, matching the online form), preferred day,
+preferred times, and areas of interest using the online form's exact option
+vocabulary (Circuit Weights / Cardio Equipment / Free Weights / The Yard /
+Other) so responses from both channels bucket together in the CSV. Scheduling
+became its own step; the form went 6 steps to 7.
+
+The online form's flat "interested in a personal trainer?" yes/no is **derived**
+from the existing richer follow-up-interests question rather than asked twice.
+Both channels land the same `interestedInPT` key.
+
+Nothing was removed. Goals, experience level, tour interests, health flags and
+follow-up interests all stay, so the Health Flags stat card and filter, the
+specialist prep, and the conversion analytics keep their inputs.
+
+**Fix C - surfacing.** YOUTH pill on list rows, own filter tab, own stat card
+(this month plus all time), youth-aware WRO detail (guardian block, scheduling
+block, guardian signature label, and the Goals and Experience block suppressed
+rather than rendering "None selected" against questions that were never asked).
+CSV export gained Form Type, Gender, Guardian Name, Guardian DOB, Emergency
+Contact, Preferred Day, Preferred Times, Interested In PT and Areas Of Interest.
+The time card names a completed certification "Youth Certification" instead of
+calling every credited orientation a weight room orientation.
+
+**Fix D - Fitness Pre-Assessment packet.** Re-verified field-for-field against
+the July 2026 PDF. All 38 questions still map onto intake-v2 with no additions,
+removals or type changes, so `INTAKE_SECTIONS`, `clients.intake_paperwork` and
+`intake-import/forms_body_template.json` are all unchanged. The only drift was
+render order: the live form asks obstacles (Q25) before why-now (Q26) and
+past-attempts (Q27). Reordered so a trainer reads the packet in the order the
+member answered it. Display order only; no stored data affected.
+
+### Refactor taken on purpose
+
+`checkboxRow` was a closure inside `NewWROModal` and the youth form needed the
+identical control. Hoisted to `intakeCheckboxRow` rather than copied, so the two
+member-facing forms cannot drift apart visually. Rendering is byte-identical.
+`PostWROModal`'s `checkRow` is a different, denser control for the
+specialist-facing form and was deliberately left alone.
+
+### Verification
+
+`node --check` on the embedded JS: PASS. Both flows walked end to end in
+headless Chromium against a local copy with every Supabase call intercepted, so
+nothing touched production:
+
+- Login renders three member tiles.
+- Youth flow: all four steps render, Continue is correctly gated at each one
+  (empty form, missing guardian fields, missing day/time), the Other free-text
+  reveals on selecting Other, Submit is disabled until the guardian signs and
+  enables once they do.
+- Adult WRO flow: all seven steps render in order, step 1 stays blocked with
+  name and phone filled until emergency contact is supplied, step 5 stays
+  blocked until day and times are set.
+- Zero page errors. Only console output was the expected realtime WebSocket
+  failure from the intercepted network.
+
+Not yet verified on a real iPad. Selisa's pass is still the gate on a decision
+record.
+
+### Deferred, found on the way
+
+- **A stray `/* ===== PIN MODAL ===== */` section marker** sits directly above
+  the KIOSK WRO INTAKE block, so that comment now appears twice with the first
+  one labelling the wrong section. Pre-existing, cosmetic, not touched.
+- **The kiosk form panel is not centered.** `login-wrap` carries the navy
+  background and the inline `maxWidth: '720px'` shrinks the whole wrapper, so
+  the navy panel hugs the left edge with page cream to the right of it. Affects
+  the adult WRO kiosk view identically and predates this version.
+- **`emailParticipant` in `WRODetail` is hardcoded to orientation wording.**
+  Unreachable for youth rows today (the youth form collects no email, so the
+  Email Member button never renders), which is why it was left alone. It
+  becomes wrong the moment youth email is collected.
+- **The youth form asks no health questions at all.** That matches the online
+  form, and a guardian at a kiosk is the wrong moment for a health-history
+  interview, but it means a youth row can never raise a health flag before the
+  session. Screening happens in person and lands through the specialist form.
+
+---
+
+## v4.55 - July 30, 2026
+
+**Reconstructed on July 31, 2026 from commit `e2ca0a8`.** This version shipped
+and was tagged without a log entry, leaving this file's header claiming v4.54
+for a day. The content below is taken from the commit message and diff, not from
+memory.
+
+No version string existed anywhere in the app UI, and a trainer running the app
+from an iOS home screen tile had no way to force a fresh fetch - no address bar,
+no reload button, no pull-to-refresh on a div-scrolled standalone view. Reported
+by Victor Leak on July 30 after a device kept exhibiting old behavior post-deploy.
+
+### What shipped
+
+**Fix A.** `APP_VERSION` declared next to `STORAGE_MODE`, the other top-level
+config constant, and mirrored onto `window.APP_VERSION`.
+
+**Fix B/D.** The Login screen (the `session === null` pre-auth gate) shows small
+low-contrast text reading "v4.55 · tap to refresh" at the bottom. The version
+text IS the refresh control, no separate button. Login is shared with the Book a
+Consultation flow, but that flow runs behind the standard `.modal-overlay`,
+which blocks interaction with what is behind it, and a member tap costs only a
+reload with no session and nothing in flight. WRO kiosk sessions never mount
+Login at all. On tap: `location.replace(location.pathname + '?v=' + Date.now())`.
+`replace` so the stale URL does not accumulate in history, `pathname` rather
+than `href` so repeated taps replace `?v=` instead of stacking it, and no
+`location.reload(true)` since that flag has been a no-op in WebKit and Chromium
+for years.
+
+**Fix C.** `pre-push-syntax-check.js` gained a version-match assertion:
+`APP_VERSION` must equal the trailing `/* vX.Y */` footer comment. Blocks on
+mismatch AND on failure to extract either value, since a check that cannot read
+the file has not passed. It deliberately does not share the syntax check's
+fail-open behavior on internal errors.
+
+Docs: `DEVICE_CHECKS.md` gained Check 6 for Selisa, marked UNVERIFIED since it is
+only provable on a real iOS home screen tile. `CLAUDE.md` notes the pre-push gate
+is now three checks.
+
+`node --check`: PASS. Diff +19/-1 tracker, +47/-2 hook.
+
+**Note for future versions:** this check compares `APP_VERSION` to the file
+footer. It cannot catch a missing log entry, which is what actually went wrong
+here.
 
 ---
 
