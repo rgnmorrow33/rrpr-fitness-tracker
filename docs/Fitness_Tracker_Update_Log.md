@@ -5,6 +5,13 @@ handler, undo instead of a confirm on attendance/session deletes, four
 ghost-deletes made real, hard-delete rename). Merged to `main` and deployed
 July 31, 2026. Tag `v4.57` points at `356a6b7` on `main`.
 
+**In flight: v4.58** (in-app build indicator + refresh control in the admin
+TopBar). Committed as `8c89a93` on branch `claude/in-app-refresh-control-uinljh`,
+pending PR merge to `main`. NOT yet deployed and NOT yet tagged - the canonical
+`v4.58` tag lands on the merge commit on `main`, not on the branch, so it points
+at what actually goes live (the v4.57 branch-tag drift is why). Update this
+header to "Live" when it merges. See the v4.58 section below.
+
 Newest version at the top; append new sections above the older ones.
 
 > Canonical running log, version-controlled in `docs/`. It previously lived only
@@ -14,8 +21,14 @@ Newest version at the top; append new sections above the older ones.
 
 ---
 
-## Current standing - July 31, 2026
+## Current standing - August 5, 2026
 
+- **v4.58 is committed and on a branch, not yet live.** In-app build indicator +
+  refresh control in the admin/lead TopBar, commit `8c89a93` on branch
+  `claude/in-app-refresh-control-uinljh`, PR open. `node --check`: PASS.
+  Version-match gate: PASS. Deploy and the canonical `main` tag both wait on the
+  PR merge - do not tag the branch (see the v4.58 header note). The reload is
+  UNVERIFIED until a home-screen tile runs DEVICE_CHECKS Check 12.
 - **Live version: v4.57**, tagged `356a6b7` on `main` and deployed. Netlify
   prod (pardfitnesstracker2) deploys on push to `main`. `node --check` on the
   embedded JS: PASS, verified independently of the pre-push hook because v4.57
@@ -172,7 +185,7 @@ Newest version at the top; append new sections above the older ones.
 - **Two clients sit 3 days from the dormant threshold.** Michael Hilliard and
   Jayasaree Kumar both resolve to 2026-04-03, which is daysSince 117 against a
   >120 cutoff. They tip on August 1 with no code change at all.
-- **All device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, 6 before v4.57 and 11 after, including
+- **All device checks in `docs/DEVICE_CHECKS.md` are still OPEN**, 6 before v4.57, 11 after v4.57, and 12 after v4.58 (Check 12 covers the in-app reload, which only settles on a home-screen tile), including
   P1 (does live sync between two iPads still work after the v4.46 RLS flip). That
   has now been open for 15 days. Code review cannot close any of them.
 - **Rotate the anon key** pasted into chat on July 10. Hygiene, not urgency, now
@@ -189,6 +202,102 @@ Newest version at the top; append new sections above the older ones.
   model. `rls_identity_test.py` supersedes it. Retire the old one.
 - **`.gitignore` still does not cover the untracked files that trip
   `release:tag`.** `--allow-dirty` remains the workaround. Open since v4.45.
+
+---
+
+## v4.58 - August 5, 2026
+
+The login screen has shown the build version as a tap-to-refresh control since
+v4.55 - it is how Victor Leak got off a stale bundle on July 31. v4.58 puts the
+same control inside the app, next to the notification bell in the admin/lead
+TopBar, so a signed-in admin no longer has to sign out to force a fresh bundle
+on a home-screen tile. Unlike the login screen, the in-app tap asks for
+confirmation first, because there is in-progress work behind it (attendance
+batches, FMS screens, half-filled client and lead forms) that a bare reload
+would throw away.
+
+### Trigger
+
+Victor asked by text on August 5, during beta, for the login screen's refresh
+control to be reachable after signing in. On a home-screen tile in standalone
+mode there is no address bar and no pull-to-refresh, so the only way to it was
+to sign out - the exact friction the control exists to remove.
+
+### Goal
+
+Make "what version am I on" answerable, and "get me a fresh bundle" reachable,
+from inside the app without signing out - while protecting a trainer mid-entry
+from a one-tap reload that discards their work.
+
+### Changes
+
+**App**
+
+- **Fix A - build indicator in TopBar.** A small, low-contrast `APP_VERSION`
+  chip renders in `topbar-right`, just before the notification bell. Same visual
+  weight as the login control (11px, `var(--slate-soft)`). Findable and
+  ignorable. Useful on its own: it makes the running version answerable at any
+  moment without signing out.
+- **Fix B - the chip is the refresh control, with a confirm.** Tapping it fires
+  `window.confirm('Reload the app? Anything you have typed and not saved will be
+  lost.')`; on confirm it runs the same call the login screen uses,
+  `window.location.replace(window.location.pathname + '?v=' + Date.now())`.
+  Query-string cache-bust, not `location.reload()` - reload does not defeat an
+  iOS standalone-mode cache. Reuses the plain `window.confirm` pattern already
+  used across the file, not a new modal component.
+- **Fix C - kiosk exclusion: not needed, none added.** TopBar renders only from
+  `AdminDashboard`. The kiosk surfaces (`KioskWROView`, `KioskYouthCertView`)
+  use `.header` and never render TopBar, so this control cannot strand a
+  30-minute kiosk token. Confirmed there is exactly one `e(TopBar` call site.
+- Bumped `APP_VERSION` and the trailing `/* v4.58 */` footer together, per the
+  pre-push version-match gate.
+
+### Test results
+
+- `node --check` on the extracted inline script: PASS (1 block).
+- Pre-push version-match gate: `APP_VERSION` v4.58 equals the footer v4.58. PASS.
+- Reload behavior: NOT verified, and reported as such. It is only real on an
+  actual iOS home-screen tile in standalone mode, which is Selisa's and Reagan's
+  lane - code review and a desktop browser cannot settle it. `DEVICE_CHECKS.md`
+  Check 12 added to close it on device.
+
+### File version
+
+v4.58 - 32,617 lines, 1.5 MB (`RoundRock_Fitness_Tracker.html`)
+
+### Deferred
+
+- **The control does not reach trainers.** TopBar renders only for admin and
+  lead-in-cockpit. Trainers run `TrainerView`, whose chrome is `TrainerBar` (its
+  own sign-out and bell), not TopBar - so the trainer surface has no version
+  chip and no in-app refresh yet. Victor, a trainer, would not see it. A
+  `TrainerBar` twin next to `signOutNode`, reusing the same confirm and `?v=`
+  bust, is the real fix. Logged to BACKLOG; deliberately out of scope for v4.58
+  (additive only, landed at +18/-2 in the tracker).
+- **Three separate post-login headers** (TopBar, TrainerBar, and the standalone
+  detail `.header` blocks) each carry their own chrome; the version chip lives
+  in one of them. Consolidating them would let one control cover every signed-in
+  surface. Logged to BACKLOG.
+
+### iPad test checklist for v4.58
+
+- Sign in as an admin (Front Desk is fine). A faint `v4.58` shows in the top bar
+  near the bell.
+- Tap it, then Cancel: nothing happens, you stay put.
+- Tap it, then confirm: the app reloads and you are still signed in (not kicked
+  to the PIN screen), on the same screen.
+- Run it from the home-screen tile, not Safari - the cache-bust only does its
+  job in standalone mode. If a confirmed reload lands you back on an old build,
+  the bust failed.
+- Do not go looking for it on a trainer sign-in; it is admin/lead only for now.
+
+### The lesson
+
+The control shipped where the chrome already existed (TopBar), not where the
+asking user lives (the trainer surface). Cheap to add, but it means the person
+who requested it cannot yet use it from his own sign-in. When a feature is
+motivated by one user, confirm the surface they actually see is in scope before
+calling it done.
 
 ---
 
