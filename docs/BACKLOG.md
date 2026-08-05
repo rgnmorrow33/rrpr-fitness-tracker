@@ -114,6 +114,26 @@ version and its own decision rather than a convenient sweep.
 
 ## Deferred cleanup pile
 
+### From v4.58 (in-app refresh)
+
+- **The in-app refresh does not reach its motivating user.** v4.58 put the
+  build indicator / refresh control in `TopBar`, which renders only from
+  `AdminDashboard` (one `e(TopBar` call site). Trainers run `TrainerView`,
+  whose chrome is `TrainerBar` (its own `signOutNode` / `notificationsNode` /
+  `viewModeToggleNode`), not `TopBar` - so admins and leads-in-cockpit get the
+  control and trainers do not. Victor, the trainer whose stale-bundle text
+  prompted the feature, would not see it. The real fix is a twin control in
+  `TrainerBar` next to `signOutNode`, reusing the same confirm + `?v=` bust.
+  Deliberately out of scope for v4.58 (the spec named the cut line). Kiosk is
+  correctly excluded - `KioskWROView` / `KioskYouthCertView` use `.header` and
+  should not offer a reload that could strand a 30-minute token.
+- **Three separate header implementations.** `AdminDashboard`'s `TopBar`,
+  `TrainerView`'s `TrainerBar`, and the standalone detail `.header` blocks
+  (ClientDetail / ClassDetail) each carry their own logout button and chrome.
+  The v4.58 version chip lives in only one of them. Consolidating the post-login
+  header would let one control cover every signed-in surface. Larger refactor,
+  ties to the single-file decomposition item above.
+
 ### From v4.57 (delete hardening)
 
 - **`deleteCancellation`, `removeSubAssignment`, `deleteContact` are dead

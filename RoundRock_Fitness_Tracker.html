@@ -2131,7 +2131,7 @@
      and the pre-push hook's version-match guard. Must equal the trailing
      version comment at the bottom of this script - the hook fails the
      push if they disagree. */
-  var APP_VERSION = 'v4.57';
+  var APP_VERSION = 'v4.58';
   if (typeof window !== 'undefined') { window.APP_VERSION = APP_VERSION; }
   var SUPABASE_URL = 'https://ofezaezijafglyjmisgz.supabase.co';
   var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9mZXphZXppamFmZ2x5am1pc2d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MzQyODEsImV4cCI6MjA5MzMxMDI4MX0.CpbBGnkqISfeA_hsRF3A9mmG2d5bOOV5czDs3Dh45Kc';
@@ -25034,6 +25034,22 @@
             })
           )
         ),
+        /* v4.58 Fix A/B: build indicator in the admin TopBar, doubling as the
+           manual refresh - same control as the login screen's "tap to refresh"
+           (see Login), same query-string cache-bust. Confirm first: unlike the
+           login screen there IS in-progress work here (attendance batches, FMS
+           screens, new client/lead forms) a bare reload would discard. Visual
+           weight matches the login control (11px, var(--slate-soft)). The
+           trainer surface (TrainerBar) has no TopBar and does not get this yet
+           - tracked in BACKLOG. */
+        e('div', {
+          style: { fontSize: '11px', color: 'var(--slate-soft)', cursor: 'pointer', whiteSpace: 'nowrap' },
+          title: 'Reload the app',
+          onClick: function(){
+            if (!window.confirm('Reload the app? Anything you have typed and not saved will be lost.')) return;
+            window.location.replace(window.location.pathname + '?v=' + Date.now());
+          }
+        }, APP_VERSION),
         bell,
         actions || null
       )
@@ -32595,7 +32611,7 @@
   var root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(e(App));
 })();
-/* v4.57 */
+/* v4.58 */
 </script>
 </body>
 </html>

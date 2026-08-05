@@ -9,9 +9,10 @@ point-in-time snapshot and may be stale. Check here.
 - Site: https://pardfitnesstracker2.netlify.app
 - Owner of this list: Reagan
 - Runs the checks: Selisa
-- Last updated: 2026-07-31 (v4.57). **11 checks, all OPEN.** Checks 1 to 6 have
+- Last updated: 2026-08-05 (v4.58). **12 checks, all OPEN.** Checks 1 to 6 have
   been open since v4.46 to v4.55. Checks 7 to 11 are new with v4.57 and cover
-  deleting things. Run them as one sweep rather than in two visits.
+  deleting things. Run them as one sweep rather than in two visits. Check 12 is
+  new with v4.58 (in-app refresh) and must be run on a home-screen tile.
 - **Checks 7 to 11 need v4.57 to be live first.** As of 2026-07-31 production is
   still on v4.56. Reagan will confirm when it merges.
 
@@ -303,6 +304,44 @@ which is how you end up with clients pointing at a team member who no longer
 exists.
 
 Cancel out either way. Do not remove a real team member for this check.
+
+---
+
+## Check 12 - In-app build indicator and refresh (v4.58)
+
+**Status: OPEN. The reload half is UNVERIFIED - code review cannot close it.
+It is only real on a home-screen tile in standalone mode, which is why this
+check exists.**
+
+v4.55 put the version number and "tap to refresh" on the login screen. v4.58
+adds the same thing inside the app for admins and leads, next to the
+notification bell in the top bar, so you no longer have to sign out to get off
+a stale bundle. Unlike the login screen, it asks you to confirm first, because
+there may be half-typed work on screen.
+
+**Run this on a real iPad, from the home-screen tile (not Safari with an
+address bar). The cache-bust only does its job in standalone mode.**
+
+1. Sign in as an **admin** (Front Desk is fine).
+2. Look at the top bar, near the bell. There should be a small, faint **v4.58**.
+
+**PASS:** It reads v4.58. **FAIL:** It is missing, or shows an older number.
+
+3. Tap the **v4.58**. A prompt should ask "Reload the app? Anything you have
+   typed and not saved will be lost." Tap **Cancel**.
+
+**PASS:** Nothing happens - you stay exactly where you were. **FAIL:** It
+reloads anyway.
+
+4. Tap **v4.58** again and this time confirm the reload.
+
+**PASS:** The app reloads and you are **still signed in** (it does not send you
+back to the PIN screen), and you land on the same screen. **FAIL:** It kicks
+you back to sign-in, or does not reload at all.
+
+Note: trainers do not have this yet - it lives only in the admin/lead top bar
+for now. Do not go looking for it on a trainer sign-in.
+
 ---
 
 ## Completed
