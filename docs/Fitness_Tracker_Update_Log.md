@@ -1,16 +1,16 @@
 # Round Rock Parks and Recreation - Fitness Tracker Update Log
 
-**Live version: v4.57** (delete hardening: permission guards on every delete
-handler, undo instead of a confirm on attendance/session deletes, four
-ghost-deletes made real, hard-delete rename). Merged to `main` and deployed
-July 31, 2026. Tag `v4.57` points at `356a6b7` on `main`.
+**Live version: v4.58** (in-app build indicator + refresh control in the admin
+TopBar - the login screen's tap-to-refresh, now reachable after sign-in for
+admins and leads). Merged to `main` via PR #2 and deployed August 5, 2026. Tag
+`v4.58` marks the v4.58 code commit `8c89a93` on `main`. Deployed does NOT mean
+verified: the reload itself is still UNVERIFIED until DEVICE_CHECKS Check 12 is
+run on a home-screen tile.
 
-**In flight: v4.58** (in-app build indicator + refresh control in the admin
-TopBar). Committed as `8c89a93` on branch `claude/in-app-refresh-control-uinljh`,
-pending PR merge to `main`. NOT yet deployed and NOT yet tagged - the canonical
-`v4.58` tag lands on the merge commit on `main`, not on the branch, so it points
-at what actually goes live (the v4.57 branch-tag drift is why). Update this
-header to "Live" when it merges. See the v4.58 section below.
+**Previous: v4.57** (delete hardening: permission guards on every delete
+handler, undo instead of a confirm on attendance/session deletes, four
+ghost-deletes made real, hard-delete rename). Deployed July 31, 2026. Tag
+`v4.57` points at `356a6b7` on `main`.
 
 Newest version at the top; append new sections above the older ones.
 
@@ -23,13 +23,13 @@ Newest version at the top; append new sections above the older ones.
 
 ## Current standing - August 5, 2026
 
-- **v4.58 is committed and on a branch, not yet live.** In-app build indicator +
-  refresh control in the admin/lead TopBar, commit `8c89a93` on branch
-  `claude/in-app-refresh-control-uinljh`, PR open. `node --check`: PASS.
-  Version-match gate: PASS. Deploy and the canonical `main` tag both wait on the
-  PR merge - do not tag the branch (see the v4.58 header note). The reload is
-  UNVERIFIED until a home-screen tile runs DEVICE_CHECKS Check 12.
-- **Live version: v4.57**, tagged `356a6b7` on `main` and deployed. Netlify
+- **Live version: v4.58**, merged to `main` via PR #2 and deployed August 5,
+  2026. In-app build indicator + refresh control in the admin/lead TopBar,
+  v4.58 code commit `8c89a93`, tag `v4.58`. `node --check`: PASS. Version-match
+  gate: PASS. The reload is still UNVERIFIED until a home-screen tile runs
+  DEVICE_CHECKS Check 12 - deployed is not verified. Trainers do not have the
+  control yet (TrainerBar twin queued; spec drafted, BACKLOG).
+- **v4.57 is the prior version**, tagged `356a6b7` on `main` and deployed. Netlify
   prod (pardfitnesstracker2) deploys on push to `main`. `node --check` on the
   embedded JS: PASS, verified independently of the pre-push hook because v4.57
   was built in an isolated worktree and `BACKLOG.md` documents that the
