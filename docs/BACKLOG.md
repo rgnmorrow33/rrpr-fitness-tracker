@@ -133,6 +133,17 @@ version and its own decision rather than a convenient sweep.
   The v4.58 version chip lives in only one of them. Consolidating the post-login
   header would let one control cover every signed-in surface. Larger refactor,
   ties to the single-file decomposition item above.
+- **Extract a shared `VersionRefreshChip` helper - the version/refresh control
+  is now near-duplicated inline.** It lives on the login screen (~`Login`) and
+  in the admin `TopBar` (v4.58), and the queued TrainerBar twin will make it
+  three copies of the same `window.confirm` + `window.location.replace('?v=' +
+  Date.now())` element, differing only by color token (`var(--slate-soft)` on
+  the light surfaces, `var(--side-text)` on the navy trainer-bar). A single
+  `VersionRefreshChip({ colorToken })` component collapses them to one. Held as
+  its own version, NOT folded into the TrainerBar twin: the extract edits the
+  login and TopBar call sites, so it should land after both chips exist and are
+  device-verified, not while v4.58 is still an unmerged PR. Spec drafted at
+  `docs/specs/versionrefreshchip-dedup.md`.
 
 ### From v4.57 (delete hardening)
 
